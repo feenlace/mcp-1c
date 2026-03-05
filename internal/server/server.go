@@ -16,5 +16,7 @@ func New(onecClient *onec.Client) *mcp.Server {
 		nil,
 	)
 	s.AddTool(tools.MetadataTool(), tools.NewMetadataHandler(onecClient))
+	s.AddTool(tools.ObjectStructureTool(), tools.NewObjectStructureHandler(onecClient))
+	tools.RegisterBSLHelp(s)
 	return s
 }
