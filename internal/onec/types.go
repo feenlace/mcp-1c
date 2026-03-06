@@ -96,3 +96,14 @@ type FormHandler struct {
 	Event   string `json:"Событие"`
 	Handler string `json:"Обработчик"`
 }
+
+// ValidateQueryRequest is the request body for the validate-query endpoint.
+type ValidateQueryRequest struct {
+	Query string `json:"query"`
+}
+
+// ValidateQueryResult is the response from the validate-query endpoint.
+type ValidateQueryResult struct {
+	Valid  bool     `json:"valid"`
+	Errors []string `json:"errors,omitempty"`
+}
