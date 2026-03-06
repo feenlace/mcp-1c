@@ -15,9 +15,12 @@ import (
 // mock1CHandler simulates the 1C HTTP service endpoints.
 func mock1CHandler() http.Handler {
 	metadata := map[string][]string{
-		"Справочники": {"Контрагенты", "Номенклатура"},
-		"Документы":   {"РеализацияТоваровУслуг"},
-		"Регистры":    {"КурсыВалют"},
+		"Справочники":         {"Контрагенты", "Номенклатура"},
+		"Документы":           {"РеализацияТоваровУслуг"},
+		"РегистрыСведений":    {"КурсыВалют"},
+		"РегистрыНакопления":  {"ТоварыНаСкладах"},
+		"РегистрыБухгалтерии": {},
+		"ОбщиеМодули":         {"ОбщийМодуль1"},
 	}
 
 	type attribute struct {
@@ -33,7 +36,9 @@ func mock1CHandler() http.Handler {
 		Name            string           `json:"Имя"`
 		Synonym         string           `json:"Синоним"`
 		Attributes      []attribute      `json:"Реквизиты"`
-		TabularSections []tabularSection `json:"ТабличныеЧасти"`
+		TabularSections []tabularSection `json:"ТабличныеЧасти,omitempty"`
+		Dimensions      []attribute      `json:"Измерения,omitempty"`
+		Resources       []attribute      `json:"Ресурсы,omitempty"`
 	}
 
 	objects := map[string]objectMeta{
@@ -54,13 +59,34 @@ func mock1CHandler() http.Handler {
 				},
 			},
 		},
+		"AccumulationRegister/ТоварыНаСкладах": {
+			Name:    "ТоварыНаСкладах",
+			Synonym: "Товары на складах",
+			Dimensions: []attribute{
+				{Name: "Номенклатура", Synonym: "Номенклатура", Type: "СправочникСсылка.Номенклатура"},
+				{Name: "Склад", Synonym: "Склад", Type: "СправочникСсылка.Склады"},
+			},
+			Resources: []attribute{
+				{Name: "Количество", Synonym: "Количество", Type: "Число"},
+			},
+		},
+	}
+
+	modules := map[string]map[string]string{
+		"Document/РеализацияТоваровУслуг/ObjectModule": {
+			"Имя":       "РеализацияТоваровУслуг",
+			"ВидМодуля": "ObjectModule",
+			"Код":       "Процедура ОбработкаПроведения(Отказ)\n\t// Код проведения\nКонецПроцедуры",
+		},
 	}
 
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("/metadata", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(metadata)
 	})
+
 	mux.HandleFunc("/object/", func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(r.URL.Path, "/object/")
 		obj, ok := objects[key]
@@ -72,6 +98,33 @@ func mock1CHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(obj)
 	})
+
+	mux.HandleFunc("/module/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/module/")
+		mod, ok := modules[path]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"Module not found"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(mod)
+	})
+
+	mux.HandleFunc("/query", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(map[string]any{
+			"columns":   []string{"Наименование"},
+			"rows":      [][]any{{"ООО Ромашка"}, {"ИП Иванов"}},
+			"total":     2,
+			"truncated": false,
+		})
+	})
+
 	return mux
 }
 
@@ -120,10 +173,15 @@ func TestIntegration_ListTools(t *testing.T) {
 		toolNames[tool.Name] = true
 	}
 
-	for _, want := range []string{"get_metadata_tree", "get_object_structure", "bsl_syntax_help"} {
+	expected := []string{"get_metadata_tree", "get_object_structure", "bsl_syntax_help", "get_module_code", "execute_query"}
+	for _, want := range expected {
 		if !toolNames[want] {
 			t.Errorf("expected tool %q in list, got: %v", want, toolNames)
 		}
+	}
+
+	if len(result.Tools) != len(expected) {
+		t.Errorf("expected %d tools, got %d: %v", len(expected), len(result.Tools), toolNames)
 	}
 }
 
@@ -142,7 +200,11 @@ func TestIntegration_GetMetadataTree(t *testing.T) {
 	}
 
 	text := result.Content[0].(*mcp.TextContent).Text
-	for _, want := range []string{"Контрагенты", "Номенклатура", "РеализацияТоваровУслуг", "КурсыВалют"} {
+	for _, want := range []string{
+		"Контрагенты", "Номенклатура", "РеализацияТоваровУслуг",
+		"КурсыВалют", "ТоварыНаСкладах", "ОбщийМодуль1",
+		"Регистры сведений", "Регистры накопления", "Общие модули",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in response, got:\n%s", want, text)
 		}
@@ -175,6 +237,32 @@ func TestIntegration_GetObjectStructure(t *testing.T) {
 	}
 }
 
+func TestIntegration_GetObjectStructure_Register(t *testing.T) {
+	session, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "get_object_structure",
+		Arguments: map[string]any{
+			"object_type": "AccumulationRegister",
+			"object_name": "ТоварыНаСкладах",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected non-empty content")
+	}
+
+	text := result.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"ТоварыНаСкладах", "Измерения", "Номенклатура", "Склад", "Ресурсы", "Количество"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q in response, got:\n%s", want, text)
+		}
+	}
+}
+
 func TestIntegration_GetObjectStructure_NotFound(t *testing.T) {
 	session, cleanup := setupIntegration(t)
 	defer cleanup()
@@ -191,6 +279,59 @@ func TestIntegration_GetObjectStructure_NotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("expected 404 in error, got: %v", err)
+	}
+}
+
+func TestIntegration_GetModuleCode(t *testing.T) {
+	session, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "get_module_code",
+		Arguments: map[string]any{
+			"object_type": "Document",
+			"object_name": "РеализацияТоваровУслуг",
+			"module_kind": "ObjectModule",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected non-empty content")
+	}
+
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "ОбработкаПроведения") {
+		t.Errorf("expected ОбработкаПроведения in response, got:\n%s", text)
+	}
+	if !strings.Contains(text, "КонецПроцедуры") {
+		t.Errorf("expected КонецПроцедуры in response, got:\n%s", text)
+	}
+}
+
+func TestIntegration_ExecuteQuery(t *testing.T) {
+	session, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "execute_query",
+		Arguments: map[string]any{
+			"query": "ВЫБРАТЬ Наименование ИЗ Справочник.Контрагенты",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected non-empty content")
+	}
+
+	text := result.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Наименование", "ООО Ромашка", "ИП Иванов"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q in response, got:\n%s", want, text)
+		}
 	}
 }
 
