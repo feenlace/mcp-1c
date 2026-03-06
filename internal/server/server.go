@@ -12,7 +12,7 @@ func New(onecClient *onec.Client) *mcp.Server {
 	s := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "mcp-1c",
-			Version: "0.2.0",
+			Version: "0.3.0-beta",
 		},
 		nil,
 	)
