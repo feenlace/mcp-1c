@@ -48,3 +48,22 @@ type QueryResult struct {
 type VersionInfo struct {
 	Version string `json:"version"`
 }
+
+// SearchRequest is the request body for the search endpoint.
+type SearchRequest struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit"`
+}
+
+// SearchResult is the response from the search endpoint.
+type SearchResult struct {
+	Matches []SearchMatch `json:"matches"`
+	Total   int           `json:"total"`
+}
+
+// SearchMatch represents a single search result.
+type SearchMatch struct {
+	Module  string `json:"module"`
+	Line    int    `json:"line"`
+	Context string `json:"context"`
+}
