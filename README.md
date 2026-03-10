@@ -97,12 +97,14 @@ go test ./... -v -race                    # тесты
 go run ./cmd/mock-1c -port 9191           # mock-сервер 1С
 ```
 
-### Сборка расширения из исходников
+### Расширение 1С
 
-Исходники расширения — в `extension/src/`. Для пересборки .cfe:
+Исходники расширения хранятся в `extension/src/` в формате XML-выгрузки конфигурации. При `--install` они встроены в бинарник через `go:embed` и загружаются напрямую через DESIGNER `/LoadConfigFromFiles`. Готовый .cfe файл для сборки не требуется.
+
+Для ручной установки без CLI можно собрать .cfe из исходников:
 
 ```bash
-# macOS
+# macOS / Linux (требуется установленная платформа 1С)
 ./scripts/build-extension.sh ~/Documents/InfoBase
 
 # Windows
