@@ -196,13 +196,13 @@ func setupIntegration(t *testing.T) (*mcp.ClientSession, func()) {
 	mkBSL(t, dumpDir, "Documents/ПоступлениеТоваровУслуг/Ext/ObjectModule.bsl",
 		"Процедура ОбработкаПроведения(Отказ)\n\t// Проведение поступления\nКонецПроцедуры\n")
 
-	dumpSearcher, err := dump.NewSearcher(dumpDir)
+	dumpIndex, err := dump.NewIndex(dumpDir)
 	if err != nil {
 		mock.Close()
-		t.Fatalf("NewSearcher: %v", err)
+		t.Fatalf("NewIndex: %v", err)
 	}
 
-	srv := New("test", client, dumpSearcher)
+	srv := New("test", client, dumpIndex)
 
 	ctx := context.Background()
 	ct, st := mcp.NewInMemoryTransports()
@@ -222,6 +222,7 @@ func setupIntegration(t *testing.T) (*mcp.ClientSession, func()) {
 
 	cleanup := func() {
 		session.Close()
+		dumpIndex.Close()
 		mock.Close()
 	}
 	return session, cleanup

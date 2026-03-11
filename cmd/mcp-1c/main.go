@@ -64,18 +64,19 @@ func main() {
 
 	checkExtensionVersion(client)
 
-	var dumpSearcher *dump.Searcher
+	var dumpIndex *dump.Index
 	if *dumpDir != "" {
 		var err error
-		dumpSearcher, err = dump.NewSearcher(*dumpDir)
+		dumpIndex, err = dump.NewIndex(*dumpDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "loading dump from %s: %v\n", *dumpDir, err)
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "Loaded %d BSL modules from dump\n", dumpSearcher.ModuleCount())
+		defer dumpIndex.Close()
+		fmt.Fprintf(os.Stderr, "Indexed %d BSL modules from dump\n", dumpIndex.ModuleCount())
 	}
 
-	s := server.New(version, client, dumpSearcher)
+	s := server.New(version, client, dumpIndex)
 
 	if err := s.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		fmt.Fprintf(os.Stderr, "mcp-1c error: %v\n", err)

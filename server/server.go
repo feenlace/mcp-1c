@@ -9,8 +9,8 @@ import (
 )
 
 // New creates an MCP server with basic configuration and registers tools.
-// If dumpSearcher is provided, the search_code tool will be registered.
-func New(version string, onecClient *onec.Client, dumpSearcher *dump.Searcher) *mcp.Server {
+// If dumpIndex is provided, the search_code tool will be registered.
+func New(version string, onecClient *onec.Client, dumpIndex *dump.Index) *mcp.Server {
 	s := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "mcp-1c",
@@ -21,15 +21,15 @@ func New(version string, onecClient *onec.Client, dumpSearcher *dump.Searcher) *
 	s.AddTool(tools.MetadataTool(), tools.NewMetadataHandler(onecClient))
 	s.AddTool(tools.ObjectStructureTool(), tools.NewObjectStructureHandler(onecClient))
 	s.AddTool(tools.QueryTool(), tools.NewQueryHandler(onecClient))
-	if dumpSearcher != nil {
-		s.AddTool(tools.SearchCodeTool(), tools.NewSearchCodeHandler(dumpSearcher))
+	if dumpIndex != nil {
+		s.AddTool(tools.SearchCodeTool(), tools.NewSearchCodeHandler(dumpIndex))
 	}
 
 	// Pass dump directory to form handler so it can enrich the HTTP response
 	// with data from Form.xml files parsed from the dump.
 	var dumpDir string
-	if dumpSearcher != nil {
-		dumpDir = dumpSearcher.Dir()
+	if dumpIndex != nil {
+		dumpDir = dumpIndex.Dir()
 	}
 	s.AddTool(tools.FormStructureTool(), tools.NewFormStructureHandler(onecClient, dumpDir))
 
