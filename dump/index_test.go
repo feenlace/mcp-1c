@@ -704,6 +704,59 @@ func TestIndex_IndexDoc_Dedup(t *testing.T) {
 	}
 }
 
+func TestIndex_GetContent(t *testing.T) {
+	dir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Номенклатура/Ext/ObjectModule.bsl",
+		"Процедура ПередЗаписью(Отказ)\n\t// проверка\nКонецПроцедуры\n")
+	idx, err := NewIndex(dir, false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	waitReady(t, idx, 30*time.Second)
+
+	content, ok := idx.GetContent("Справочник.Номенклатура.МодульОбъекта")
+	if !ok {
+		t.Fatal("expected GetContent to return ok=true for existing module")
+	}
+	if !strings.Contains(content, "ПередЗаписью") {
+		t.Errorf("expected content to contain 'ПередЗаписью', got %q", content)
+	}
+}
+
+func TestIndex_GetContent_NotReady(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	idx := &Index{
+		dir:           t.TempDir(),
+		alias:         bleve.NewIndexAlias(),
+		contentByName: make(map[string]string),
+		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan struct{}),
+	}
+	defer close(idx.done)
+	_, ok := idx.GetContent("anything")
+	if ok {
+		t.Error("expected GetContent to return ok=false when index is not ready")
+	}
+}
+
+func TestIndex_GetContent_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Тест/Ext/ObjectModule.bsl", "// test\n")
+	idx, err := NewIndex(dir, false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	waitReady(t, idx, 30*time.Second)
+	_, ok := idx.GetContent("Несуществующий.Модуль.МодульОбъекта")
+	if ok {
+		t.Error("expected GetContent to return ok=false for non-existent module")
+	}
+}
+
 func TestIndex_DeleteDoc_RemovesFromNames(t *testing.T) {
 	dir := t.TempDir()
 	mkBSLFile(t, dir, "Catalogs/Тест/Ext/ObjectModule.bsl", "Процедура Удаляемая()\nКонецПроцедуры\n")

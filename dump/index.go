@@ -160,6 +160,18 @@ func (idx *Index) Ready() bool {
 	return idx.ready.Load()
 }
 
+// GetContent returns the BSL source code for the given module ID.
+// Returns empty string and false if the module is not found or index is not ready.
+func (idx *Index) GetContent(id string) (string, bool) {
+	if !idx.ready.Load() {
+		return "", false
+	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	content, ok := idx.contentByName[id]
+	return content, ok
+}
+
 // loadedModule holds the result of reading a single .bsl file.
 type loadedModule struct {
 	name    string
