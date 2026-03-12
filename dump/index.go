@@ -1,6 +1,7 @@
 package dump
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -8,11 +9,13 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/blevesearch/bleve/v2"
-	_ "github.com/blevesearch/bleve/v2/index/scorch"
+	scorchIndex "github.com/blevesearch/bleve/v2/index/scorch"
 	"github.com/blevesearch/bleve/v2/search/query"
 )
 
@@ -26,14 +29,8 @@ type Match struct {
 
 // extractContext returns lines around the given index with a context window.
 func extractContext(lines []string, idx, window int) string {
-	start := idx - window
-	if start < 0 {
-		start = 0
-	}
-	end := idx + window + 1
-	if end > len(lines) {
-		end = len(lines)
-	}
+	start := max(idx-window, 0)
+	end := min(idx+window+1, len(lines))
 	return strings.Join(lines[start:end], "\n")
 }
 
@@ -98,14 +95,7 @@ func bslPathToModuleName(relPath string) string {
 
 	// Fix: CommonModules use "Модуль", not "МодульФормы" for Module.bsl.
 	if category == "CommonModules" && fileName == "Module.bsl" {
-		inForms := false
-		for _, p := range parts {
-			if p == "Forms" {
-				inForms = true
-				break
-			}
-		}
-		if !inForms {
+		if !slices.Contains(parts, "Forms") {
 			suffix = "Модуль"
 		}
 	}
@@ -153,9 +143,21 @@ func (bslDocument) Type() string { return "module" }
 // Index provides full-text search over BSL modules using Bleve.
 type Index struct {
 	dir           string
-	index         bleve.Index
-	names         []string            // module names in load order
-	contentByName map[string]string   // single source of truth
+	alias         bleve.IndexAlias
+	shards        []bleve.Index
+	names         []string
+	contentByName map[string]string
+	ready         atomic.Bool
+	mu            sync.RWMutex
+	buildErr      atomic.Pointer[error]
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
+}
+
+// Ready reports whether the index has finished building and is available for search.
+func (idx *Index) Ready() bool {
+	return idx.ready.Load()
 }
 
 // loadedModule holds the result of reading a single .bsl file.
@@ -169,10 +171,16 @@ type loadedModule struct {
 // If reindex is true, any existing cache is discarded and rebuilt from scratch.
 // Progress is printed to stderr.
 func NewIndex(dir string, reindex bool) (*Index, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	idx := &Index{
 		dir:           dir,
+		alias:         bleve.NewIndexAlias(),
 		contentByName: make(map[string]string),
+		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan struct{}),
 	}
+	defer close(idx.done)
 
 	// Determine cache path; fall back to in-memory if it fails.
 	cpath, cacheErr := cachePath(dir)
@@ -181,13 +189,16 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 	// Try to open existing cache.
 	if useCache && !reindex {
 		if blevIdx, err := bleve.Open(cpath); err == nil {
-			idx.index = blevIdx
+			idx.shards = []bleve.Index{blevIdx}
+			idx.alias.Add(blevIdx)
 
 			// Load contentByName from .bsl files (needed for regex/exact mode).
 			if err := idx.loadBSLFiles(dir); err != nil {
 				blevIdx.Close()
+				cancel()
 				return nil, err
 			}
+			idx.ready.Store(true)
 			fmt.Fprintf(os.Stderr, "Opened cached index for %d BSL modules\n", len(idx.names))
 			return idx, nil
 		}
@@ -197,6 +208,7 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 
 	// Load all .bsl file contents.
 	if err := idx.loadBSLFiles(dir); err != nil {
+		cancel()
 		return nil, err
 	}
 
@@ -210,36 +222,113 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 		}
 	}
 
-	// Build Bleve index with batch operations.
-	// Reduce GC pressure during bulk indexing.
-	oldGC := debug.SetGCPercent(200)
+	// Disable GC entirely during bulk indexing; restore after.
+	oldGC := debug.SetGCPercent(-1)
 	defer debug.SetGCPercent(oldGC)
 
-	bslMapping := buildBSLMapping()
-	blevIdx, err := bleve.NewUsing(indexPath, bslMapping, "scorch", "scorch", nil)
+	// Use NewUsing+batch approach (benchmarked faster than NewBuilder for our workload).
+	// NewBuilder is available via buildIndexBuilder() for experimentation.
+	blevIdx, err := buildIndexBatch(indexPath, idx.names, idx.contentByName)
 	if err != nil {
-		return nil, fmt.Errorf("creating bleve index: %w", err)
+		cancel()
+		return nil, err
 	}
-	idx.index = blevIdx
+	idx.shards = []bleve.Index{blevIdx}
+	idx.alias.Add(blevIdx)
+	idx.ready.Store(true)
 
-	total := len(idx.names)
-	const batchSize = 5000
+	return idx, nil
+}
+
+// buildIndexBuilder creates a Bleve index using the offline builder (bleve.NewBuilder).
+// This approach bypasses Scorch persister/merger goroutines and is faster for bulk loading.
+// The builder writes segments to disk, merges them, and produces a ready-to-open index.
+// After builder.Close(), the index is opened with bleve.Open().
+// Requires a non-empty indexPath (cannot work in-memory).
+func buildIndexBuilder(indexPath string, names []string, contentByName map[string]string) (bleve.Index, error) {
+	bslMapping := buildBSLMapping()
+
+	builder, err := bleve.NewBuilder(indexPath, bslMapping, map[string]any{
+		"forceSegmentType":    "zap",
+		"forceSegmentVersion": 16,
+		"batchSize":           5000,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating bleve builder: %w", err)
+	}
+
+	total := len(names)
 
 	// Adaptive progress step: ~5% increments, minimum 100.
-	step := total / 20
-	if step < 100 {
-		step = 100
-	}
+	step := max(total/20, 100)
 
-	batch := blevIdx.NewBatch()
-	for i, name := range idx.names {
+	for i, name := range names {
 		parts := parseModuleName(name)
 
 		doc := bslDocument{
 			Name:     parts.name,
 			Category: parts.category,
 			Module:   parts.module,
-			Content:  idx.contentByName[name],
+			Content:  contentByName[name],
+		}
+
+		if err := builder.Index(name, doc); err != nil {
+			builder.Close()
+			return nil, fmt.Errorf("builder indexing doc %q: %w", name, err)
+		}
+
+		if (i+1)%step == 0 || i+1 == total {
+			fmt.Fprintf(os.Stderr, "\rIndexing BSL modules... %d/%d", i+1, total)
+		}
+	}
+	if total > 0 {
+		fmt.Fprintln(os.Stderr, " done")
+	}
+
+	if err := builder.Close(); err != nil {
+		return nil, fmt.Errorf("closing bleve builder: %w", err)
+	}
+
+	blevIdx, err := bleve.Open(indexPath)
+	if err != nil {
+		return nil, fmt.Errorf("opening built index: %w", err)
+	}
+
+	return blevIdx, nil
+}
+
+// buildIndexBatch creates a Bleve index using NewUsing + manual batch operations.
+// This is the fallback for in-memory builds where NewBuilder cannot be used.
+func buildIndexBatch(indexPath string, names []string, contentByName map[string]string) (bleve.Index, error) {
+	// Increase persister nap time to favour in-memory segment merging with unsafe_batch.
+	oldNap := scorchIndex.DefaultPersisterNapTimeMSec
+	scorchIndex.DefaultPersisterNapTimeMSec = 500
+	defer func() { scorchIndex.DefaultPersisterNapTimeMSec = oldNap }()
+
+	bslMapping := buildBSLMapping()
+
+	blevIdx, err := bleve.NewUsing(indexPath, bslMapping, "scorch", "scorch", map[string]any{
+		"unsafe_batch": true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating bleve index: %w", err)
+	}
+
+	total := len(names)
+	const batchSize = 5000
+
+	// Adaptive progress step: ~5% increments, minimum 100.
+	step := max(total/20, 100)
+
+	batch := blevIdx.NewBatch()
+	for i, name := range names {
+		parts := parseModuleName(name)
+
+		doc := bslDocument{
+			Name:     parts.name,
+			Category: parts.category,
+			Module:   parts.module,
+			Content:  contentByName[name],
 		}
 
 		batch.Index(name, doc)
@@ -252,7 +341,6 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 			batch = blevIdx.NewBatch()
 		}
 
-		// Print adaptive progress.
 		if (i+1)%step == 0 || i+1 == total {
 			fmt.Fprintf(os.Stderr, "\rIndexing BSL modules... %d/%d", i+1, total)
 		}
@@ -261,7 +349,7 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 		fmt.Fprintln(os.Stderr, " done")
 	}
 
-	return idx, nil
+	return blevIdx, nil
 }
 
 // loadBSLFiles walks the dump directory and reads all .bsl files in parallel,
@@ -350,6 +438,13 @@ func parseModuleName(fullName string) moduleNameParts {
 
 // Search finds matches in indexed BSL modules. Dispatches by mode.
 func (idx *Index) Search(params SearchParams) ([]Match, int, error) {
+	if !idx.ready.Load() {
+		if errPtr := idx.buildErr.Load(); errPtr != nil {
+			return nil, 0, fmt.Errorf("index build failed: %w", *errPtr)
+		}
+		return nil, 0, fmt.Errorf("search index is building, please retry")
+	}
+
 	if params.Mode == "" {
 		params.Mode = SearchModeSmart
 	}
@@ -406,10 +501,13 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, int, error) {
 	}
 
 	req := bleve.NewSearchRequestOptions(q, params.Limit, 0, false)
-	result, err := idx.index.Search(req)
+	result, err := idx.alias.Search(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("bleve search: %w", err)
 	}
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 
 	var matches []Match
 	for _, hit := range result.Hits {
@@ -459,6 +557,9 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 		return nil, 0, err
 	}
 
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
 	var matches []Match
 	total := 0
 
@@ -505,7 +606,7 @@ func (idx *Index) filterModules(category, moduleType string) ([]string, error) {
 
 	q := bleve.NewConjunctionQuery(queries...)
 	req := bleve.NewSearchRequestOptions(q, len(idx.names), 0, false)
-	result, err := idx.index.Search(req)
+	result, err := idx.alias.Search(req)
 	if err != nil {
 		return nil, fmt.Errorf("bleve filter: %w", err)
 	}
@@ -529,7 +630,16 @@ func (idx *Index) Dir() string {
 	return idx.dir
 }
 
-// Close releases the Bleve index resources.
+// Close cancels the background context, waits for any in-progress build to
+// finish, and closes all shard indexes.
 func (idx *Index) Close() error {
-	return idx.index.Close()
+	idx.cancel()
+	<-idx.done
+	var firstErr error
+	for _, shard := range idx.shards {
+		if err := shard.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

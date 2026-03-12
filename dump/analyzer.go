@@ -172,10 +172,13 @@ func buildBSLMapping() *mapping.IndexMappingImpl {
 	// Store=false: we never read these back from Bleve (content served from contentByName).
 	nameField := mapping.NewKeywordFieldMapping()
 	nameField.Store = false
+	nameField.DocValues = false
 	categoryField := mapping.NewKeywordFieldMapping()
 	categoryField.Store = false
+	categoryField.DocValues = false
 	moduleField := mapping.NewKeywordFieldMapping()
 	moduleField.Store = false
+	moduleField.DocValues = false
 
 	// Full-text content field with BSL analyzer.
 	// Store=false: full text served from contentByName, not from Bleve stored fields.

@@ -1,10 +1,13 @@
 package dump
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/blevesearch/bleve/v2"
 )
 
 // mkBSLFile creates a .bsl file at the given relative path under base.
@@ -400,5 +403,39 @@ func TestIndex_SearchDefaultMode(t *testing.T) {
 	}
 	if len(matches) == 0 {
 		t.Error("expected at least 1 match with default (smart) mode")
+	}
+}
+
+func TestIndex_Ready(t *testing.T) {
+	dir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Тест/Ext/ObjectModule.bsl", "// test\n")
+	idx, err := NewIndex(dir, false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	if !idx.Ready() {
+		t.Error("expected Ready() == true after blocking NewIndex")
+	}
+}
+
+func TestIndex_SearchWhileBuilding(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	idx := &Index{
+		dir:           t.TempDir(),
+		alias:         bleve.NewIndexAlias(),
+		contentByName: make(map[string]string),
+		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan struct{}),
+	}
+	defer close(idx.done)
+	_, _, err := idx.Search(SearchParams{Query: "test", Mode: SearchModeSmart, Limit: 50})
+	if err == nil {
+		t.Fatal("expected error when searching while index is building")
+	}
+	if !strings.Contains(err.Error(), "building") {
+		t.Errorf("expected 'building' in error message, got: %v", err)
 	}
 }
