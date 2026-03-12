@@ -573,7 +573,8 @@ func (idx *Index) IndexDoc(id string, content string) error {
 
 // DeleteDoc removes a document from the index at runtime.
 // The shard is determined by FNV-1a hash of the id (same routing as IndexDoc).
-// It removes the entry from contentByName but does NOT modify names/ModuleCount.
+// It removes from both contentByName and names, so ModuleCount and all search
+// modes (regex, exact, smart) no longer see the deleted document.
 // Requires Ready() == true.
 func (idx *Index) DeleteDoc(id string) error {
 	if !idx.ready.Load() {
@@ -590,6 +591,12 @@ func (idx *Index) DeleteDoc(id string) error {
 
 	idx.mu.Lock()
 	delete(idx.contentByName, id)
+	for i, n := range idx.names {
+		if n == id {
+			idx.names = append(idx.names[:i], idx.names[i+1:]...)
+			break
+		}
+	}
 	idx.mu.Unlock()
 
 	return nil
