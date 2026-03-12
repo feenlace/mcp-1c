@@ -160,6 +160,12 @@ func (idx *Index) Ready() bool {
 	return idx.ready.Load()
 }
 
+// Done returns a channel that is closed when the background index build completes.
+// This allows waiting for readiness without polling: <-index.Done()
+func (idx *Index) Done() <-chan struct{} {
+	return idx.done
+}
+
 // GetContent returns the BSL source code for the given module ID.
 // Returns empty string and false if the module is not found or index is not ready.
 func (idx *Index) GetContent(id string) (string, bool) {

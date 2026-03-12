@@ -851,6 +851,38 @@ func TestIndex_IndexDocWithMeta_Dedup(t *testing.T) {
 	}
 }
 
+func TestIndex_Done(t *testing.T) {
+	dir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Тест/Ext/ObjectModule.bsl", "// test\n")
+	idx, err := NewIndex(dir, false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	select {
+	case <-idx.Done():
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for Done()")
+	}
+	if !idx.Ready() {
+		t.Error("expected Ready() == true after Done()")
+	}
+}
+
+func TestIndex_Done_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	idx, err := NewIndex(dir, false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	select {
+	case <-idx.Done():
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for Done() on empty dir")
+	}
+}
+
 func TestIndex_DeleteDoc_RemovesFromNames(t *testing.T) {
 	dir := t.TempDir()
 	mkBSLFile(t, dir, "Catalogs/Тест/Ext/ObjectModule.bsl", "Процедура Удаляемая()\nКонецПроцедуры\n")
