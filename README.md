@@ -161,6 +161,12 @@ scripts\build-extension.cmd C:\Users\User\Documents\InfoBase
 | macOS | да | да | нет (ограничение платформы 1С), используйте Windows-VM |
 | Linux | да | да | да (Apache или ibsrv; /HTTPPort недоступен) |
 
+## Публикации
+
+[![Infostart](docs/infostart-logo.svg)](https://infostart.ru/1c/articles/2635907/)
+
+- [Один бинарник, ноль зависимостей: подключаем AI к вашей базе 1С за 10 минут](https://infostart.ru/1c/articles/2635907/)
+
 ## Лицензия
 
 MIT
