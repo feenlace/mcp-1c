@@ -147,6 +147,7 @@ type Index struct {
 	shards        []bleve.Index
 	names         []string
 	contentByName map[string]string
+	pathToDocID   map[string]string // relative path (ToSlash) -> module name
 	ready         atomic.Bool
 	mu            sync.RWMutex
 	buildErr      atomic.Pointer[error]
@@ -181,6 +182,7 @@ func (idx *Index) GetContent(id string) (string, bool) {
 // loadedModule holds the result of reading a single .bsl file.
 type loadedModule struct {
 	name    string
+	relPath string // forward-slash normalized relative path
 	content string
 }
 
@@ -213,13 +215,19 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 				idx.shards = shards
 				idx.alias.Add(shards...)
 
-				// Load contentByName in background (needed for regex/exact mode).
+				// Load contentByName in background, then apply incremental updates.
 				go func() {
 					defer close(idx.done)
 					if err := idx.loadBSLFiles(dir); err != nil {
 						idx.setBuildErr(err)
 						return
 					}
+
+					// Try incremental update via manifest.
+					if err := idx.applyIncrementalUpdate(cpath); err != nil {
+						fmt.Fprintf(os.Stderr, "Incremental update failed: %v\n", err)
+					}
+
 					idx.ready.Store(true)
 					fmt.Fprintf(os.Stderr, "Opened cached index (%d shards) for %d BSL modules\n",
 						len(shards), len(idx.names))
@@ -337,6 +345,12 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 	idx.shards = shards
 	idx.alias.Add(shards...)
 	idx.ready.Store(true)
+
+	// Save manifest for future incremental updates.
+	if cpath != "" && useCache {
+		idx.saveManifest(cpath)
+	}
+
 	fmt.Fprintf(os.Stderr, "Index ready: %d modules in %d shards\n", total, n)
 }
 
@@ -508,8 +522,9 @@ func (idx *Index) loadBSLFiles(dir string) error {
 			if err != nil {
 				return
 			}
+			relSlash := filepath.ToSlash(rel)
 			name := bslPathToModuleName(rel)
-			results <- loadedModule{name: name, content: string(data)}
+			results <- loadedModule{name: name, relPath: relSlash, content: string(data)}
 		}(p)
 	}
 
@@ -519,9 +534,13 @@ func (idx *Index) loadBSLFiles(dir string) error {
 	}()
 
 	// Collect results from workers.
+	if idx.pathToDocID == nil {
+		idx.pathToDocID = make(map[string]string, len(paths))
+	}
 	for m := range results {
 		idx.names = append(idx.names, m.name)
 		idx.contentByName[m.name] = m.content
+		idx.pathToDocID[m.relPath] = m.name
 	}
 
 	return nil
@@ -847,6 +866,109 @@ func (idx *Index) ModuleCount() int {
 // Dir returns the dump directory path.
 func (idx *Index) Dir() string {
 	return idx.dir
+}
+
+// applyIncrementalUpdate loads the manifest, diffs against the filesystem,
+// and applies IndexDoc/DeleteDoc for changed files. If no manifest exists
+// (first run after upgrade), it only saves a new one for future runs.
+func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
+	manifest, err := LoadManifest(cacheDir)
+	if err != nil {
+		return fmt.Errorf("loading manifest: %w", err)
+	}
+
+	if manifest == nil {
+		// No manifest yet (first run with incremental support).
+		// Save one now so next start can diff.
+		idx.saveManifest(cacheDir)
+		return nil
+	}
+
+	diff, err := manifest.Diff(idx.dir)
+	if err != nil {
+		return fmt.Errorf("computing diff: %w", err)
+	}
+
+	if diff.Empty() {
+		return nil
+	}
+
+	// Apply deletions.
+	for _, relPath := range diff.Deleted {
+		entry, ok := manifest.Files[relPath]
+		if !ok {
+			continue
+		}
+		docID := entry.DocID
+		si := shardForID(docID, len(idx.shards))
+		if err := idx.shards[si].Delete(docID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to delete %q from shard: %v\n", docID, err)
+		}
+		idx.mu.Lock()
+		delete(idx.contentByName, docID)
+		delete(idx.pathToDocID, relPath)
+		for i, n := range idx.names {
+			if n == docID {
+				idx.names = append(idx.names[:i], idx.names[i+1:]...)
+				break
+			}
+		}
+		idx.mu.Unlock()
+	}
+
+	// Apply additions and modifications.
+	for _, relPath := range append(diff.Added, diff.Modified...) {
+		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cannot read %q: %v\n", relPath, err)
+			continue
+		}
+		docID := bslPathToModuleName(relPath)
+		content := string(data)
+
+		parts := parseModuleName(docID)
+		doc := bslDocument{
+			Name:     parts.name,
+			Category: parts.category,
+			Module:   parts.module,
+			Content:  content,
+		}
+
+		si := shardForID(docID, len(idx.shards))
+		if err := idx.shards[si].Index(docID, doc); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to index %q in shard: %v\n", docID, err)
+			continue
+		}
+
+		idx.mu.Lock()
+		if _, exists := idx.contentByName[docID]; !exists {
+			idx.names = append(idx.names, docID)
+		}
+		idx.contentByName[docID] = content
+		idx.pathToDocID[relPath] = docID
+		idx.mu.Unlock()
+	}
+
+	fmt.Fprintf(os.Stderr, "Incremental update: +%d added, ~%d modified, -%d deleted\n",
+		len(diff.Added), len(diff.Modified), len(diff.Deleted))
+
+	// Save updated manifest.
+	idx.saveManifest(cacheDir)
+
+	return nil
+}
+
+// saveManifest builds and persists a manifest from current pathToDocID state.
+func (idx *Index) saveManifest(cacheDir string) {
+	manifest, err := buildManifest(idx.dir, idx.pathToDocID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot build manifest: %v\n", err)
+		return
+	}
+	if err := manifest.Save(cacheDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: cannot save manifest: %v\n", err)
+	}
 }
 
 // Close cancels the background context, waits for any in-progress build to
