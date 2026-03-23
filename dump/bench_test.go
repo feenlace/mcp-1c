@@ -31,6 +31,7 @@ func loadTestModules(b *testing.B) ([]string, map[string]string) {
 		dir:           realDumpDir,
 		alias:         bleve.NewIndexAlias(),
 		contentByName: make(map[string]string),
+		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,
 		done:          make(chan struct{}),

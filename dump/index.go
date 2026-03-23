@@ -146,10 +146,12 @@ type Index struct {
 	alias         bleve.IndexAlias
 	shards        []bleve.Index
 	names         []string
-	contentByName map[string]string
+	contentByName map[string]string // cache: docID -> content (lazy populated)
+	pathByName    map[string]string // docID -> absolute file path (always populated)
 	pathToDocID   map[string]string // relative path (ToSlash) -> module name
 	ready         atomic.Bool
 	mu            sync.RWMutex
+	contentMu     sync.RWMutex // protects lazy content loading
 	buildErr      atomic.Pointer[error]
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -169,14 +171,44 @@ func (idx *Index) Done() <-chan struct{} {
 
 // GetContent returns the BSL source code for the given module ID.
 // Returns empty string and false if the module is not found or index is not ready.
+// Content is lazy-loaded from disk on first access and cached for subsequent calls.
 func (idx *Index) GetContent(id string) (string, bool) {
 	if !idx.ready.Load() {
 		return "", false
 	}
+
+	// Fast path: check content cache under read lock.
+	idx.contentMu.RLock()
+	if content, ok := idx.contentByName[id]; ok {
+		idx.contentMu.RUnlock()
+		return content, true
+	}
+	idx.contentMu.RUnlock()
+
+	// Check if we have a path for lazy loading.
 	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-	content, ok := idx.contentByName[id]
-	return content, ok
+	path, hasPath := idx.pathByName[id]
+	idx.mu.RUnlock()
+	if !hasPath {
+		return "", false
+	}
+
+	// Lazy load from disk under write lock.
+	idx.contentMu.Lock()
+	defer idx.contentMu.Unlock()
+
+	// Double-check after acquiring write lock.
+	if content, ok := idx.contentByName[id]; ok {
+		return content, true
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	content := string(data)
+	idx.contentByName[id] = content
+	return content, true
 }
 
 // loadedModule holds the result of reading a single .bsl file.
@@ -195,6 +227,7 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 		dir:           dir,
 		alias:         bleve.NewIndexAlias(),
 		contentByName: make(map[string]string),
+		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,
 		done:          make(chan struct{}),
@@ -215,17 +248,16 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 				idx.shards = shards
 				idx.alias.Add(shards...)
 
-				// Load contentByName in background, then apply incremental updates.
+				// Fast startup: populate index from manifest, then apply incremental diff.
 				go func() {
 					defer close(idx.done)
-					if err := idx.loadBSLFiles(dir); err != nil {
-						idx.setBuildErr(err)
-						return
-					}
-
-					// Try incremental update via manifest.
-					if err := idx.applyIncrementalUpdate(cpath); err != nil {
-						fmt.Fprintf(os.Stderr, "Incremental update failed: %v\n", err)
+					if err := idx.loadFromManifestAndDiff(cpath); err != nil {
+						// Fallback: walk filesystem if manifest-based load fails.
+						fmt.Fprintf(os.Stderr, "Manifest load failed (%v), falling back to walk\n", err)
+						if err := idx.loadBSLPaths(dir); err != nil {
+							idx.setBuildErr(err)
+							return
+						}
 					}
 
 					idx.ready.Store(true)
@@ -541,9 +573,108 @@ func (idx *Index) loadBSLFiles(dir string) error {
 		idx.names = append(idx.names, m.name)
 		idx.contentByName[m.name] = m.content
 		idx.pathToDocID[m.relPath] = m.name
+		// Also store absolute path for lazy-load compatibility.
+		absPath := filepath.Join(dir, filepath.FromSlash(m.relPath))
+		idx.pathByName[m.name] = absPath
 	}
 
 	return nil
+}
+
+// loadBSLPaths walks the dump directory and collects file paths without reading content.
+// Populates idx.names, idx.pathByName, and idx.pathToDocID.
+// This is the fast startup path (~0.5s) used when cached shards exist.
+func (idx *Index) loadBSLPaths(dir string) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".bsl") {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+		name := bslPathToModuleName(rel)
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			absPath = path
+		}
+		idx.names = append(idx.names, name)
+		idx.pathByName[name] = absPath
+		if idx.pathToDocID == nil {
+			idx.pathToDocID = make(map[string]string)
+		}
+		idx.pathToDocID[relSlash] = name
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walking dump directory: %w", err)
+	}
+	return nil
+}
+
+// ensureAllContentLoaded bulk-loads all file content that hasn't been lazily loaded yet.
+// Used by searchLineByLine (regex/exact modes) which need to scan all modules.
+// Reads files in parallel using a worker pool for performance.
+func (idx *Index) ensureAllContentLoaded() {
+	// Collect paths that need loading under read lock.
+	idx.mu.RLock()
+	var toLoad []struct {
+		name string
+		path string
+	}
+	for name, path := range idx.pathByName {
+		idx.contentMu.RLock()
+		_, loaded := idx.contentByName[name]
+		idx.contentMu.RUnlock()
+		if !loaded {
+			toLoad = append(toLoad, struct {
+				name string
+				path string
+			}{name, path})
+		}
+	}
+	idx.mu.RUnlock()
+
+	if len(toLoad) == 0 {
+		return
+	}
+
+	type result struct {
+		name    string
+		content string
+	}
+	results := make(chan result, len(toLoad))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, runtime.NumCPU())
+
+	for _, item := range toLoad {
+		wg.Add(1)
+		go func(name, path string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return
+			}
+			results <- result{name: name, content: string(data)}
+		}(item.name, item.path)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	idx.contentMu.Lock()
+	for r := range results {
+		idx.contentByName[r.name] = r.content
+	}
+	idx.contentMu.Unlock()
 }
 
 // moduleNameParts holds the parsed components of a human-readable module name.
@@ -599,7 +730,9 @@ func (idx *Index) IndexDoc(id string, content string) error {
 	}
 
 	idx.mu.Lock()
-	if _, exists := idx.contentByName[id]; !exists {
+	_, inContent := idx.contentByName[id]
+	_, inPath := idx.pathByName[id]
+	if !inContent && !inPath {
 		idx.names = append(idx.names, id)
 	}
 	idx.contentByName[id] = content
@@ -633,7 +766,9 @@ func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 	}
 
 	idx.mu.Lock()
-	if _, exists := idx.contentByName[id]; !exists {
+	_, inContent := idx.contentByName[id]
+	_, inPath := idx.pathByName[id]
+	if !inContent && !inPath {
 		idx.names = append(idx.names, id)
 	}
 	idx.contentByName[id] = content
@@ -662,6 +797,7 @@ func (idx *Index) DeleteDoc(id string) error {
 
 	idx.mu.Lock()
 	delete(idx.contentByName, id)
+	delete(idx.pathByName, id)
 	for i, n := range idx.names {
 		if n == id {
 			idx.names = append(idx.names[:i], idx.names[i+1:]...)
@@ -743,15 +879,12 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, int, error) {
 		return nil, 0, fmt.Errorf("bleve search: %w", err)
 	}
 
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
 	lower := strings.ToLower(params.Query)
 	tokens := strings.Fields(lower)
 
 	var matches []Match
 	for _, hit := range result.Hits {
-		content, ok := idx.contentByName[hit.ID]
+		content, ok := idx.GetContent(hit.ID)
 		if !ok {
 			continue
 		}
@@ -790,13 +923,16 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, int, error) {
 // searchLineByLine performs line-by-line search using a matcher function.
 // Used for regex and exact modes. Optionally pre-filters modules via Bleve.
 func (idx *Index) searchLineByLine(params SearchParams, match func(line, q string) bool, q string) ([]Match, int, error) {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
-
 	candidates, err := idx.filterModules(params.Category, params.Module)
 	if err != nil {
 		return nil, 0, err
 	}
+
+	// Bulk-load all content for line-by-line scan.
+	idx.ensureAllContentLoaded()
+
+	idx.contentMu.RLock()
+	defer idx.contentMu.RUnlock()
 
 	var matches []Match
 	total := 0
@@ -849,13 +985,124 @@ func (idx *Index) filterModules(category, moduleType string) ([]string, error) {
 		return nil, fmt.Errorf("bleve filter: %w", err)
 	}
 
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
 	names := make([]string, 0, len(result.Hits))
 	for _, hit := range result.Hits {
-		if _, ok := idx.contentByName[hit.ID]; ok {
+		_, inContent := idx.contentByName[hit.ID]
+		_, inPath := idx.pathByName[hit.ID]
+		if inContent || inPath {
 			names = append(names, hit.ID)
 		}
 	}
 	return names, nil
+}
+
+// loadFromManifestAndDiff populates the index from a cached manifest and applies
+// incremental updates using a single filesystem walk (via Diff). This is the fastest
+// startup path: manifest provides names/paths, Diff detects changes.
+// Returns an error if no manifest exists or if Diff fails.
+func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
+	manifest, err := LoadManifest(cacheDir)
+	if err != nil {
+		return fmt.Errorf("loading manifest: %w", err)
+	}
+	if manifest == nil {
+		// No manifest — need full walk to create one.
+		if err := idx.loadBSLPaths(idx.dir); err != nil {
+			return err
+		}
+		idx.saveManifest(cacheDir)
+		return nil
+	}
+
+	// Populate names, pathByName, pathToDocID from manifest (no filesystem I/O).
+	idx.pathToDocID = make(map[string]string, len(manifest.Files))
+	for relPath, entry := range manifest.Files {
+		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
+		idx.names = append(idx.names, entry.DocID)
+		idx.pathByName[entry.DocID] = absPath
+		idx.pathToDocID[relPath] = entry.DocID
+	}
+
+	// Diff walks the filesystem once to detect changes.
+	diff, err := manifest.Diff(idx.dir)
+	if err != nil {
+		return fmt.Errorf("computing diff: %w", err)
+	}
+
+	if diff.Empty() {
+		return nil
+	}
+
+	// Apply deletions.
+	for _, relPath := range diff.Deleted {
+		entry, ok := manifest.Files[relPath]
+		if !ok {
+			continue
+		}
+		docID := entry.DocID
+		si := shardForID(docID, len(idx.shards))
+		if err := idx.shards[si].Delete(docID); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to delete %q from shard: %v\n", docID, err)
+		}
+		delete(idx.contentByName, docID)
+		delete(idx.pathByName, docID)
+		delete(idx.pathToDocID, relPath)
+		for i, n := range idx.names {
+			if n == docID {
+				idx.names = append(idx.names[:i], idx.names[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Apply additions and modifications.
+	for _, relPath := range append(diff.Added, diff.Modified...) {
+		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cannot read %q: %v\n", relPath, err)
+			continue
+		}
+		docID := bslPathToModuleName(relPath)
+		content := string(data)
+
+		parts := parseModuleName(docID)
+		doc := bslDocument{
+			Name:     parts.name,
+			Category: parts.category,
+			Module:   parts.module,
+			Content:  content,
+		}
+
+		si := shardForID(docID, len(idx.shards))
+		if err := idx.shards[si].Index(docID, doc); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to index %q in shard: %v\n", docID, err)
+			continue
+		}
+
+		_, inContent := idx.contentByName[docID]
+		_, inPath := idx.pathByName[docID]
+		if !inContent && !inPath {
+			idx.names = append(idx.names, docID)
+		}
+		// Pre-warm content cache for recently changed files.
+		idx.contentByName[docID] = content
+		idx.pathByName[docID] = absPath
+		idx.pathToDocID[relPath] = docID
+	}
+
+	if len(diff.Added) > 0 || len(diff.Modified) > 0 || len(diff.Deleted) > 0 {
+		fmt.Fprintf(os.Stderr, "Incremental update: +%d added, ~%d modified, -%d deleted\n",
+			len(diff.Added), len(diff.Modified), len(diff.Deleted))
+	}
+
+	// Save updated manifest.
+	idx.saveManifest(cacheDir)
+
+	return nil
 }
 
 // ModuleCount returns the number of indexed BSL modules.
@@ -906,6 +1153,7 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 		}
 		idx.mu.Lock()
 		delete(idx.contentByName, docID)
+		delete(idx.pathByName, docID)
 		delete(idx.pathToDocID, relPath)
 		for i, n := range idx.names {
 			if n == docID {
@@ -942,10 +1190,14 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 		}
 
 		idx.mu.Lock()
-		if _, exists := idx.contentByName[docID]; !exists {
+		_, inContent := idx.contentByName[docID]
+		_, inPath := idx.pathByName[docID]
+		if !inContent && !inPath {
 			idx.names = append(idx.names, docID)
 		}
+		// Pre-warm content cache for recently changed files.
 		idx.contentByName[docID] = content
+		idx.pathByName[docID] = absPath
 		idx.pathToDocID[relPath] = docID
 		idx.mu.Unlock()
 	}
