@@ -27,6 +27,9 @@ const expectedExtensionVersion = "0.4.0"
 
 func main() {
 	log.SetOutput(os.Stderr)
+	// MCP clients treat every stderr line as [error], so suppress INFO/WARN.
+	// Only ERROR and above reach stderr, where [error] label is appropriate.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	baseURL := flag.String("base", "", "Base URL of 1C HTTP service")
@@ -84,8 +87,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer dumpIndex.Close()
-		// Index builds in background. Progress and errors are reported via stderr
-		// from the build goroutine. ModuleCount is available after Ready().
+		// Index builds in background. ModuleCount is available after Ready().
 	}
 
 	s := server.New(version, client, dumpIndex)
@@ -106,7 +108,7 @@ func checkExtensionVersion(client *onec.Client) {
 		return
 	}
 	if ver.Version != expectedExtensionVersion {
-		slog.Warn("Extension version mismatch",
+		slog.Error("Extension version mismatch",
 			"got", ver.Version, "expected", expectedExtensionVersion,
 			"hint", `Update: mcp-1c --install "path\to\db"`)
 	}
