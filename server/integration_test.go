@@ -609,14 +609,17 @@ func TestIntegration_ListPrompts(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"review_module":   false,
-		"write_posting":   false,
-		"optimize_query":  false,
-		"explain_config":  false,
-		"analyze_error":   false,
-		"find_duplicates": false,
-		"write_report":    false,
-		"explain_object":  false,
+		"review_module":            false,
+		"write_posting":            false,
+		"optimize_query":           false,
+		"explain_config":           false,
+		"analyze_error":            false,
+		"find_duplicates":          false,
+		"write_report":             false,
+		"explain_object":           false,
+		"1c_query_syntax":          false,
+		"1c_metadata_navigation":   false,
+		"1c_development_workflow":  false,
 	}
 
 	for _, p := range result.Prompts {
