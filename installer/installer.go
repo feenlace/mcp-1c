@@ -59,6 +59,8 @@ var platformFormatVersions = []struct {
 // If platformExe is empty, the platform is auto-detected.
 // When serverMode is true, the database is treated as a client-server infobase
 // (MS SQL, PostgreSQL) and DESIGNER is invoked with /S instead of /F.
+//
+//garble:ignore
 func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser, dbPassword string) error {
 	if platformExe == "" {
 		var err error
@@ -299,6 +301,8 @@ func FindPlatform() (string, error) {
 // versionAttrRe matches the 1C XML dump format version attribute (version="2.X" or
 // version="2.X.Y"). The "2." prefix naturally excludes the XML declaration
 // (<?xml version="1.0"?>), so no separate guard is needed.
+//
+//garble:ignore
 var versionAttrRe = regexp.MustCompile(`(version=")2\.\d+(?:\.\d+)?(")`)
 
 // platformVersionRe extracts the 8.Major.Minor.Patch version from a platform path.
@@ -306,6 +310,8 @@ var versionAttrRe = regexp.MustCompile(`(version=")2\.\d+(?:\.\d+)?(")`)
 //   - C:\Program Files\1cv8\8.3.27.1859\bin\1cv8.exe
 //   - /opt/1cv8/x86_64/8.3.22.1709/1cv8
 //   - /Applications/1cv8.localized/8.3.25.1000/1cv8.app/Contents/MacOS/1cv8
+//
+//garble:ignore
 var platformVersionRe = regexp.MustCompile(`8\.(\d+)\.(\d+)`)
 
 // extractPlatformMinor parses the platform path and returns the minor version number.
@@ -382,6 +388,8 @@ func patchFormatVersion(dir, targetVersion string) error {
 // configuration properties in old compat modes (8.3.13 and below). Each element
 // is matched including optional surrounding whitespace so the resulting XML stays
 // well-formed. Elements may be single-line or span multiple lines.
+//
+//garble:ignore
 var inheritedPropertyRe = regexp.MustCompile(
 	`(?s)\s*<(?:` +
 		`DefaultRunMode|UsePurposes|ScriptVariant|DefaultRoles|` +
@@ -397,6 +405,8 @@ var inheritedPropertyRe = regexp.MustCompile(
 // stripInheritedProperties removes XML elements from Configuration.xml that
 // override inherited properties of the base configuration. This is needed for
 // old configurations (compat mode 8.3.13 and below) that reject such overrides.
+//
+//garble:ignore
 func stripInheritedProperties(cfgPath string) error {
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
