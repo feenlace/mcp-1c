@@ -168,10 +168,37 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 
 	// Apply extension to the database (separate call required).
 	fmt.Println("Updating database...")
-	return runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+	if err := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 		"/UpdateDBCfg",
 		"-Extension", extensionName,
-	)
+	); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов") {
+			fmt.Println("Retrying without inherited properties (old compat mode)...")
+			cfgPath := filepath.Join(extDir, "Configuration.xml")
+			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
+				return fmt.Errorf("updating database config: strip inherited properties: %w", patchErr)
+			}
+			if reloadErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+				"/LoadConfigFromFiles", extDir,
+				"-Extension", extensionName,
+			); reloadErr != nil {
+				return fmt.Errorf("reloading extension config after strip: %w", reloadErr)
+			}
+			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+				"/UpdateDBCfg",
+				"-Extension", extensionName,
+			); retryErr != nil {
+				return fmt.Errorf("updating database config: %w", retryErr)
+			}
+			fmt.Fprintln(os.Stderr, "ПРЕДУПРЕЖДЕНИЕ: Конфигурация использует режим совместимости 8.3.13 или ниже, роль MCP_ОсновнаяРоль не назначена автоматически.")
+			fmt.Fprintln(os.Stderr, "Для работы HTTP-сервиса назначьте роль вручную:")
+			fmt.Fprintln(os.Stderr, "  Конфигуратор > Администрирование > Пользователи > [пользователь] > Роли > MCP_ОсновнаяРоль")
+			fmt.Fprintln(os.Stderr, "Если у пользователя есть роль \"Полные права\", дополнительных действий не требуется.")
+			return nil
+		}
+		return fmt.Errorf("updating database config: %w", err)
+	}
+	return nil
 }
 
 // runDesigner executes 1C DESIGNER with given arguments, capturing output via /Out.

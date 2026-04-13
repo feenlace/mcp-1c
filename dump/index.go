@@ -259,6 +259,7 @@ func NewIndex(dir string, reindex bool) (*Index, error) {
 					idx.ready.Store(true)
 					slog.Info("Opened cached index",
 						"shards", len(shards), "modules", len(idx.names))
+					fmt.Fprintf(os.Stderr, "Индекс загружен из кэша: %d модулей\n", len(idx.names))
 				}()
 				return idx, nil
 			}
@@ -293,12 +294,14 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 		idx.pathIndex = NewPathIndex(nil)
 		idx.ready.Store(true)
 		slog.Info("No BSL modules found, index is empty")
+		fmt.Fprintf(os.Stderr, "Внимание: в директории %s не найдено .bsl файлов\n", idx.dir)
 		return
 	}
 
 	n := shardCount(total)
 	groups := splitByHash(idx.names, n)
 	slog.Info("Building index", "modules", total, "shards", n)
+	fmt.Fprintf(os.Stderr, "Индексация: найдено %d модулей...\n", total)
 
 	var basePath string
 	if cpath != "" && useCache {
@@ -382,6 +385,7 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 	}
 
 	slog.Info("Index ready", "modules", total, "shards", n)
+	fmt.Fprintf(os.Stderr, "Индексация завершена: %d модулей готово к поиску\n", total)
 }
 
 // openCachedShards opens pre-built Bleve shard indexes from disk.

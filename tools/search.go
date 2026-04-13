@@ -95,6 +95,10 @@ func NewSearchCodeHandler(index *dump.Index) mcp.ToolHandler {
 			return nil, fmt.Errorf("search: %w", err)
 		}
 
+		if total == 0 && index.ModuleCount() == 0 {
+			return textResult("Индекс пуст: в директории --dump не найдено .bsl файлов. Проверьте путь к выгрузке конфигурации."), nil
+		}
+
 		return textResult(FormatSearchResult(matches, total, input.Query, mode, nil)), nil
 	}
 }
