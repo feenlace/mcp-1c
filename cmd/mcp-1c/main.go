@@ -43,6 +43,7 @@ func main() {
 	installDB := flag.String("install", "", "Install extension into 1C database at given path")
 	serverMode := flag.Bool("server", false, `Treat --install value as server connection string (server\database)`)
 	platformPath := flag.String("platform", "", "Path to 1C platform executable (auto-detected if omitted)")
+	platformVersion := flag.String("platform-version", "", "1C platform version override (e.g. 8.3.13), auto-detected from path if omitted")
 	dbUser := flag.String("db-user", "", "1C database user for DESIGNER (install mode)")
 	dbPassword := flag.String("db-password", "", "1C database password for DESIGNER (install mode)")
 	flag.Parse()
@@ -70,7 +71,7 @@ func main() {
 	// Install mode.
 	if *installDB != "" {
 		fmt.Println("Installing MCP extension into 1C database...")
-		if err := installer.Install(extension.Source, *installDB, *serverMode, *platformPath, *dbUser, *dbPassword); err != nil {
+		if err := installer.Install(extension.Source, *installDB, *serverMode, *platformPath, *dbUser, *dbPassword, *platformVersion); err != nil {
 			fmt.Fprintf(os.Stderr, "Installation error: %v\n", err)
 			os.Exit(1)
 		}

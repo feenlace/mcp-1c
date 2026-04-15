@@ -12,6 +12,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 const extensionName = "MCP_HTTPService"
@@ -54,14 +57,43 @@ var platformFormatVersions = []struct {
 	{14, "2.8"},
 }
 
+// platformOlderThan performs a tuple comparison of (major, minor) against
+// (targetMajor, targetMinor). This correctly handles cross-major comparisons:
+// e.g. platform 8.5.1 (major=5, minor=1) is NOT older than 8.3.14 (target 3, 14).
+func platformOlderThan(major, minor, targetMajor, targetMinor int) bool {
+	if major != targetMajor {
+		return major < targetMajor
+	}
+	return minor < targetMinor
+}
+
+// parsePlatformVersion determines the platform major and minor version numbers
+// (where major is the second number in 8.X and minor is the third number in
+// 8.X.Y). If overrideVersion is provided (e.g. "8.3.13" or "8.3.14.1234"),
+// it takes priority. Otherwise the version is extracted from the platform
+// executable path. Returns (0, 0) when the version cannot be determined.
+func parsePlatformVersion(platformExe, overrideVersion string) (major, minor int) {
+	src := overrideVersion
+	if src == "" {
+		src = platformExe
+	}
+	maj, min, ok := extractPlatformMinor(src)
+	if !ok {
+		return 0, 0
+	}
+	return maj, min
+}
+
 // Install extracts embedded XML sources to a temp dir, patches the XML format
 // version for compatibility with the detected platform, and loads it into 1C.
 // If platformExe is empty, the platform is auto-detected.
+// platformVersion is an optional override (e.g. "8.3.13") for cases when the
+// version cannot be detected from the platform path automatically.
 // When serverMode is true, the database is treated as a client-server infobase
 // (MS SQL, PostgreSQL) and DESIGNER is invoked with /S instead of /F.
 //
 //garble:ignore
-func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser, dbPassword string) error {
+func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser, dbPassword, platformVersion string) error {
 	if platformExe == "" {
 		var err error
 		platformExe, err = FindPlatform()
@@ -88,35 +120,94 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		return fmt.Errorf("patching format version: %w", err)
 	}
 
-	// Remove existing extension if present (ignore error: extension may not exist yet).
-	if delErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
-		"/ManageCfgExtensions", "-delete",
-		"-Extension", extensionName,
-	); delErr == nil {
-		fmt.Println("Removed old extension:", extensionName)
+	// Pre-patch extension XML when the platform version is known. This avoids
+	// unnecessary DESIGNER round-trips for platforms that would otherwise fail
+	// on compat mode, unsupported elements, or inherited properties.
+	cfgPath := filepath.Join(extDir, "Configuration.xml")
+	major, minor := parsePlatformVersion(platformExe, platformVersion)
+
+	if major > 0 { // version detected
+		if platformOlderThan(major, minor, 3, 10) { // platform < 8.3.10
+			return fmt.Errorf("платформа 8.%d.%d не поддерживается, минимальная версия 8.3.10", major, minor)
+		}
+		if platformOlderThan(major, minor, 3, 14) { // platform < 8.3.14
+			// Patch compat mode down to 8.3.10
+			if patchErr := patchExtensionXML(cfgPath, "Version8_3_10", ""); patchErr != nil {
+				return fmt.Errorf("pre-patching extension compat mode: %w", patchErr)
+			}
+			// Strip unsupported elements (KeepMapping, InternalInfo, Role ClassId)
+			if stripErr := stripUnsupportedElements(extDir); stripErr != nil {
+				return fmt.Errorf("pre-patching unsupported elements: %w", stripErr)
+			}
+			// Strip inherited properties (DefaultRoles, DefaultRunMode, etc.)
+			if stripErr := stripInheritedProperties(cfgPath); stripErr != nil {
+				return fmt.Errorf("pre-patching inherited properties: %w", stripErr)
+			}
+			// Print info about role assignment
+			fmt.Fprintln(os.Stderr, "Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
+			fmt.Fprintln(os.Stderr, "Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
+			fmt.Fprintln(os.Stderr, "Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
+		}
 	}
 
 	// Load extension XML into extension configuration.
+	// We do NOT call /ManageCfgExtensions -delete upfront because that command
+	// opens a GUI window on some platforms and hangs. Instead, we attempt to load
+	// directly (optimistic path for fresh installs). If loading fails with
+	// "Уже существует" (object already exists), we delete the old extension and retry.
 	fmt.Println("Loading extension into database...")
-	if err := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+	err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 		"/LoadConfigFromFiles", extDir,
 		"-Extension", extensionName,
-	); err != nil {
+	)
+
+	// If extension already exists, delete it and retry the load.
+	if err != nil && strings.Contains(err.Error(), "Уже существует") {
+		if delErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+			"/ManageCfgExtensions", "-delete",
+			"-Extension", extensionName,
+		); delErr != nil {
+			return fmt.Errorf("deleting old extension before retry: %w", delErr)
+		}
+		fmt.Println("Removed old extension:", extensionName)
+
+		err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+			"/LoadConfigFromFiles", extDir,
+			"-Extension", extensionName,
+		)
+	}
+
+	if err != nil {
+		// Platforms older than 8.3.15 do not recognize
+		// KeepMappingToExtendedConfigurationObjectsByIDs, InternalInfo
+		// sections, or certain ClassId values in extension XML files.
+		// Strip these elements and retry.
+		if strings.Contains(err.Error(), "KeepMappingToExtendedConfigurationObjectsByIDs") ||
+			strings.Contains(err.Error(), "InternalInfo") ||
+			strings.Contains(err.Error(), "идентификатор класса") {
+			fmt.Println("Retrying without unsupported XML elements (old platform)...")
+			if stripErr := stripUnsupportedElements(extDir); stripErr != nil {
+				return fmt.Errorf("loading extension config: strip unsupported elements: %w", stripErr)
+			}
+			err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+				"/LoadConfigFromFiles", extDir,
+				"-Extension", extensionName,
+			)
+		}
+
 		// When the base configuration does not have DefaultRunMode set to
 		// ManagedApplication, DESIGNER rejects the extension with a controlled
 		// property mismatch error mentioning "ОсновнойРежимЗапуска".
 		// Remove the property and retry.
-		if strings.Contains(err.Error(), "ОсновнойРежимЗапуска") {
+		if err != nil && strings.Contains(err.Error(), "ОсновнойРежимЗапуска") {
 			fmt.Println("Retrying without DefaultRunMode property (controlled property mismatch)...")
-			cfgPath := filepath.Join(extDir, "Configuration.xml")
 			cfgData, readErr := os.ReadFile(cfgPath)
 			if readErr != nil {
-				return fmt.Errorf("loading extension config: %w", err)
+				return fmt.Errorf("loading extension config: reading Configuration.xml: %w", readErr)
 			}
-			defaultRunModeRe := regexp.MustCompile(`\s*<DefaultRunMode>[^<]*</DefaultRunMode>`)
 			cfgData = defaultRunModeRe.ReplaceAll(cfgData, nil)
 			if writeErr := os.WriteFile(cfgPath, cfgData, 0o644); writeErr != nil {
-				return fmt.Errorf("loading extension config: %w", err)
+				return fmt.Errorf("loading extension config: writing Configuration.xml: %w", writeErr)
 			}
 			err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/LoadConfigFromFiles", extDir,
@@ -126,18 +217,29 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 
 		// When the extension's compatibility mode is higher than the base
 		// configuration's, DESIGNER rejects it with an error mentioning
-		// "режим совместимости". Remove the tag and let 1C inherit from the
-		// base configuration, then retry.
+		// "режим совместимости". First try Version8_3_10 (still supports roles),
+		// and only fall back to DontUse as a last resort.
 		if err != nil && strings.Contains(strings.ToLower(err.Error()), "режим совместимости") {
-			fmt.Println("Retrying without extension compatibility mode (mode mismatch)...")
-			cfgPath := filepath.Join(extDir, "Configuration.xml")
-			if patchErr := patchExtensionXML(cfgPath, "DontUse", ""); patchErr != nil {
+			fmt.Println("Retrying with compatibility mode 8.3.10...")
+			if patchErr := patchExtensionXML(cfgPath, "Version8_3_10", ""); patchErr != nil {
 				return fmt.Errorf("loading extension config: patch compat mode: %w", patchErr)
 			}
 			err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			)
+
+			// If Version8_3_10 still too high, fall back to DontUse.
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "режим совместимости") {
+				fmt.Println("Retrying without compatibility mode...")
+				if patchErr := patchExtensionXML(cfgPath, "DontUse", ""); patchErr != nil {
+					return fmt.Errorf("loading extension config: patch compat mode: %w", patchErr)
+				}
+				err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+					"/LoadConfigFromFiles", extDir,
+					"-Extension", extensionName,
+				)
+			}
 		}
 
 		// Old configurations (compat mode 8.3.13 and below) reject extensions
@@ -145,7 +247,6 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		// from the extension Configuration.xml and retry.
 		if err != nil && strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов") {
 			fmt.Println("Retrying without inherited properties (old compat mode)...")
-			cfgPath := filepath.Join(extDir, "Configuration.xml")
 			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
 				return fmt.Errorf("loading extension config: strip inherited properties: %w", patchErr)
 			}
@@ -154,10 +255,9 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 				"-Extension", extensionName,
 			)
 			if err == nil {
-				fmt.Fprintln(os.Stderr, "ПРЕДУПРЕЖДЕНИЕ: Конфигурация использует режим совместимости 8.3.13 или ниже, роль MCP_ОсновнаяРоль не назначена автоматически.")
-				fmt.Fprintln(os.Stderr, "Для работы HTTP-сервиса назначьте роль вручную:")
-				fmt.Fprintln(os.Stderr, "  Конфигуратор > Администрирование > Пользователи > [пользователь] > Роли > MCP_ОсновнаяРоль")
-				fmt.Fprintln(os.Stderr, "Если у пользователя есть роль \"Полные права\", дополнительных действий не требуется.")
+				fmt.Fprintln(os.Stderr, "Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
+				fmt.Fprintln(os.Stderr, "Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
+				fmt.Fprintln(os.Stderr, "Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
 			}
 		}
 
@@ -174,7 +274,6 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 	); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов") {
 			fmt.Println("Retrying without inherited properties (old compat mode)...")
-			cfgPath := filepath.Join(extDir, "Configuration.xml")
 			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
 				return fmt.Errorf("updating database config: strip inherited properties: %w", patchErr)
 			}
@@ -190,10 +289,9 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			); retryErr != nil {
 				return fmt.Errorf("updating database config: %w", retryErr)
 			}
-			fmt.Fprintln(os.Stderr, "ПРЕДУПРЕЖДЕНИЕ: Конфигурация использует режим совместимости 8.3.13 или ниже, роль MCP_ОсновнаяРоль не назначена автоматически.")
-			fmt.Fprintln(os.Stderr, "Для работы HTTP-сервиса назначьте роль вручную:")
-			fmt.Fprintln(os.Stderr, "  Конфигуратор > Администрирование > Пользователи > [пользователь] > Роли > MCP_ОсновнаяРоль")
-			fmt.Fprintln(os.Stderr, "Если у пользователя есть роль \"Полные права\", дополнительных действий не требуется.")
+			fmt.Fprintln(os.Stderr, "Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
+			fmt.Fprintln(os.Stderr, "Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
+			fmt.Fprintln(os.Stderr, "Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
 			return nil
 		}
 		return fmt.Errorf("updating database config: %w", err)
@@ -216,7 +314,16 @@ func runDesigner(platformExe, dbPath string, serverMode bool, dbUser, dbPassword
 	cmd := exec.Command(platformExe, args...)
 	cmd.CombinedOutput() //nolint:errcheck // exit code checked via log
 	logData, _ := os.ReadFile(logFile.Name())
-	logStr := strings.TrimSpace(string(bytes.TrimLeft(logData, "\xef\xbb\xbf")))
+	logData = bytes.TrimLeft(logData, "\xef\xbb\xbf")
+
+	// On older Windows platforms DESIGNER writes the log in Windows-1251
+	// encoding. Detect non-UTF-8 content and convert it.
+	if !utf8.Valid(logData) {
+		if decoded, decErr := charmap.Windows1251.NewDecoder().Bytes(logData); decErr == nil {
+			logData = decoded
+		}
+	}
+	logStr := strings.TrimSpace(string(logData))
 
 	if cmd.ProcessState == nil {
 		return fmt.Errorf("1C DESIGNER failed to start: %s", platformExe)
@@ -247,8 +354,9 @@ func buildDesignerArgs(dbPath string, serverMode bool, dbUser, dbPassword, logPa
 	if dbPassword != "" {
 		args = append(args, "/P", dbPassword)
 	}
+	args = append(args, "/WA-", "/DisableStartupDialogs", "/DisableStartupMessages")
 	args = append(args, extraArgs...)
-	args = append(args, "/Out", logPath, "/DisableStartupDialogs", "/DisableStartupMessages")
+	args = append(args, "/Out", logPath)
 	return args
 }
 
@@ -411,6 +519,41 @@ func patchFormatVersion(dir, targetVersion string) error {
 	})
 }
 
+// keepMappingRe matches the KeepMappingToExtendedConfigurationObjectsByIDs
+// element introduced in 1C 8.3.15. Older platforms reject this element.
+//
+//garble:ignore
+var keepMappingRe = regexp.MustCompile(
+	`\s*<KeepMappingToExtendedConfigurationObjectsByIDs>[^<]*</KeepMappingToExtendedConfigurationObjectsByIDs>`,
+)
+
+// internalInfoRe matches InternalInfo sections in extension XML files.
+// These sections contain xr:ContainedObject/ClassId entries that older platforms
+// (before 8.3.15) do not understand. The pattern handles both populated sections
+// (with child elements) and empty self-closing tags.
+//
+//garble:ignore
+var internalInfoRe = regexp.MustCompile(
+	`(?s)\s*<InternalInfo\s*/>|\s*<InternalInfo>.*?</InternalInfo>`,
+)
+
+// roleContainedObjectRe matches xr:ContainedObject entries whose ClassId is
+// fb282519-d103-4dd3-bc12-cb271d631dfc (Role). Platform 8.3.13 and below do
+// not recognize this ClassId and reject the extension with
+// "Неверный идентификатор класса хранимого объекта".
+//
+//garble:ignore
+var roleContainedObjectRe = regexp.MustCompile(
+	`(?s)\s*<xr:ContainedObject>\s*<xr:ClassId>fb282519-d103-4dd3-bc12-cb271d631dfc</xr:ClassId>\s*<xr:ObjectId>[^<]*</xr:ObjectId>\s*</xr:ContainedObject>`,
+)
+
+// defaultRunModeRe matches the DefaultRunMode element in extension Configuration.xml.
+// Used to strip this property when the base configuration does not have it set to
+// ManagedApplication (controlled property mismatch).
+//
+//garble:ignore
+var defaultRunModeRe = regexp.MustCompile(`\s*<DefaultRunMode>[^<]*</DefaultRunMode>`)
+
 // inheritedPropertyRe matches XML elements that may conflict with inherited base
 // configuration properties in old compat modes (8.3.13 and below). Each element
 // is matched including optional surrounding whitespace so the resulting XML stays
@@ -441,6 +584,58 @@ func stripInheritedProperties(cfgPath string) error {
 	}
 	patched := inheritedPropertyRe.ReplaceAll(data, nil)
 	return os.WriteFile(cfgPath, patched, 0o644)
+}
+
+// stripUnsupportedElements removes XML elements that older 1C platforms do not
+// recognize: KeepMappingToExtendedConfigurationObjectsByIDs (from Configuration.xml),
+// InternalInfo sections (from non-Configuration XML files in the extension
+// directory), and Role ContainedObject entries from Configuration.xml's InternalInfo
+// (ClassId fb282519... is not recognized by platforms 8.3.13 and below).
+// Configuration.xml keeps the rest of its InternalInfo because it contains the
+// extension UUID mapping required by the platform.
+// These elements were introduced in 1C 8.3.15 and cause load failures on 8.3.10-8.3.14.
+//
+//garble:ignore
+func stripUnsupportedElements(extDir string) error {
+	// Remove KeepMappingToExtendedConfigurationObjectsByIDs and the Role
+	// ContainedObject entry (ClassId fb282519...) from Configuration.xml.
+	// The Role ClassId was introduced after 8.3.13 and causes
+	// "Неверный идентификатор класса хранимого объекта" on older platforms.
+	cfgPath := filepath.Join(extDir, "Configuration.xml")
+	cfgData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	cfgData = keepMappingRe.ReplaceAll(cfgData, nil)
+	cfgData = roleContainedObjectRe.ReplaceAll(cfgData, nil)
+	if err := os.WriteFile(cfgPath, cfgData, 0o644); err != nil {
+		return err
+	}
+
+	// Remove InternalInfo sections from XML files in the extension directory,
+	// except Configuration.xml which requires its InternalInfo section (contains
+	// the extension UUID mapping).
+	return filepath.WalkDir(extDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".xml") {
+			return nil
+		}
+		// Configuration.xml needs its InternalInfo; skip it.
+		if strings.EqualFold(filepath.Base(path), "configuration.xml") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("reading %s: %w", path, readErr)
+		}
+		patched := internalInfoRe.ReplaceAll(data, nil)
+		if bytes.Equal(patched, data) {
+			return nil
+		}
+		return os.WriteFile(path, patched, 0o644)
+	})
 }
 
 // platformPatterns returns glob patterns for finding 1C platform binary on the current OS.
