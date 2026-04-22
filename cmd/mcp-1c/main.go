@@ -111,6 +111,22 @@ func main() {
 				os.Stderr = f
 				log.SetOutput(f)
 				slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelError})))
+			} else {
+				// Fallback: if we cannot create the stderr log file (cacheDir
+				// missing, disk full, permission denied), we MUST still redirect
+				// stderr away from the MCP client pipe. Otherwise third-party
+				// library writes can trigger the restart loop we are trying
+				// to prevent. Redirect to os.DevNull instead.
+				if devnull, errNull := os.OpenFile(os.DevNull, os.O_WRONLY, 0); errNull == nil {
+					os.Stderr = devnull
+					log.SetOutput(devnull)
+					slog.SetDefault(slog.New(slog.NewTextHandler(devnull, &slog.HandlerOptions{Level: slog.LevelError})))
+				} else {
+					// Last resort: keep the real stderr but at least log the
+					// failure so it shows up in any debug log.
+					slog.Warn("cannot redirect stderr",
+						"log_err", err, "devnull_err", errNull)
+				}
 			}
 		}
 	}
