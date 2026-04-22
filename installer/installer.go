@@ -144,9 +144,9 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 				return fmt.Errorf("pre-patching inherited properties: %w", stripErr)
 			}
 			// Print info about role assignment
-			fmt.Fprintln(os.Stderr, "Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-			fmt.Fprintln(os.Stderr, "Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-			fmt.Fprintln(os.Stderr, "Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
+			fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
+			fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
+			fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
 		}
 	}
 
@@ -255,9 +255,9 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 				"-Extension", extensionName,
 			)
 			if err == nil {
-				fmt.Fprintln(os.Stderr, "Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-				fmt.Fprintln(os.Stderr, "Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-				fmt.Fprintln(os.Stderr, "Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
+				fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
+				fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
+				fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
 			}
 		}
 
@@ -289,9 +289,9 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			); retryErr != nil {
 				return fmt.Errorf("updating database config: %w", retryErr)
 			}
-			fmt.Fprintln(os.Stderr, "Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-			fmt.Fprintln(os.Stderr, "Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-			fmt.Fprintln(os.Stderr, "Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
+			fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
+			fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
+			fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
 			return nil
 		}
 		return fmt.Errorf("updating database config: %w", err)
