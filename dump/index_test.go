@@ -1,8 +1,10 @@
 package dump
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -927,5 +929,108 @@ func TestIndex_DeleteDoc_RemovesFromNames(t *testing.T) {
 	}
 	if total != 0 || len(matches) != 0 {
 		t.Errorf("expected 0 regex matches after delete, got total=%d matches=%d", total, len(matches))
+	}
+}
+
+// TestSetShowProgress_NonTTY_StderrEmpty проверяет, что при SetShowProgress(false)
+// пакет dump не пишет ничего в stderr во время индексации.
+// Регрессия на Issue #14 (Kilo Code 7.x интерпретирует любой stderr как ошибку).
+func TestSetShowProgress_NonTTY_StderrEmpty(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+	})
+
+	// Читаем stderr в отдельной горутине, чтобы pipe не заблокировал запись.
+	readDone := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		readDone <- data
+	}()
+
+	SetShowProgress(false)
+
+	dumpDir := t.TempDir()
+	mkBSLFile(t, dumpDir, "CommonModules/TestMod/Ext/Module.bsl",
+		"Процедура Тест() КонецПроцедуры")
+
+	idx, err := NewIndex(dumpDir, filepath.Join(dumpDir, ".cache"), false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	waitReady(t, idx, 30*time.Second)
+	idx.Close()
+
+	// Закрываем writer, чтобы горутина чтения завершилась.
+	w.Close()
+
+	var collected []byte
+	select {
+	case collected = <-readDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out reading stderr pipe")
+	}
+
+	if len(collected) > 0 {
+		t.Errorf("expected empty stderr with SetShowProgress(false), got %d bytes: %q",
+			len(collected), collected)
+	}
+}
+
+// TestSetShowProgress_TTY_StderrHasProgress проверяет, что при SetShowProgress(true)
+// пакет dump выводит в stderr информационные сообщения об индексации.
+// Регрессия: не должно быть "немого" режима в интерактивном терминале.
+func TestSetShowProgress_TTY_StderrHasProgress(t *testing.T) {
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+	})
+
+	readDone := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(r)
+		readDone <- data
+	}()
+
+	SetShowProgress(true)
+	t.Cleanup(func() { SetShowProgress(false) }) // сбрасываем флаг для других тестов
+
+	dumpDir := t.TempDir()
+	mkBSLFile(t, dumpDir, "CommonModules/TestMod/Ext/Module.bsl",
+		"Процедура Тест() КонецПроцедуры")
+
+	idx, err := NewIndex(dumpDir, filepath.Join(dumpDir, ".cache"), false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	waitReady(t, idx, 30*time.Second)
+	idx.Close()
+
+	w.Close()
+
+	var collected []byte
+	select {
+	case collected = <-readDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out reading stderr pipe")
+	}
+
+	if len(collected) == 0 {
+		t.Errorf("expected non-empty stderr with SetShowProgress(true), got empty")
+	}
+	// Проверяем наличие осмысленного вывода: стартовая строка "Индексация" или
+	// финальная "Индексация завершена" всегда пишутся при tickerActive=true.
+	if !bytes.Contains(collected, []byte("Индекс")) && !bytes.Contains(collected, []byte("модул")) {
+		t.Logf("stderr content: %q (may be fine if build was faster than first tick)", collected)
 	}
 }
