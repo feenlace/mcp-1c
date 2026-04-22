@@ -17,6 +17,7 @@ import (
 	"github.com/feenlace/mcp-1c/onec"
 	"github.com/feenlace/mcp-1c/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/term"
 )
 
 // version is set at build time via ldflags:
@@ -46,10 +47,23 @@ func main() {
 	platformVersion := flag.String("platform-version", "", "1C platform version override (e.g. 8.3.13), auto-detected from path if omitted")
 	dbUser := flag.String("db-user", "", "1C database user for DESIGNER (install mode)")
 	dbPassword := flag.String("db-password", "", "1C database password for DESIGNER (install mode)")
+	quiet := flag.Bool("quiet", false, "Suppress all stderr logging (auto-detected when stdin is a pipe)")
+	verbose := flag.Bool("verbose", false, "Force stderr logging even when stdin is a pipe (for MCP client debugging)")
 	flag.Parse()
 
 	if *cacheDir == "" {
 		*cacheDir = os.Getenv("MCP_1C_CACHE_DIR")
+	}
+
+	// Effective TTY mode: true => print info logs and progress to stderr (as in v1.6.0),
+	// false => suppress stderr (as in v1.6.1). Manual overrides take precedence.
+	stdinIsTTY := term.IsTerminal(int(os.Stdin.Fd()))
+	effectiveTTY := stdinIsTTY
+	if *verbose {
+		effectiveTTY = true
+	}
+	if *quiet {
+		effectiveTTY = false
 	}
 
 	// When --debug is set, redirect logs to a file at INFO level.
@@ -79,18 +93,30 @@ func main() {
 		return
 	}
 
-	// MCP stdio mode: strict clients (Kilo Code 7.x, Issue #14) treat ANY stderr
-	// output as a fatal error and restart the server in a loop. Redirect stderr
-	// to a file so that third-party libraries (bleve, scorch) cannot break the
-	// client. When --debug is set, stderr stays visible for troubleshooting.
+	// Three modes of stderr handling (outside of --debug):
+	//   1. effectiveTTY=true  => show info logs and progress in terminal (v1.6.0 behaviour)
+	//   2. effectiveTTY=false => redirect stderr to a file to protect strict MCP
+	//      clients (Kilo Code 7.x, Issue #14) from any third-party stderr writes
+	//      (v1.6.1 behaviour)
+	// --debug overrides both and writes everything to server.log at INFO level.
 	if !*debug {
-		if f, err := openStderrLog("mcp-1c", *cacheDir); err == nil {
-			os.Stderr = f
-			log.SetOutput(f)
-			// Re-install the ERROR-level slog handler so it writes to the new stderr.
-			slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelError})))
+		if effectiveTTY {
+			// Terminal launch: show info-level logs and progress to the user.
+			log.SetOutput(os.Stderr)
+			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		} else {
+			// Pipe launch (MCP client): redirect stderr to a file so third-party
+			// libraries (bleve, scorch) cannot trigger a restart loop.
+			if f, err := openStderrLog("mcp-1c", *cacheDir); err == nil {
+				os.Stderr = f
+				log.SetOutput(f)
+				slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelError})))
+			}
 		}
 	}
+
+	// Tell dump package whether to print progress ticker and info lines.
+	dump.SetShowProgress(effectiveTTY && !*debug)
 
 	// Load defaults and env var overrides.
 	cfg := config.Load()
