@@ -79,6 +79,19 @@ func main() {
 		return
 	}
 
+	// MCP stdio mode: strict clients (Kilo Code 7.x, Issue #14) treat ANY stderr
+	// output as a fatal error and restart the server in a loop. Redirect stderr
+	// to a file so that third-party libraries (bleve, scorch) cannot break the
+	// client. When --debug is set, stderr stays visible for troubleshooting.
+	if !*debug {
+		if f, err := openStderrLog("mcp-1c", *cacheDir); err == nil {
+			os.Stderr = f
+			log.SetOutput(f)
+			// Re-install the ERROR-level slog handler so it writes to the new stderr.
+			slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelError})))
+		}
+	}
+
 	// Load defaults and env var overrides.
 	cfg := config.Load()
 
@@ -124,6 +137,18 @@ func main() {
 //	Linux:   ~/.cache/<name>/server.log
 //	Windows: %LocalAppData%/<name>/server.log
 func openDebugLog(name, cacheDir string) (*os.File, error) {
+	return openLogFile(name, cacheDir, "server.log")
+}
+
+// openStderrLog creates (or truncates) a file that captures stderr output in
+// MCP stdio mode. The redirect protects strict MCP clients (Kilo Code 7.x) from
+// crashing on stderr writes produced by third-party libraries.
+func openStderrLog(name, cacheDir string) (*os.File, error) {
+	return openLogFile(name, cacheDir, "stderr.log")
+}
+
+// openLogFile creates (or truncates) a log file under the cache directory.
+func openLogFile(name, cacheDir, filename string) (*os.File, error) {
 	var dir string
 	if cacheDir != "" {
 		dir = cacheDir
@@ -137,7 +162,7 @@ func openDebugLog(name, cacheDir string) (*os.File, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return os.Create(filepath.Join(dir, "server.log"))
+	return os.Create(filepath.Join(dir, filename))
 }
 
 func checkExtensionVersion(client *onec.Client) {
