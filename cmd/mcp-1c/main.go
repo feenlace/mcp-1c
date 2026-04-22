@@ -34,7 +34,7 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 
 	showVersion := flag.Bool("version", false, "print version and exit")
-	debug := flag.Bool("debug", false, "Enable verbose logging to file (~/.cache/mcp-1c/server.log)")
+	debug := flag.Bool("debug", false, "Enable verbose logging to file (~/.cache/mcp-1c/server.log). In terminal mode also suppresses the stderr progress indicator.")
 	baseURL := flag.String("base", "", "Base URL of 1C HTTP service")
 	user := flag.String("user", "", "1C HTTP service user")
 	password := flag.String("password", "", "1C HTTP service password")
@@ -47,12 +47,19 @@ func main() {
 	platformVersion := flag.String("platform-version", "", "1C platform version override (e.g. 8.3.13), auto-detected from path if omitted")
 	dbUser := flag.String("db-user", "", "1C database user for DESIGNER (install mode)")
 	dbPassword := flag.String("db-password", "", "1C database password for DESIGNER (install mode)")
-	quiet := flag.Bool("quiet", false, "Suppress all stderr logging (auto-detected when stdin is a pipe)")
-	verbose := flag.Bool("verbose", false, "Force stderr logging even when stdin is a pipe (for MCP client debugging)")
+	quiet := flag.Bool("quiet", false, "Suppress all stderr output even when running in a terminal. Takes precedence over --verbose. Also activated by env MCP_1C_NO_TTY=1.")
+	verbose := flag.Bool("verbose", false, "Force verbose stderr output even when stdin is a pipe (useful for MCP client debugging). Overrides auto-detect and is itself overridden by --quiet.")
 	flag.Parse()
 
 	if *cacheDir == "" {
 		*cacheDir = os.Getenv("MCP_1C_CACHE_DIR")
+	}
+
+	// Env var override: MCP_1C_NO_TTY=1 forces non-TTY (quiet) mode.
+	// More convenient than --quiet in Docker/systemd environments where
+	// CLI arguments are less flexible than environment variables.
+	if os.Getenv("MCP_1C_NO_TTY") == "1" {
+		*quiet = true
 	}
 
 	// Effective TTY mode: true => print info logs and progress to stderr (as in v1.6.0),
