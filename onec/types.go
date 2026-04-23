@@ -8,6 +8,7 @@ type ObjectStructure struct {
 	TabularParts []TabularPart `json:"tabularParts,omitempty"`
 	Dimensions   []Attribute   `json:"dimensions,omitempty"`
 	Resources    []Attribute   `json:"resources,omitempty"`
+	Values       []EnumValue   `json:"values,omitempty"`
 }
 
 // Attribute represents a metadata object attribute.
@@ -21,6 +22,13 @@ type Attribute struct {
 type TabularPart struct {
 	Name       string      `json:"name"`
 	Attributes []Attribute `json:"attributes"`
+}
+
+// EnumValue represents a single value of a 1C Enum metadata object.
+type EnumValue struct {
+	Name    string `json:"name"`
+	Synonym string `json:"synonym"`
+	Comment string `json:"comment"`
 }
 
 // QueryRequest is the request body for the query endpoint.

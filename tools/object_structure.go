@@ -15,10 +15,10 @@ func ObjectStructureTool() *mcp.Tool {
 	return &mcp.Tool{
 		Name:  "get_object_structure",
 		Title: "Реквизиты и структура объекта",
-		Description: "Получить реквизиты, табличные части, измерения, ресурсы и типы полей объекта метаданных 1С. " +
-			"Покажет из чего состоит справочник, документ, регистр: какие поля, колонки, свойства. " +
-			"Используй когда спрашивают про реквизиты, состав или структуру конкретного объекта (например «какие реквизиты у справочника Валюты»). " +
-			"Результат содержит точные имена реквизитов и табличных частей для запросов и кода. " +
+		Description: "Получить реквизиты, табличные части, измерения, ресурсы, значения перечисления и типы полей объекта метаданных 1С. " +
+			"Покажет из чего состоит справочник, документ, регистр, перечисление: какие поля, колонки, свойства, значения. " +
+			"Используй когда спрашивают про реквизиты, состав или структуру конкретного объекта (например «какие реквизиты у справочника Валюты» или «какие значения у перечисления СтатусыЗаказов»). " +
+			"Результат содержит точные имена реквизитов, табличных частей и значений перечислений для запросов и кода. " +
 			"Вызывай перед написанием запросов или кода, работающего с объектом.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		InputSchema: json.RawMessage(`{
@@ -26,7 +26,7 @@ func ObjectStructureTool() *mcp.Tool {
 			"properties": {
 				"object_type": {
 					"type": "string",
-					"description": "Тип объекта метаданных: Document, Catalog, InformationRegister, AccumulationRegister, AccountingRegister"
+					"description": "Тип объекта метаданных: Catalog, Document, Enum, InformationRegister, AccumulationRegister, AccountingRegister, CalculationRegister, ChartOfAccounts, ChartOfCharacteristicTypes, ChartOfCalculationTypes, ExchangePlan, BusinessProcess, Task, DataProcessor, Report. Для Enum дополнительно возвращается поле values со списком значений перечисления."
 				},
 				"object_name": {
 					"type": "string",
@@ -92,6 +92,18 @@ func formatObjectStructure(obj *onec.ObjectStructure) string {
 				fmt.Fprintf(&b, "- **%s** (%s) — %s\n", attr.Name, attr.Synonym, attr.Type)
 			}
 		}
+	}
+
+	if len(obj.Values) > 0 {
+		b.WriteString("## Значения\n")
+		for _, v := range obj.Values {
+			fmt.Fprintf(&b, "- **%s** (%s)", v.Name, v.Synonym)
+			if v.Comment != "" {
+				fmt.Fprintf(&b, " — %s", v.Comment)
+			}
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
 	}
 
 	return b.String()

@@ -143,6 +143,65 @@ func TestObjectStructureHandler_Register(t *testing.T) {
 	}
 }
 
+func TestObjectStructureHandler_Enum(t *testing.T) {
+	const mockResponse = `{
+		"name": "СтатусыЗаказов",
+		"synonym": "Статусы заказов",
+		"attributes": [],
+		"values": [
+			{"name": "Новый", "synonym": "Новый", "comment": "Заказ только что создан"},
+			{"name": "ВРаботе", "synonym": "В работе", "comment": "Заказ обрабатывается"},
+			{"name": "Закрыт", "synonym": "Закрыт", "comment": ""}
+		]
+	}`
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/object/Enum/СтатусыЗаказов" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(mockResponse))
+	}))
+	defer mockServer.Close()
+
+	client := onec.NewClient(mockServer.URL, "", "")
+	handler := NewObjectStructureHandler(client)
+
+	args, _ := json.Marshal(map[string]string{
+		"object_type": "Enum",
+		"object_name": "СтатусыЗаказов",
+	})
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "get_object_structure",
+			Arguments: args,
+		},
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tc := result.Content[0].(*mcp.TextContent)
+	for _, want := range []string{
+		"СтатусыЗаказов",
+		"Статусы заказов",
+		"Значения",
+		"Новый",
+		"ВРаботе",
+		"В работе",
+		"Закрыт",
+		"Заказ только что создан",
+		"Заказ обрабатывается",
+	} {
+		if !strings.Contains(tc.Text, want) {
+			t.Errorf("expected text to contain %q, got:\n%s", want, tc.Text)
+		}
+	}
+}
+
 func TestObjectStructureHandler_MissingArgs(t *testing.T) {
 	client := onec.NewClient("http://localhost:0", "", "")
 	handler := NewObjectStructureHandler(client)
