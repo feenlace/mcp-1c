@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -19,7 +20,8 @@ func FormStructureTool() *mcp.Tool {
 		Title: "Структура формы объекта",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, кнопки и обработчики событий. " +
-			"Используй когда нужно понять как выглядит форма документа, справочника или обработки.",
+			"Используй когда нужно понять как выглядит форма документа, справочника или обработки. " +
+			"ВАЖНО: HTTP-endpoint 1С в серверном контексте не отдаёт состав элементов и обработчики формы - для полной структуры запусти сервер с флагом --dump (выгрузка конфигурации в файлы), тогда состав элементов, команды и обработчики берутся из Form.xml. Без --dump возвращаются только имя и заголовок формы.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -33,7 +35,7 @@ func FormStructureTool() *mcp.Tool {
 				},
 				"form_name": {
 					"type": "string",
-					"description": "Имя формы (если не указано — возвращается первая найденная форма)"
+					"description": "Имя формы (если не указано - возвращается первая найденная форма)"
 				}
 			},
 			"required": ["object_type", "object_name"]
@@ -48,9 +50,20 @@ type formInput struct {
 }
 
 // NewFormStructureHandler returns a ToolHandler that fetches form structure.
-// If dumpDir is provided, it will be used to enrich the result with data
-// parsed from Form.xml files (elements, commands, handlers) which are not
-// available through the 1C HTTP endpoint in Enterprise mode.
+//
+// The 1C HTTP endpoint in the Enterprise/server context cannot enumerate the
+// runtime UI tree (no access to ФормаКлиентскогоПриложения), so it returns
+// only the form name and title - Elements/Commands/Handlers from it are
+// always empty. The full structure is parsed from the local DumpConfigToFiles
+// output (Form.xml) when --dump is configured.
+//
+// Behaviour:
+//   - Name/Title come from HTTP if available; dump fills them in otherwise.
+//   - Elements/Commands/Handlers come from dump when --dump is set; otherwise
+//     the response contains only Name+Title (degraded but valid).
+//   - If both HTTP and dump fail we return an error.
+//   - dump-only failures (HTTP OK, dump broken) are logged at WARN so users
+//     can diagnose why enrichment did not happen, but do not fail the call.
 func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input formInput
@@ -61,25 +74,30 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 			return nil, fmt.Errorf("object_type and object_name are required")
 		}
 
-		// Try 1C HTTP endpoint first.
+		// Hit the 1C HTTP endpoint for the form's Name and Title (Synonym).
 		var form onec.FormStructure
-		var httpErr error
 		endpoint := fmt.Sprintf("/form/%s/%s", input.ObjectType, input.ObjectName)
-		httpErr = client.Get(ctx, endpoint, &form)
+		httpErr := client.Get(ctx, endpoint, &form)
 
-		// If dump directory is configured, try to enrich from Form.xml.
+		// If --dump is wired up, parse the matching Form.xml for the full
+		// structure (Elements/Commands/Handlers - HTTP cannot provide them).
 		if dumpDir != "" {
 			dumpForm, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
-			if dumpErr == nil && dumpForm != nil {
-				// Use dump data if HTTP failed or returned empty elements/commands/handlers.
-				if httpErr != nil {
-					form = *dumpForm
-				} else {
-					enrichFormFromDump(&form, dumpForm)
-				}
-			} else if httpErr != nil {
-				// Both sources failed.
+			switch {
+			case dumpErr == nil && dumpForm != nil:
+				mergeDumpIntoForm(&form, dumpForm)
+			case httpErr != nil:
+				// Both sources failed - return a combined error so the user
+				// can see why we have nothing to show.
 				return nil, fmt.Errorf("fetching form structure from 1C: %w (dump fallback: %v)", httpErr, dumpErr)
+			default:
+				// HTTP gave us at least Name+Title but the dump enrichment
+				// did not work. Log it so users notice missing details.
+				slog.Warn("Form dump enrichment failed",
+					"object_type", input.ObjectType,
+					"object_name", input.ObjectName,
+					"form_name", input.FormName,
+					"error", dumpErr)
 			}
 		} else if httpErr != nil {
 			return nil, fmt.Errorf("fetching form structure from 1C: %w", httpErr)
@@ -139,11 +157,22 @@ func convertDumpForm(formName string, info *dump.FormInfo) *onec.FormStructure {
 	}
 
 	for _, e := range info.Elements {
+		var events []onec.FormHandler
+		if len(e.Events) > 0 {
+			events = make([]onec.FormHandler, 0, len(e.Events))
+			for _, ev := range e.Events {
+				events = append(events, onec.FormHandler{
+					Event:   ev.Event,
+					Handler: ev.Handler,
+				})
+			}
+		}
 		form.Elements = append(form.Elements, onec.FormElement{
 			Name:     e.Name,
 			Type:     dump.DisplayType(e.Type),
 			Title:    e.Title,
 			DataPath: e.DataPath,
+			Events:   events,
 		})
 	}
 
@@ -164,19 +193,28 @@ func convertDumpForm(formName string, info *dump.FormInfo) *onec.FormStructure {
 	return form
 }
 
-// enrichFormFromDump fills in empty sections of the HTTP response with dump data.
-func enrichFormFromDump(form *onec.FormStructure, dumpForm *onec.FormStructure) {
-	if len(form.Elements) == 0 && len(dumpForm.Elements) > 0 {
+// mergeDumpIntoForm merges dump data into the HTTP response.
+//
+// The HTTP endpoint in Enterprise mode never returns Elements/Commands/
+// Handlers (BSL has no server-side API for those collections), so the dump
+// is the authoritative source for them. Name and Title are kept from HTTP
+// when present (HTTP uses the configured Synonym), with dump as fallback.
+func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure) {
+	if form.Name == "" {
+		form.Name = dumpForm.Name
+	}
+	if form.Title == "" {
+		form.Title = dumpForm.Title
+	}
+	// Elements/Commands/Handlers: dump wins because HTTP never populates them.
+	if len(dumpForm.Elements) > 0 {
 		form.Elements = dumpForm.Elements
 	}
-	if len(form.Commands) == 0 && len(dumpForm.Commands) > 0 {
+	if len(dumpForm.Commands) > 0 {
 		form.Commands = dumpForm.Commands
 	}
-	if len(form.Handlers) == 0 && len(dumpForm.Handlers) > 0 {
+	if len(dumpForm.Handlers) > 0 {
 		form.Handlers = dumpForm.Handlers
-	}
-	if form.Title == "" && dumpForm.Title != "" {
-		form.Title = dumpForm.Title
 	}
 }
 
@@ -198,6 +236,20 @@ func formatFormStructure(f *onec.FormStructure) string {
 				escapePipe(e.Name), escapePipe(e.Type), escapePipe(e.Title), escapePipe(e.DataPath))
 		}
 		b.WriteByte('\n')
+
+		// Element-level events live one level deeper than form-level handlers
+		// (### vs ##) and are only emitted when at least one element exposes
+		// them - most form elements have none.
+		if hasElementEvents(f.Elements) {
+			b.WriteString("### События элементов\n\n")
+			for _, e := range f.Elements {
+				for _, ev := range e.Events {
+					fmt.Fprintf(&b, "- **%s** (`%s`) → %s()\n",
+						e.Name, ev.Event, ev.Handler)
+				}
+			}
+			b.WriteByte('\n')
+		}
 	}
 
 	if len(f.Commands) > 0 {
@@ -222,6 +274,18 @@ func formatFormStructure(f *onec.FormStructure) string {
 // escapePipe escapes pipe characters so they do not break markdown tables.
 func escapePipe(s string) string {
 	return strings.ReplaceAll(s, "|", `\|`)
+}
+
+// hasElementEvents reports whether any element in the slice carries at least
+// one event handler. Used to decide whether to emit the "События элементов"
+// section.
+func hasElementEvents(elements []onec.FormElement) bool {
+	for _, e := range elements {
+		if len(e.Events) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // joinMapKeys returns a comma-separated list of map keys.

@@ -24,6 +24,11 @@ type FormElementInfo struct {
 	Type     string // XML element tag name (InputField, Table, etc.)
 	Title    string
 	DataPath string
+	// Events lists this element's own direct <Events> handlers (e.g. an
+	// InputField's OnChange, a Table's OnActivateRow). Handlers belonging
+	// to nested ChildItems are attached to their own elements, not propagated
+	// up - each element keeps only its direct events.
+	Events []FormHandlerInfo
 }
 
 // FormCommandInfo represents a parsed form command.
@@ -59,7 +64,7 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 	entries, err := os.ReadDir(formsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil // No forms directory — not an error.
+			return nil, nil // No forms directory - not an error.
 		}
 		return nil, fmt.Errorf("reading forms directory: %w", err)
 	}
@@ -89,15 +94,46 @@ func ParseFormXML(path string) (*FormInfo, error) {
 }
 
 // parseFormXMLData parses XML data from a 1C form dump file.
-// The 1C form XML uses namespaces heavily. Go's xml.Decoder resolves
-// prefixed names (e.g., v8:item) into their full namespace form, so we
-// match on the Local part of the name only.
+//
+// The dump uses the xcf/logform schema:
+//
+//	<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" ...>
+//	  <Title><v8:item><v8:lang>ru</v8:lang><v8:content>...</v8:content></v8:item></Title>
+//	  <Events><Event name="OnOpen">ПриОткрытии</Event></Events>
+//	  <ChildItems>
+//	    <InputField name="Поле1" id="1">
+//	      <DataPath>Объект.Поле1</DataPath>
+//	      <Title>...localized...</Title>
+//	      <Events><Event name="OnChange">Поле1ПриИзменении</Event></Events>
+//	    </InputField>
+//	    <UsualGroup name="Группа" id="2">
+//	      <ChildItems>...recursive...</ChildItems>
+//	    </UsualGroup>
+//	  </ChildItems>
+//	  <Commands>
+//	    <Command name="Сохранить" id="1"><Action>СохранитьВыполнить</Action></Command>
+//	  </Commands>
+//	</Form>
+//
+// Notes:
+//   - Element name comes from the "name" attribute, not from a <Name> child.
+//   - <Event name="X">handler</Event> wraps handler name as text content.
+//   - Form-level <Events> are reported as FormInfo.Handlers; element-level
+//     <Events> are attached to the owning FormElementInfo.Events and are
+//     NOT duplicated into FormInfo.Handlers.
+//   - <ChildItems> are recursive - elements at any depth are flattened.
+//   - The Go xml.Decoder resolves prefixed names so we match on Local only.
 func parseFormXMLData(data []byte) (*FormInfo, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	form := &FormInfo{}
 
-	// depth tracks XML nesting depth.
+	// We track XML depth so we can disambiguate top-level vs nested sections
+	// (only form-level <Events> become Handlers; element-level <Events>
+	// are ignored for now to keep the flat list focused on UI structure).
 	depth := 0
+	// formDepth is the depth at which we observed the root <Form> element.
+	// Stays at 0 until we enter it, then becomes 1.
+	formDepth := -1
 
 	for {
 		tok, err := decoder.Token()
@@ -110,24 +146,34 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 			depth++
 			local := t.Name.Local
 
-			// Form > Title (depth 2).
-			if depth == 2 && local == "Title" {
-				form.Title = readLocalizedString(decoder, &depth)
+			// Capture root form depth so direct children can be recognised
+			// regardless of any XML prologue / leading whitespace.
+			if formDepth == -1 && local == "Form" {
+				formDepth = depth
+				continue
 			}
 
-			// Form > Elements container (depth 2).
-			if depth == 2 && local == "Elements" {
-				form.Elements = parseElementsSection(decoder, &depth)
-			}
-
-			// Form > Commands container (depth 2).
-			if depth == 2 && local == "Commands" {
-				form.Commands = parseCommandsSection(decoder, &depth)
-			}
-
-			// Form > Handlers container (depth 2).
-			if depth == 2 && local == "Handlers" {
-				form.Handlers = parseHandlersSection(decoder, &depth)
+			// Direct children of <Form>.
+			if depth == formDepth+1 {
+				switch local {
+				case "Title":
+					form.Title = readLocalizedString(decoder, &depth)
+				case "Events":
+					form.Handlers = parseEventsSection(decoder, &depth)
+				case "ChildItems":
+					form.Elements = parseChildItemsRecursive(decoder, &depth)
+				case "Commands":
+					form.Commands = parseCommandsSection(decoder, &depth)
+				default:
+					if isFormElementTag(local) {
+						// Form has a direct UI child without a <ChildItems>
+						// wrapper (rare but possible - AutoCommandBar lives
+						// here too, but it is filtered by isFormElementTag).
+						appendElement(&form.Elements, t, decoder, &depth)
+					} else {
+						skipElement(decoder, &depth)
+					}
+				}
 			}
 
 		case xml.EndElement:
@@ -138,16 +184,20 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 	return form, nil
 }
 
-// parseElementsSection reads all form elements from the <Elements> section,
-// including nested elements inside groups and ChildItems.
-func parseElementsSection(decoder *xml.Decoder, depth *int) []FormElementInfo {
+// parseChildItemsRecursive reads a <ChildItems> block and flattens every
+// descendant element (and its own ChildItems, recursively) into a single
+// slice. Service decorations (ContextMenu, ExtendedTooltip, …) are skipped.
+// Transparent containers (e.g. AutoCommandBar) are not recorded themselves
+// but their nested ChildItems are descended into so buttons inside command
+// bars surface in the flat list.
+func parseChildItemsRecursive(decoder *xml.Decoder, depth *int) []FormElementInfo {
 	var elements []FormElementInfo
 	sectionDepth := *depth
 
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return elements
 		}
 
 		switch t := tok.(type) {
@@ -155,10 +205,16 @@ func parseElementsSection(decoder *xml.Decoder, depth *int) []FormElementInfo {
 			*depth++
 			local := t.Name.Local
 
-			if isFormElementTag(local) {
-				elem, nested := parseFormElement(decoder, local, depth)
-				elements = append(elements, elem)
-				elements = append(elements, nested...)
+			switch {
+			case isServiceElementTag(local):
+				skipElement(decoder, depth)
+			case isTransparentContainerTag(local):
+				elements = append(elements, descendIntoChildItems(decoder, depth)...)
+			case isFormElementTag(local):
+				appendElement(&elements, t, decoder, depth)
+			default:
+				// Unknown tag inside ChildItems: skip without recording.
+				skipElement(decoder, depth)
 			}
 
 		case xml.EndElement:
@@ -168,21 +224,63 @@ func parseElementsSection(decoder *xml.Decoder, depth *int) []FormElementInfo {
 			}
 		}
 	}
-
-	return elements
 }
 
-// parseFormElement reads a single form element and any nested child elements.
-// It returns the element itself and a slice of any nested elements found in ChildItems.
-func parseFormElement(decoder *xml.Decoder, elementType string, depth *int) (FormElementInfo, []FormElementInfo) {
-	elem := FormElementInfo{Type: elementType}
+// descendIntoChildItems reads an element subtree and returns only the
+// elements discovered inside its <ChildItems> child (if any). The
+// surrounding element itself is not recorded. Used for transparent
+// containers such as AutoCommandBar where the wrapper is noise but its
+// inner buttons are meaningful.
+func descendIntoChildItems(decoder *xml.Decoder, depth *int) []FormElementInfo {
+	var elements []FormElementInfo
+	containerDepth := *depth
+
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return elements
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			*depth++
+			if *depth == containerDepth+1 && t.Name.Local == "ChildItems" {
+				elements = append(elements, parseChildItemsRecursive(decoder, depth)...)
+			} else {
+				skipElement(decoder, depth)
+			}
+
+		case xml.EndElement:
+			*depth--
+			if *depth < containerDepth {
+				return elements
+			}
+		}
+	}
+}
+
+// appendElement parses one form element starting at its xml.StartElement and
+// appends it (plus any nested ChildItems descendants) into elements.
+func appendElement(elements *[]FormElementInfo, start xml.StartElement, decoder *xml.Decoder, depth *int) {
+	elem, nested := parseFormElement(decoder, start, depth)
+	*elements = append(*elements, elem)
+	*elements = append(*elements, nested...)
+}
+
+// parseFormElement reads a single form element. It returns the element itself
+// plus any descendants found inside nested <ChildItems> blocks.
+func parseFormElement(decoder *xml.Decoder, start xml.StartElement, depth *int) (FormElementInfo, []FormElementInfo) {
+	elem := FormElementInfo{
+		Type: start.Name.Local,
+		Name: attr(start, "name"),
+	}
 	var nested []FormElementInfo
 	elemDepth := *depth
 
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return elem, nested
 		}
 
 		switch t := tok.(type) {
@@ -190,20 +288,32 @@ func parseFormElement(decoder *xml.Decoder, elementType string, depth *int) (For
 			*depth++
 			local := t.Name.Local
 
-			// Direct children of the element.
+			// Only inspect direct children of this element.
 			if *depth == elemDepth+1 {
-				switch local {
-				case "Name":
-					elem.Name = readCharData(decoder, depth)
-				case "Title":
+				switch {
+				case local == "Title":
 					elem.Title = readLocalizedString(decoder, depth)
-				case "DataPath":
+				case local == "DataPath":
 					elem.DataPath = readCharData(decoder, depth)
-				case "ChildItems":
-					nested = parseChildItems(decoder, depth)
+				case local == "Events":
+					// Element-level <Events> belong to this element only.
+					// Nested ChildItems will keep their own <Events> attached
+					// to their own elements via the same code path.
+					elem.Events = parseEventsSection(decoder, depth)
+				case local == "ChildItems":
+					nested = append(nested, parseChildItemsRecursive(decoder, depth)...)
+				case isTransparentContainerTag(local):
+					// e.g. a Table containing <AutoCommandBar><ChildItems>...</ChildItems></AutoCommandBar>
+					// - surface its buttons in the flat list.
+					nested = append(nested, descendIntoChildItems(decoder, depth)...)
 				default:
 					skipElement(decoder, depth)
 				}
+			} else {
+				// Defensive: any deeper start (shouldn't normally happen
+				// because direct-child handlers consume their subtree)
+				// is skipped to keep the depth counter balanced.
+				skipElement(decoder, depth)
 			}
 
 		case xml.EndElement:
@@ -213,44 +323,11 @@ func parseFormElement(decoder *xml.Decoder, elementType string, depth *int) (For
 			}
 		}
 	}
-
-	return elem, nested
 }
 
-// parseChildItems reads nested form elements from a <ChildItems> section.
-func parseChildItems(decoder *xml.Decoder, depth *int) []FormElementInfo {
-	var elements []FormElementInfo
-	childDepth := *depth
-
-	for {
-		tok, err := decoder.Token()
-		if err != nil {
-			break
-		}
-
-		switch t := tok.(type) {
-		case xml.StartElement:
-			*depth++
-			local := t.Name.Local
-
-			if isFormElementTag(local) {
-				elem, nested := parseFormElement(decoder, local, depth)
-				elements = append(elements, elem)
-				elements = append(elements, nested...)
-			}
-
-		case xml.EndElement:
-			*depth--
-			if *depth < childDepth {
-				return elements
-			}
-		}
-	}
-
-	return elements
-}
-
-// parseCommandsSection reads all commands from the <Commands> section.
+// parseCommandsSection reads all commands from the top-level <Commands> block.
+// Each <Command name="X" id="Y"><Action>Z</Action></Command> becomes
+// FormCommandInfo{Name: "X", Action: "Z"}.
 func parseCommandsSection(decoder *xml.Decoder, depth *int) []FormCommandInfo {
 	var commands []FormCommandInfo
 	sectionDepth := *depth
@@ -258,15 +335,19 @@ func parseCommandsSection(decoder *xml.Decoder, depth *int) []FormCommandInfo {
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return commands
 		}
 
 		switch t := tok.(type) {
 		case xml.StartElement:
 			*depth++
 			if t.Name.Local == "Command" {
-				cmd := parseFormCommand(decoder, depth)
-				commands = append(commands, cmd)
+				cmd := parseFormCommand(decoder, t, depth)
+				if cmd.Name != "" {
+					commands = append(commands, cmd)
+				}
+			} else {
+				skipElement(decoder, depth)
 			}
 
 		case xml.EndElement:
@@ -276,33 +357,27 @@ func parseCommandsSection(decoder *xml.Decoder, depth *int) []FormCommandInfo {
 			}
 		}
 	}
-
-	return commands
 }
 
-// parseFormCommand reads a single form command.
-func parseFormCommand(decoder *xml.Decoder, depth *int) FormCommandInfo {
-	cmd := FormCommandInfo{}
+// parseFormCommand reads a single <Command> entry. The command name comes
+// from the "name" attribute; the action comes from the <Action> child text.
+func parseFormCommand(decoder *xml.Decoder, start xml.StartElement, depth *int) FormCommandInfo {
+	cmd := FormCommandInfo{Name: attr(start, "name")}
 	cmdDepth := *depth
 
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return cmd
 		}
 
 		switch t := tok.(type) {
 		case xml.StartElement:
 			*depth++
-			if *depth == cmdDepth+1 {
-				switch t.Name.Local {
-				case "Name":
-					cmd.Name = readCharData(decoder, depth)
-				case "Action":
-					cmd.Action = readCharData(decoder, depth)
-				default:
-					skipElement(decoder, depth)
-				}
+			if *depth == cmdDepth+1 && t.Name.Local == "Action" {
+				cmd.Action = readCharData(decoder, depth)
+			} else {
+				skipElement(decoder, depth)
 			}
 
 		case xml.EndElement:
@@ -312,29 +387,34 @@ func parseFormCommand(decoder *xml.Decoder, depth *int) FormCommandInfo {
 			}
 		}
 	}
-
-	return cmd
 }
 
-// parseHandlersSection reads all event handlers from the <Handlers> section.
-func parseHandlersSection(decoder *xml.Decoder, depth *int) []FormHandlerInfo {
+// parseEventsSection reads <Event name="X">handler</Event> entries.
+// Used for both the form-level <Events> block (FormInfo.Handlers) and
+// element-level <Events> (FormElementInfo.Events).
+func parseEventsSection(decoder *xml.Decoder, depth *int) []FormHandlerInfo {
 	var handlers []FormHandlerInfo
 	sectionDepth := *depth
 
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return handlers
 		}
 
 		switch t := tok.(type) {
 		case xml.StartElement:
 			*depth++
 			if t.Name.Local == "Event" {
-				h := parseFormHandler(decoder, depth)
+				h := FormHandlerInfo{
+					Event:   attr(t, "name"),
+					Handler: readCharData(decoder, depth),
+				}
 				if h.Event != "" && h.Handler != "" {
 					handlers = append(handlers, h)
 				}
+			} else {
+				skipElement(decoder, depth)
 			}
 
 		case xml.EndElement:
@@ -344,61 +424,23 @@ func parseHandlersSection(decoder *xml.Decoder, depth *int) []FormHandlerInfo {
 			}
 		}
 	}
-
-	return handlers
 }
 
-// parseFormHandler reads a single event handler entry.
-func parseFormHandler(decoder *xml.Decoder, depth *int) FormHandlerInfo {
-	h := FormHandlerInfo{}
-	handlerDepth := *depth
-
-	for {
-		tok, err := decoder.Token()
-		if err != nil {
-			break
-		}
-
-		switch t := tok.(type) {
-		case xml.StartElement:
-			*depth++
-			if *depth == handlerDepth+1 {
-				switch t.Name.Local {
-				case "Name":
-					h.Event = readCharData(decoder, depth)
-				case "Handler":
-					h.Handler = readCharData(decoder, depth)
-				default:
-					skipElement(decoder, depth)
-				}
-			}
-
-		case xml.EndElement:
-			*depth--
-			if *depth < handlerDepth {
-				return h
-			}
-		}
-	}
-
-	return h
-}
-
-// readCharData reads the text content of the current element and consumes its end tag.
+// readCharData reads the text content of the current element and consumes its
+// end tag. Nested elements (if any) are skipped to keep the depth balanced.
 func readCharData(decoder *xml.Decoder, depth *int) string {
 	var sb strings.Builder
 
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return strings.TrimSpace(sb.String())
 		}
 
 		switch t := tok.(type) {
 		case xml.CharData:
 			sb.Write(t)
 		case xml.StartElement:
-			// Skip nested elements.
 			*depth++
 			skipElement(decoder, depth)
 		case xml.EndElement:
@@ -406,14 +448,12 @@ func readCharData(decoder *xml.Decoder, depth *int) string {
 			return strings.TrimSpace(sb.String())
 		}
 	}
-
-	return strings.TrimSpace(sb.String())
 }
 
 // readLocalizedString reads a 1C localized string (v8:LocalStringType).
-// It takes the first available value — typically the Russian text.
-// In the XML, Go's decoder resolves "v8:item" to Local="item" with the namespace
-// in Space, so we only match on Local.
+// It returns the first available <v8:item><v8:content> value - typically
+// the Russian text. Go's xml.Decoder resolves prefixed names so we only
+// inspect the Local part.
 func readLocalizedString(decoder *xml.Decoder, depth *int) string {
 	var result string
 	titleDepth := *depth
@@ -421,7 +461,7 @@ func readLocalizedString(decoder *xml.Decoder, depth *int) string {
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return result
 		}
 
 		switch t := tok.(type) {
@@ -432,9 +472,7 @@ func readLocalizedString(decoder *xml.Decoder, depth *int) string {
 			}
 		case xml.StartElement:
 			*depth++
-			local := t.Name.Local
-
-			if local == "item" {
+			if t.Name.Local == "item" {
 				val := readLocalizedItem(decoder, depth)
 				if val != "" && result == "" {
 					result = val
@@ -450,11 +488,10 @@ func readLocalizedString(decoder *xml.Decoder, depth *int) string {
 			}
 		}
 	}
-
-	return result
 }
 
-// readLocalizedItem reads a single <v8:item> with <v8:lang> and <v8:content> children.
+// readLocalizedItem reads a single <v8:item> entry and returns the
+// <v8:content> child text.
 func readLocalizedItem(decoder *xml.Decoder, depth *int) string {
 	var content string
 	itemDepth := *depth
@@ -462,7 +499,7 @@ func readLocalizedItem(decoder *xml.Decoder, depth *int) string {
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return content
 		}
 
 		switch t := tok.(type) {
@@ -481,8 +518,6 @@ func readLocalizedItem(decoder *xml.Decoder, depth *int) string {
 			}
 		}
 	}
-
-	return content
 }
 
 // skipElement consumes all tokens until the matching end element.
@@ -492,7 +527,7 @@ func skipElement(decoder *xml.Decoder, depth *int) {
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			break
+			return
 		}
 
 		switch tok.(type) {
@@ -507,67 +542,104 @@ func skipElement(decoder *xml.Decoder, depth *int) {
 	}
 }
 
-// formElementTags lists XML tag names that represent form elements.
+// attr returns the value of an attribute by local name, ignoring namespace.
+func attr(start xml.StartElement, name string) string {
+	for _, a := range start.Attr {
+		if a.Name.Local == name {
+			return a.Value
+		}
+	}
+	return ""
+}
+
+// formElementTags lists XML tag names that represent meaningful form elements.
+// Listed elements are recorded; everything else inside ChildItems is skipped.
 var formElementTags = map[string]bool{
-	"InputField":              true,
-	"LabelField":              true,
-	"CheckBoxField":           true,
-	"RadioButtonField":        true,
-	"NumberField":             true,
-	"TextDocumentField":       true,
+	"InputField":               true,
+	"LabelField":               true,
+	"CheckBoxField":            true,
+	"RadioButtonField":         true,
+	"NumberField":              true,
+	"TextDocumentField":        true,
 	"SpreadsheetDocumentField": true,
-	"PictureField":            true,
-	"Table":                   true,
-	"FormattedDocumentField":  true,
-	"PlannerField":            true,
-	"DendrogramField":         true,
-	"ChartField":              true,
-	"GanttChartField":         true,
-	"PeriodField":             true,
-	"ProgressBarField":        true,
-	"TrackBarField":           true,
-	"CalendarField":           true,
-	"HTMLDocumentField":       true,
-	"Button":                  true,
-	"UsualGroup":              true,
-	"Pages":                   true,
-	"Page":                    true,
-	"CommandBar":              true,
-	"Popup":                   true,
-	"ContextMenu":             true,
-	"SearchControlAddition":   true,
-	"ViewStatusAddition":      true,
-	"SearchStringAddition":    true,
-	"ColumnGroup":             true,
-	"LabelDecoration":         true,
-	"PictureDecoration":       true,
-	"Hyperlink":               true,
-	"Addition":                true,
+	"PictureField":             true,
+	"Table":                    true,
+	"FormattedDocumentField":   true,
+	"PlannerField":             true,
+	"DendrogramField":          true,
+	"ChartField":               true,
+	"GanttChartField":          true,
+	"PeriodField":              true,
+	"ProgressBarField":         true,
+	"TrackBarField":            true,
+	"CalendarField":            true,
+	"HTMLDocumentField":        true,
+	"Button":                   true,
+	"UsualGroup":               true,
+	"Pages":                    true,
+	"Page":                     true,
+	"CommandBar":               true,
+	"Popup":                    true,
+	"ColumnGroup":              true,
+	"LabelDecoration":          true,
+	"PictureDecoration":        true,
+	"Hyperlink":                true,
+	"Addition":                 true,
+	"ButtonGroup":              true,
 }
 
 func isFormElementTag(tag string) bool {
 	return formElementTags[tag]
 }
 
+// serviceElementTags lists XML tag names that are purely decorative or
+// auxiliary and should never appear in the user-facing element list.
+// They are emitted by the 1C designer behind almost every UI control
+// and would otherwise drown out the meaningful structure.
+var serviceElementTags = map[string]bool{
+	"ContextMenu":           true,
+	"ExtendedTooltip":       true,
+	"ShortTooltip":          true,
+	"SearchStringAddition":  true,
+	"ViewStatusAddition":    true,
+	"SearchControlAddition": true,
+}
+
+func isServiceElementTag(tag string) bool {
+	return serviceElementTags[tag]
+}
+
+// transparentContainerTags are wrappers whose own presence is uninteresting
+// but whose nested <ChildItems> contain real UI elements (e.g. command-bar
+// buttons). We descend into them without recording the wrapper itself.
+var transparentContainerTags = map[string]bool{
+	"AutoCommandBar": true,
+}
+
+func isTransparentContainerTag(tag string) bool {
+	return transparentContainerTags[tag]
+}
+
 // elementTypeDisplayName maps XML element types to Russian display names.
 var elementTypeDisplayName = map[string]string{
-	"InputField":              "ПолеВвода",
-	"LabelField":              "ПолеНадписи",
-	"CheckBoxField":           "ФлажокПоле",
-	"RadioButtonField":        "ПолеПереключателя",
-	"NumberField":             "ПолеЧисла",
-	"TextDocumentField":       "ПолеТекстовогоДокумента",
+	"InputField":               "ПолеВвода",
+	"LabelField":               "ПолеНадписи",
+	"CheckBoxField":            "ФлажокПоле",
+	"RadioButtonField":         "ПолеПереключателя",
+	"NumberField":              "ПолеЧисла",
+	"TextDocumentField":        "ПолеТекстовогоДокумента",
 	"SpreadsheetDocumentField": "ПолеТабличногоДокумента",
-	"PictureField":            "ПолеКартинки",
-	"Table":                   "ТаблицаФормы",
-	"Button":                  "Кнопка",
-	"UsualGroup":              "ОбычнаяГруппа",
-	"Pages":                   "Страницы",
-	"Page":                    "Страница",
-	"CommandBar":              "КоманднаяПанель",
-	"LabelDecoration":         "ДекорацияНадпись",
-	"PictureDecoration":       "ДекорацияКартинка",
-	"Hyperlink":               "Гиперссылка",
+	"PictureField":             "ПолеКартинки",
+	"Table":                    "ТаблицаФормы",
+	"Button":                   "Кнопка",
+	"ButtonGroup":              "ГруппаКнопок",
+	"UsualGroup":               "ОбычнаяГруппа",
+	"Pages":                    "Страницы",
+	"Page":                     "Страница",
+	"CommandBar":               "КоманднаяПанель",
+	"LabelDecoration":          "ДекорацияНадпись",
+	"PictureDecoration":        "ДекорацияКартинка",
+	"Hyperlink":                "Гиперссылка",
 }
 
 // DisplayType returns a Russian name for the element type, or the raw tag if unknown.

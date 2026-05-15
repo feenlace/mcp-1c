@@ -7,119 +7,213 @@ import (
 	"testing"
 )
 
-func TestParseFormXML_Basic(t *testing.T) {
-	xml := `<?xml version="1.0" encoding="UTF-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform"
-      xmlns:v8="http://v8.1c.ru/8.1/data/core">
-  <Title>
-    <v8:item>
-      <v8:lang>ru</v8:lang>
-      <v8:content>Реализация товаров и услуг</v8:content>
-    </v8:item>
-  </Title>
-  <Elements>
-    <InputField>
-      <Name>Контрагент</Name>
-      <Title>
-        <v8:item>
-          <v8:lang>ru</v8:lang>
-          <v8:content>Контрагент</v8:content>
-        </v8:item>
-      </Title>
-      <DataPath>Объект.Контрагент</DataPath>
-    </InputField>
-    <Table>
-      <Name>Товары</Name>
-      <DataPath>Объект.Товары</DataPath>
-    </Table>
-    <Button>
-      <Name>КнопкаПровести</Name>
-      <Title>
-        <v8:item>
-          <v8:lang>ru</v8:lang>
-          <v8:content>Провести</v8:content>
-        </v8:item>
-      </Title>
-    </Button>
-  </Elements>
-  <Commands>
-    <Command>
-      <Name>Провести</Name>
-      <Action>Провести</Action>
-    </Command>
-    <Command>
-      <Name>ПечатьНакладной</Name>
-      <Action>ПечатьНакладной</Action>
-    </Command>
-  </Commands>
-  <Handlers>
-    <Event>
-      <Name>ПриОткрытии</Name>
-      <Handler>ПриОткрытии</Handler>
-    </Event>
-    <Event>
-      <Name>ПередЗаписью</Name>
-      <Handler>ПередЗаписью</Handler>
-    </Event>
-  </Handlers>
-</Form>`
+// The fixtures in testdata/ are real 1C dump files (xcf/logform schema).
+// They exercise the parser against the formats produced by DumpConfigToFiles,
+// not against a synthetic schema we made up.
 
-	form, err := parseFormXMLData([]byte(xml))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+// TestParseFormXML_EmptyForm exercises a form with no ChildItems, no Title,
+// no Commands, and exactly one form-level Event handler.
+func TestParseFormXML_EmptyForm(t *testing.T) {
+	form := mustParseFixture(t, "empty_form.xml")
 
-	// Title.
-	if form.Title != "Реализация товаров и услуг" {
-		t.Errorf("expected title %q, got %q", "Реализация товаров и услуг", form.Title)
+	if form.Title != "" {
+		t.Errorf("expected empty title, got %q", form.Title)
 	}
-
-	// Elements.
-	if len(form.Elements) != 3 {
-		t.Fatalf("expected 3 elements, got %d", len(form.Elements))
+	if len(form.Elements) != 0 {
+		t.Errorf("expected 0 elements, got %d: %+v", len(form.Elements), form.Elements)
 	}
-
-	assertElement(t, form.Elements[0], "Контрагент", "InputField", "Контрагент", "Объект.Контрагент")
-	assertElement(t, form.Elements[1], "Товары", "Table", "", "Объект.Товары")
-	assertElement(t, form.Elements[2], "КнопкаПровести", "Button", "Провести", "")
-
-	// Commands.
-	if len(form.Commands) != 2 {
-		t.Fatalf("expected 2 commands, got %d", len(form.Commands))
+	if len(form.Commands) != 0 {
+		t.Errorf("expected 0 commands, got %d: %+v", len(form.Commands), form.Commands)
 	}
-	if form.Commands[0].Name != "Провести" || form.Commands[0].Action != "Провести" {
-		t.Errorf("unexpected command[0]: %+v", form.Commands[0])
+	if len(form.Handlers) != 1 {
+		t.Fatalf("expected 1 handler, got %d: %+v", len(form.Handlers), form.Handlers)
 	}
-	if form.Commands[1].Name != "ПечатьНакладной" || form.Commands[1].Action != "ПечатьНакладной" {
-		t.Errorf("unexpected command[1]: %+v", form.Commands[1])
-	}
-
-	// Handlers.
-	if len(form.Handlers) != 2 {
-		t.Fatalf("expected 2 handlers, got %d", len(form.Handlers))
-	}
-	if form.Handlers[0].Event != "ПриОткрытии" || form.Handlers[0].Handler != "ПриОткрытии" {
+	if form.Handlers[0].Event != "OnOpen" || form.Handlers[0].Handler != "ПриОткрытии" {
 		t.Errorf("unexpected handler[0]: %+v", form.Handlers[0])
-	}
-	if form.Handlers[1].Event != "ПередЗаписью" || form.Handlers[1].Handler != "ПередЗаписью" {
-		t.Errorf("unexpected handler[1]: %+v", form.Handlers[1])
 	}
 }
 
-func TestParseFormXML_NestedElements(t *testing.T) {
+// TestParseFormXML_CommonFormPassword exercises a form with elements,
+// nested AutoCommandBar buttons, a single InputField, one form-level Event,
+// and a single Command.
+func TestParseFormXML_CommonFormPassword(t *testing.T) {
+	form := mustParseFixture(t, "common_form_password.xml")
+
+	// Title is not present on the top level for this form.
+	if form.Title != "" {
+		t.Errorf("expected empty title, got %q", form.Title)
+	}
+
+	// Should at least contain the top-level InputField "НовыйПароль".
+	if !hasElement(form.Elements, "НовыйПароль", "InputField") {
+		t.Errorf("expected InputField %q in elements, got: %+v", "НовыйПароль", form.Elements)
+	}
+
+	// DataPath of the InputField must be the literal value from XML.
+	for _, e := range form.Elements {
+		if e.Name == "НовыйПароль" && e.Type == "InputField" {
+			if e.DataPath != "НовыйПароль" {
+				t.Errorf("expected DataPath %q for НовыйПароль, got %q", "НовыйПароль", e.DataPath)
+			}
+		}
+	}
+
+	// Exactly one form-level handler.
+	if len(form.Handlers) != 1 {
+		t.Fatalf("expected 1 handler, got %d: %+v", len(form.Handlers), form.Handlers)
+	}
+	if form.Handlers[0].Event != "OnCreateAtServer" || form.Handlers[0].Handler != "ПриСозданииНаСервере" {
+		t.Errorf("unexpected handler[0]: %+v", form.Handlers[0])
+	}
+
+	// Exactly one Command on the top level.
+	if len(form.Commands) != 1 {
+		t.Fatalf("expected 1 command, got %d: %+v", len(form.Commands), form.Commands)
+	}
+	if form.Commands[0].Name != "СоздатьДругой" || form.Commands[0].Action != "СоздатьДругой" {
+		t.Errorf("unexpected command[0]: %+v", form.Commands[0])
+	}
+}
+
+// TestParseFormXML_RegisterRecord exercises a form with three top-level
+// InputField elements and one form-level Event.
+func TestParseFormXML_RegisterRecord(t *testing.T) {
+	form := mustParseFixture(t, "register_record_form.xml")
+
+	if form.Title != "" {
+		t.Errorf("expected empty title, got %q", form.Title)
+	}
+
+	// All three InputFields should be present.
+	wantFields := map[string]string{
+		"Идентификатор": "Запись.Идентификатор",
+		"Дата":          "Запись.Дата",
+		"Запрос":        "Запрос",
+	}
+	for name, dataPath := range wantFields {
+		found := false
+		for _, e := range form.Elements {
+			if e.Name == name && e.Type == "InputField" {
+				if e.DataPath != dataPath {
+					t.Errorf("element %q: expected DataPath %q, got %q", name, dataPath, e.DataPath)
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected InputField %q not found in elements: %+v", name, form.Elements)
+		}
+	}
+
+	if len(form.Commands) != 0 {
+		t.Errorf("expected 0 commands, got %d: %+v", len(form.Commands), form.Commands)
+	}
+
+	if len(form.Handlers) != 1 {
+		t.Fatalf("expected 1 handler, got %d: %+v", len(form.Handlers), form.Handlers)
+	}
+	if form.Handlers[0].Event != "OnCreateAtServer" || form.Handlers[0].Handler != "ПриСозданииНаСервере" {
+		t.Errorf("unexpected handler[0]: %+v", form.Handlers[0])
+	}
+}
+
+// TestParseFormXML_CatalogList exercises a list form with a top-level
+// Table holding a nested AutoCommandBar with many Buttons, plus two
+// form-level Events.
+func TestParseFormXML_CatalogList(t *testing.T) {
+	form := mustParseFixture(t, "catalog_list_form.xml")
+
+	// Top-level Table "Список" must be present with DataPath "Список"
+	// and its own element-level OnChange handler.
+	foundTable := false
+	for _, e := range form.Elements {
+		if e.Name == "Список" && e.Type == "Table" {
+			if e.DataPath != "Список" {
+				t.Errorf("expected DataPath %q for Table Список, got %q", "Список", e.DataPath)
+			}
+			if len(e.Events) != 1 {
+				t.Fatalf("expected 1 element-level event on Table Список, got %d: %+v",
+					len(e.Events), e.Events)
+			}
+			if e.Events[0].Event != "OnChange" || e.Events[0].Handler != "СписокПриИзменении" {
+				t.Errorf("unexpected element-level event on Table Список: %+v", e.Events[0])
+			}
+			foundTable = true
+			break
+		}
+	}
+	if !foundTable {
+		t.Errorf("expected Table %q in elements, got: %+v", "Список", form.Elements)
+	}
+
+	// Two form-level events: OnOpen and OnCreateAtServer. The element-level
+	// OnChange on Table Список must NOT leak into form.Handlers.
+	if len(form.Handlers) != 2 {
+		t.Fatalf("expected 2 form-level handlers, got %d: %+v", len(form.Handlers), form.Handlers)
+	}
+	gotEvents := map[string]string{}
+	for _, h := range form.Handlers {
+		gotEvents[h.Event] = h.Handler
+	}
+	if gotEvents["OnOpen"] != "ПриОткрытии" {
+		t.Errorf("expected OnOpen → ПриОткрытии, got %q", gotEvents["OnOpen"])
+	}
+	if gotEvents["OnCreateAtServer"] != "ПриСозданииНаСервере" {
+		t.Errorf("expected OnCreateAtServer → ПриСозданииНаСервере, got %q", gotEvents["OnCreateAtServer"])
+	}
+	if _, leaked := gotEvents["OnChange"]; leaked {
+		t.Errorf("element-level OnChange leaked into form-level Handlers: %+v", form.Handlers)
+	}
+
+	// Nested LabelFields inside Table > ChildItems must NOT inherit Table's
+	// events - only the Table itself owns them.
+	for _, e := range form.Elements {
+		if e.Name != "Список" && len(e.Events) > 0 {
+			t.Errorf("element %q (%s) unexpectedly has events: %+v", e.Name, e.Type, e.Events)
+		}
+	}
+
+	// No top-level Commands block.
+	if len(form.Commands) != 0 {
+		t.Errorf("expected 0 commands, got %d: %+v", len(form.Commands), form.Commands)
+	}
+}
+
+// TestParseFormXML_ElementLevelEvents asserts that an element's own <Events>
+// child is captured on FormElementInfo.Events, that nested ChildItems keep
+// their own Events independent from the parent element, and that
+// FormInfo.Handlers stays scoped to the form-level <Events> block only.
+func TestParseFormXML_ElementLevelEvents(t *testing.T) {
 	xml := `<?xml version="1.0" encoding="UTF-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform">
-  <Elements>
-    <UsualGroup>
-      <Name>ГруппаОсновная</Name>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.21">
+  <Events>
+    <Event name="OnOpen">ПриОткрытии</Event>
+  </Events>
+  <ChildItems>
+    <InputField name="Поле1" id="1">
+      <DataPath>Объект.Поле1</DataPath>
+      <Events>
+        <Event name="OnChange">Поле1ПриИзменении</Event>
+      </Events>
+    </InputField>
+    <UsualGroup name="Группа" id="2">
+      <Events>
+        <Event name="OnChange">ГруппаПриИзменении</Event>
+      </Events>
       <ChildItems>
-        <InputField>
-          <Name>Контрагент</Name>
-          <DataPath>Объект.Контрагент</DataPath>
+        <InputField name="Поле2" id="3">
+          <DataPath>Объект.Поле2</DataPath>
+          <Events>
+            <Event name="OnChange">Поле2ПриИзменении</Event>
+          </Events>
+        </InputField>
+        <InputField name="ПолеБезСобытий" id="4">
+          <DataPath>Объект.ПолеБезСобытий</DataPath>
         </InputField>
       </ChildItems>
     </UsualGroup>
-  </Elements>
+  </ChildItems>
 </Form>`
 
 	form, err := parseFormXMLData([]byte(xml))
@@ -127,33 +221,115 @@ func TestParseFormXML_NestedElements(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should find both the group and the nested element.
-	if len(form.Elements) < 2 {
-		t.Fatalf("expected at least 2 elements (group + nested), got %d", len(form.Elements))
+	// Form-level handlers untouched: exactly one OnOpen entry.
+	if len(form.Handlers) != 1 || form.Handlers[0].Event != "OnOpen" ||
+		form.Handlers[0].Handler != "ПриОткрытии" {
+		t.Fatalf("unexpected form-level handlers: %+v", form.Handlers)
 	}
 
-	// Check that the group was parsed.
-	foundGroup := false
-	foundField := false
+	// Build a name → events map for assertions.
+	byName := map[string][]FormHandlerInfo{}
 	for _, e := range form.Elements {
-		if e.Name == "ГруппаОсновная" && e.Type == "UsualGroup" {
-			foundGroup = true
+		byName[e.Name] = e.Events
+	}
+
+	wantEvents := map[string]FormHandlerInfo{
+		"Поле1":  {Event: "OnChange", Handler: "Поле1ПриИзменении"},
+		"Группа": {Event: "OnChange", Handler: "ГруппаПриИзменении"},
+		"Поле2":  {Event: "OnChange", Handler: "Поле2ПриИзменении"},
+	}
+	for name, want := range wantEvents {
+		got, ok := byName[name]
+		if !ok {
+			t.Errorf("expected element %q in flat list, missing", name)
+			continue
 		}
-		if e.Name == "Контрагент" && e.Type == "InputField" {
-			foundField = true
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("element %q: expected events %+v, got %+v", name, []FormHandlerInfo{want}, got)
 		}
 	}
-	if !foundGroup {
-		t.Error("expected to find UsualGroup element")
-	}
-	if !foundField {
-		t.Error("expected to find nested InputField element")
+
+	if evs, ok := byName["ПолеБезСобытий"]; ok {
+		if len(evs) != 0 {
+			t.Errorf("element ПолеБезСобытий should have no events, got %+v", evs)
+		}
+	} else {
+		t.Errorf("expected element ПолеБезСобытий in flat list")
 	}
 }
 
-func TestParseFormXML_Empty(t *testing.T) {
+// TestParseFormXML_NestedChildItemsFlat confirms that nested ChildItems
+// inside Tables / Groups are flattened into the top-level element list
+// so callers see every element regardless of where it sits in the tree.
+func TestParseFormXML_NestedChildItemsFlat(t *testing.T) {
+	form := mustParseFixture(t, "catalog_list_form.xml")
+
+	// LabelField "СписокНаименование" lives inside Table > ChildItems
+	// in the fixture, deeply nested. It must still surface in the flat list.
+	if !hasElement(form.Elements, "СписокНаименование", "LabelField") {
+		t.Errorf("expected nested LabelField %q in elements, got: %+v",
+			"СписокНаименование", elementNames(form.Elements))
+	}
+
+	// Likewise for a Button deep inside Table > AutoCommandBar > ChildItems.
+	if !hasElement(form.Elements, "СписокКнопкаСоздать", "Button") {
+		t.Errorf("expected nested Button %q in elements, got: %+v",
+			"СписокКнопкаСоздать", elementNames(form.Elements))
+	}
+}
+
+// TestParseFormXML_NoServiceNoise confirms that purely decorative
+// service items (ContextMenu, ExtendedTooltip, SearchStringAddition,
+// ViewStatusAddition, SearchControlAddition) are filtered out so the
+// caller is not buried under hundreds of empty noise entries.
+func TestParseFormXML_NoServiceNoise(t *testing.T) {
+	form := mustParseFixture(t, "catalog_list_form.xml")
+
+	noisy := map[string]bool{
+		"ContextMenu":            true,
+		"ExtendedTooltip":        true,
+		"SearchStringAddition":   true,
+		"ViewStatusAddition":     true,
+		"SearchControlAddition":  true,
+	}
+	for _, e := range form.Elements {
+		if noisy[e.Type] {
+			t.Errorf("expected service element type %q to be filtered out, got element %+v", e.Type, e)
+		}
+	}
+}
+
+// TestParseFormXML_AcceptsSyntheticMinimal exercises a hand-written
+// minimal form to confirm the parser can be driven from in-memory bytes
+// (no fixture file) and exercises the optional <Title> path.
+func TestParseFormXML_AcceptsSyntheticMinimal(t *testing.T) {
 	xml := `<?xml version="1.0" encoding="UTF-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform">
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.21">
+  <Title>
+    <v8:item>
+      <v8:lang>ru</v8:lang>
+      <v8:content>Тестовая форма</v8:content>
+    </v8:item>
+  </Title>
+  <Events>
+    <Event name="OnOpen">ПриОткрытии</Event>
+  </Events>
+  <ChildItems>
+    <InputField name="Поле1" id="1">
+      <DataPath>Объект.Поле1</DataPath>
+      <Title>
+        <v8:item>
+          <v8:lang>ru</v8:lang>
+          <v8:content>Поле</v8:content>
+        </v8:item>
+      </Title>
+    </InputField>
+  </ChildItems>
+  <Commands>
+    <Command name="Сохранить" id="1">
+      <Action>СохранитьВыполнить</Action>
+    </Command>
+  </Commands>
 </Form>`
 
 	form, err := parseFormXMLData([]byte(xml))
@@ -161,18 +337,49 @@ func TestParseFormXML_Empty(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(form.Elements) != 0 {
-		t.Errorf("expected 0 elements, got %d", len(form.Elements))
+	if form.Title != "Тестовая форма" {
+		t.Errorf("expected title %q, got %q", "Тестовая форма", form.Title)
 	}
-	if len(form.Commands) != 0 {
-		t.Errorf("expected 0 commands, got %d", len(form.Commands))
+	if !hasElement(form.Elements, "Поле1", "InputField") {
+		t.Errorf("expected InputField Поле1, got: %+v", form.Elements)
 	}
-	if len(form.Handlers) != 0 {
-		t.Errorf("expected 0 handlers, got %d", len(form.Handlers))
+	for _, e := range form.Elements {
+		if e.Name == "Поле1" {
+			if e.Title != "Поле" {
+				t.Errorf("expected element title %q, got %q", "Поле", e.Title)
+			}
+			if e.DataPath != "Объект.Поле1" {
+				t.Errorf("expected element DataPath %q, got %q", "Объект.Поле1", e.DataPath)
+			}
+			if len(e.Events) != 0 {
+				t.Errorf("expected no element-level events for Поле1, got %+v", e.Events)
+			}
+		}
+	}
+	if len(form.Commands) != 1 || form.Commands[0].Name != "Сохранить" || form.Commands[0].Action != "СохранитьВыполнить" {
+		t.Errorf("unexpected commands: %+v", form.Commands)
+	}
+	if len(form.Handlers) != 1 || form.Handlers[0].Event != "OnOpen" || form.Handlers[0].Handler != "ПриОткрытии" {
+		t.Errorf("unexpected handlers: %+v", form.Handlers)
 	}
 }
 
-func TestParseFormXML_File(t *testing.T) {
+// TestParseFormXML_EmptyDocument verifies the parser does not panic on
+// a degenerate Form element.
+func TestParseFormXML_EmptyDocument(t *testing.T) {
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform"></Form>`
+
+	form, err := parseFormXMLData([]byte(xml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(form.Elements) != 0 || len(form.Commands) != 0 || len(form.Handlers) != 0 {
+		t.Errorf("expected empty form, got %+v", form)
+	}
+}
+
+func TestParseFormXML_FileRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	formDir := filepath.Join(dir, "Documents", "ТестДок", "Forms", "ФормаДокумента", "Ext")
 	if err := os.MkdirAll(formDir, 0o755); err != nil {
@@ -180,16 +387,14 @@ func TestParseFormXML_File(t *testing.T) {
 	}
 
 	xmlContent := `<?xml version="1.0" encoding="UTF-8"?>
-<Form xmlns="http://v8.1c.ru/8.3/xcf/logform">
-  <Elements>
-    <InputField>
-      <Name>Поле1</Name>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.21">
+  <ChildItems>
+    <InputField name="Поле1" id="1">
       <DataPath>Объект.Реквизит1</DataPath>
     </InputField>
-  </Elements>
+  </ChildItems>
   <Commands>
-    <Command>
-      <Name>Команда1</Name>
+    <Command name="Команда1" id="1">
       <Action>Действие1</Action>
     </Command>
   </Commands>
@@ -205,18 +410,17 @@ func TestParseFormXML_File(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(form.Elements) != 1 {
-		t.Fatalf("expected 1 element, got %d", len(form.Elements))
+	if !hasElement(form.Elements, "Поле1", "InputField") {
+		t.Errorf("expected InputField Поле1, got: %+v", form.Elements)
 	}
-	if form.Elements[0].Name != "Поле1" {
-		t.Errorf("expected element name %q, got %q", "Поле1", form.Elements[0].Name)
+	if len(form.Commands) != 1 || form.Commands[0].Name != "Команда1" {
+		t.Errorf("unexpected commands: %+v", form.Commands)
 	}
 }
 
 func TestFindFormFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create two form directories.
 	for _, formName := range []string{"ФормаДокумента", "ФормаСписка"} {
 		formDir := filepath.Join(dir, "Documents", "ТестДок", "Forms", formName, "Ext")
 		if err := os.MkdirAll(formDir, 0o755); err != nil {
@@ -315,18 +519,33 @@ func TestDisplayType(t *testing.T) {
 	}
 }
 
-func assertElement(t *testing.T, e FormElementInfo, name, typ, title, dataPath string) {
+// mustParseFixture loads testdata/<name> and parses it. Test fails if the
+// file is missing or unparseable.
+func mustParseFixture(t *testing.T, name string) *FormInfo {
 	t.Helper()
-	if e.Name != name {
-		t.Errorf("expected element name %q, got %q", name, e.Name)
+	path := filepath.Join("testdata", name)
+	form, err := ParseFormXML(path)
+	if err != nil {
+		t.Fatalf("parsing fixture %s: %v", path, err)
 	}
-	if e.Type != typ {
-		t.Errorf("expected element type %q, got %q", typ, e.Type)
+	return form
+}
+
+// hasElement returns true if elements contain an entry matching both name and type.
+func hasElement(elements []FormElementInfo, name, typ string) bool {
+	for _, e := range elements {
+		if e.Name == name && e.Type == typ {
+			return true
+		}
 	}
-	if title != "" && e.Title != title {
-		t.Errorf("expected element title %q, got %q", title, e.Title)
+	return false
+}
+
+// elementNames returns just the names of elements for compact error output.
+func elementNames(elements []FormElementInfo) []string {
+	names := make([]string, 0, len(elements))
+	for _, e := range elements {
+		names = append(names, e.Name+"("+e.Type+")")
 	}
-	if dataPath != "" && e.DataPath != dataPath {
-		t.Errorf("expected element dataPath %q, got %q", dataPath, e.DataPath)
-	}
+	return names
 }

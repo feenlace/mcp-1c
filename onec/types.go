@@ -62,10 +62,11 @@ type FormStructure struct {
 
 // FormElement represents an element on a 1C form.
 type FormElement struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Title    string `json:"title,omitempty"`
-	DataPath string `json:"dataPath,omitempty"`
+	Name     string        `json:"name"`
+	Type     string        `json:"type"`
+	Title    string        `json:"title,omitempty"`
+	DataPath string        `json:"dataPath,omitempty"`
+	Events   []FormHandler `json:"events,omitempty"`
 }
 
 // FormCommand represents a form command.

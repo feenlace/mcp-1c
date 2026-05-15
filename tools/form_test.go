@@ -37,6 +37,9 @@ func TestFormatFormStructure(t *testing.T) {
 				Type:     "ПолеВвода",
 				Title:    "Контрагент",
 				DataPath: "Объект.Контрагент",
+				Events: []onec.FormHandler{
+					{Event: "OnChange", Handler: "КонтрагентПриИзменении"},
+				},
 			},
 			{
 				Name:     "Сумма",
@@ -49,6 +52,9 @@ func TestFormatFormStructure(t *testing.T) {
 				Type:     "ТаблицаФормы",
 				Title:    "Товары",
 				DataPath: "Объект.Товары",
+				Events: []onec.FormHandler{
+					{Event: "OnActivateRow", Handler: "ТоварыПриАктивизацииСтроки"},
+				},
 			},
 		},
 		Commands: []onec.FormCommand{
@@ -70,6 +76,9 @@ func TestFormatFormStructure(t *testing.T) {
 		"| Контрагент | ПолеВвода | Контрагент | Объект.Контрагент |",
 		"| Сумма | ПолеВвода | Сумма документа | Объект.СуммаДокумента |",
 		"| Товары | ТаблицаФормы | Товары | Объект.Товары |",
+		"### События элементов",
+		"**Контрагент** (`OnChange`) → КонтрагентПриИзменении()",
+		"**Товары** (`OnActivateRow`) → ТоварыПриАктивизацииСтроки()",
 		"## Команды формы",
 		"**Провести**",
 		"**ПечатьНакладной**",
@@ -80,6 +89,27 @@ func TestFormatFormStructure(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected text to contain %q, got:\n%s", want, text)
 		}
+	}
+}
+
+// TestFormatFormStructure_NoElementEvents covers the rendering path where
+// the form has elements but none of them carry events - the "События
+// элементов" section must be omitted entirely.
+func TestFormatFormStructure_NoElementEvents(t *testing.T) {
+	f := &onec.FormStructure{
+		Name: "Ф",
+		Elements: []onec.FormElement{
+			{Name: "Поле", Type: "ПолеВвода", DataPath: "Объект.Поле"},
+		},
+	}
+
+	text := formatFormStructure(f)
+
+	if !strings.Contains(text, "## Элементы формы") {
+		t.Errorf("expected elements section, got:\n%s", text)
+	}
+	if strings.Contains(text, "### События элементов") {
+		t.Errorf("expected no element-events section when no events are set, got:\n%s", text)
 	}
 }
 
@@ -95,6 +125,7 @@ func TestFormatFormStructure_Empty(t *testing.T) {
 	}
 	for _, section := range []string{
 		"## Элементы формы",
+		"### События элементов",
 		"## Команды формы",
 		"## Обработчики событий",
 	} {
@@ -246,6 +277,8 @@ func TestNewFormStructureHandler_DumpFallback(t *testing.T) {
 		"## Элементы формы",
 		"Контрагент",
 		"Объект.Контрагент",
+		"### События элементов",
+		"**Контрагент** (`OnChange`) → КонтрагентПриИзменении()",
 		"## Команды формы",
 		"Провести",
 		"## Обработчики событий",
@@ -313,68 +346,65 @@ func TestNewFormStructureHandler_DumpOnly(t *testing.T) {
 	}
 }
 
-// sampleFormXML returns a minimal 1C form XML for testing.
+// sampleFormXML returns a minimal 1C form XML for testing. The schema
+// matches what DumpConfigToFiles produces (xcf/logform): element names
+// live in the "name" attribute, the UI tree is under <ChildItems>, and
+// event handlers are <Event name="X">handler</Event> entries inside
+// a form-level <Events> block.
 func sampleFormXML() string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <Form xmlns="http://v8.1c.ru/8.3/xcf/logform"
-      xmlns:v8="http://v8.1c.ru/8.1/data/core">
+      xmlns:v8="http://v8.1c.ru/8.1/data/core"
+      version="2.21">
   <Title>
     <v8:item>
       <v8:lang>ru</v8:lang>
       <v8:content>Реализация товаров и услуг</v8:content>
     </v8:item>
   </Title>
-  <Elements>
-    <InputField>
-      <Name>Контрагент</Name>
+  <Events>
+    <Event name="OnOpen">ПриОткрытии</Event>
+    <Event name="BeforeWrite">ПередЗаписью</Event>
+  </Events>
+  <ChildItems>
+    <InputField name="Контрагент" id="1">
+      <DataPath>Объект.Контрагент</DataPath>
       <Title>
         <v8:item>
           <v8:lang>ru</v8:lang>
           <v8:content>Контрагент</v8:content>
         </v8:item>
       </Title>
-      <DataPath>Объект.Контрагент</DataPath>
+      <Events>
+        <Event name="OnChange">КонтрагентПриИзменении</Event>
+      </Events>
     </InputField>
-    <InputField>
-      <Name>СуммаДокумента</Name>
+    <InputField name="СуммаДокумента" id="2">
+      <DataPath>Объект.СуммаДокумента</DataPath>
       <Title>
         <v8:item>
           <v8:lang>ru</v8:lang>
           <v8:content>Сумма</v8:content>
         </v8:item>
       </Title>
-      <DataPath>Объект.СуммаДокумента</DataPath>
     </InputField>
-    <Table>
-      <Name>Товары</Name>
+    <Table name="Товары" id="3">
+      <DataPath>Объект.Товары</DataPath>
       <Title>
         <v8:item>
           <v8:lang>ru</v8:lang>
           <v8:content>Товары</v8:content>
         </v8:item>
       </Title>
-      <DataPath>Объект.Товары</DataPath>
     </Table>
-  </Elements>
+  </ChildItems>
   <Commands>
-    <Command>
-      <Name>Провести</Name>
+    <Command name="Провести" id="1">
       <Action>Провести</Action>
     </Command>
-    <Command>
-      <Name>ПечатьНакладной</Name>
+    <Command name="ПечатьНакладной" id="2">
       <Action>ПечатьНакладной</Action>
     </Command>
   </Commands>
-  <Handlers>
-    <Event>
-      <Name>ПриОткрытии</Name>
-      <Handler>ПриОткрытии</Handler>
-    </Event>
-    <Event>
-      <Name>ПередЗаписью</Name>
-      <Handler>ПередЗаписью</Handler>
-    </Event>
-  </Handlers>
 </Form>`
 }
