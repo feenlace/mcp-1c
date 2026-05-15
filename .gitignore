@@ -23,6 +23,10 @@ Thumbs.db
 
 # Build
 dist/
+build/
+
+# Garble test binaries
+mcp-1c-community-garble-test-*
 
 # Extension build artifacts
 extension/*.cfe
