@@ -1035,6 +1035,32 @@ func TestSetShowProgress_TTY_StderrHasProgress(t *testing.T) {
 	}
 }
 
+// TestIndex_GetContent_ValueManagerModule проверяет полный round-trip для
+// Constants/<Имя>/Ext/ValueManagerModule.bsl: NewIndex обходит файл,
+// строит ключ "Константа.<Имя>.МодульМенеджераЗначения" и GetContent его резолвит.
+func TestIndex_GetContent_ValueManagerModule(t *testing.T) {
+	const wantContent = "Перем ТекущееЗначение Экспорт;\n"
+
+	dir := t.TempDir()
+	mkBSLFile(t, dir, "Constants/КурсВалюты/Ext/ValueManagerModule.bsl", wantContent)
+
+	idx, err := NewIndex(dir, "", false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	waitReady(t, idx, 30*time.Second)
+
+	const key = "Константа.КурсВалюты.МодульМенеджераЗначения"
+	content, ok := idx.GetContent(key)
+	if !ok {
+		t.Fatalf("GetContent(%q) returned ok=false; module was not indexed", key)
+	}
+	if content != wantContent {
+		t.Errorf("GetContent(%q) content mismatch:\ngot:  %q\nwant: %q", key, content, wantContent)
+	}
+}
+
 func TestBslPathToModuleName_ValueManagerModule(t *testing.T) {
 	tests := []struct {
 		name string
