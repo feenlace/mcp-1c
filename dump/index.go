@@ -63,13 +63,16 @@ var (
 )
 
 // moduleNameSuffixes maps BSL file names to their module type suffix.
+// The lookup key is the bare file name (last path segment), so each entry
+// covers both the XML dump layout (.../Ext/<File>.bsl) and the EDT layout
+// (.../<File>.bsl).
 var moduleNameSuffixes = map[string]string{
-	"ObjectModule.bsl":    "МодульОбъекта",
-	"ManagerModule.bsl":   "МодульМенеджера",
-	"Module.bsl":          "МодульФормы",
-	"RecordSetModule.bsl": "МодульНабораЗаписей",
-	"CommandModule.bsl":   "МодульКоманды",
-	"Ext.Module.bsl":      "МодульФормы",
+	"ObjectModule.bsl":       "МодульОбъекта",
+	"ManagerModule.bsl":      "МодульМенеджера",
+	"Module.bsl":             "МодульФормы",
+	"RecordSetModule.bsl":    "МодульНабораЗаписей",
+	"CommandModule.bsl":      "МодульКоманды",
+	"ValueManagerModule.bsl": "МодульМенеджераЗначения",
 }
 
 // bslPathToModuleName converts a relative file path from the dump to a human-readable module name.
@@ -111,6 +114,14 @@ func bslPathToModuleName(relPath string) string {
 		if p == "Forms" && i+1 < len(parts) {
 			formName := parts[i+1]
 			return prefix + "." + objectName + ".Форма." + formName + "." + suffix
+		}
+	}
+
+	// If the path has a Commands subdirectory, include command name.
+	for i, p := range parts {
+		if p == "Commands" && i+1 < len(parts) {
+			commandName := parts[i+1]
+			return prefix + "." + objectName + ".Команда." + commandName + "." + suffix
 		}
 	}
 

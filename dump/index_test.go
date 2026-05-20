@@ -1034,3 +1034,49 @@ func TestSetShowProgress_TTY_StderrHasProgress(t *testing.T) {
 		t.Logf("stderr content: %q (may be fine if build was faster than first tick)", collected)
 	}
 }
+
+func TestBslPathToModuleName_ValueManagerModule(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		// XML-выгрузка: Constants/<Имя>/Ext/ValueManagerModule.bsl
+		{"xml dump value manager module",
+			"Constants/КурсВалюты/Ext/ValueManagerModule.bsl",
+			"Константа.КурсВалюты.МодульМенеджераЗначения"},
+		// EDT-формат: Constants/<Имя>/ValueManagerModule.bsl (без Ext)
+		{"edt dump value manager module",
+			"Constants/КурсВалюты/ValueManagerModule.bsl",
+			"Константа.КурсВалюты.МодульМенеджераЗначения"},
+		// Регресс: прочие виды модулей не затронуты удалением Ext.Module.bsl.
+		{"object module unaffected",
+			"Catalogs/Номенклатура/Ext/ObjectModule.bsl",
+			"Справочник.Номенклатура.МодульОбъекта"},
+		{"manager module unaffected",
+			"Documents/Реализация/Ext/ManagerModule.bsl",
+			"Документ.Реализация.МодульМенеджера"},
+		{"record set module unaffected",
+			"InformationRegisters/Цены/Ext/RecordSetModule.bsl",
+			"РегистрСведений.Цены.МодульНабораЗаписей"},
+		// Commands-подкаталог разворачивается в 5-частный ключ
+		// <Тип>.<Имя>.Команда.<ИмяКоманды>.МодульКоманды (по аналогии с Forms).
+		{"command module under Commands subdir",
+			"Catalogs/Номенклатура/Commands/Печать/Ext/CommandModule.bsl",
+			"Справочник.Номенклатура.Команда.Печать.МодульКоманды"},
+		{"form module unaffected",
+			"Documents/Док/Forms/ФормаДок/Ext/Module.bsl",
+			"Документ.Док.Форма.ФормаДок.МодульФормы"},
+		{"common module unaffected",
+			"CommonModules/ОбщийМодуль1/Ext/Module.bsl",
+			"ОбщийМодуль.ОбщийМодуль1.Модуль"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bslPathToModuleName(tt.path)
+			if got != tt.want {
+				t.Errorf("bslPathToModuleName(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
