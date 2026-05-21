@@ -75,6 +75,15 @@ var moduleNameSuffixes = map[string]string{
 	"ValueManagerModule.bsl": "МодульМенеджераЗначения",
 }
 
+// subdirSegmentNames maps a dump path subdirectory to the Russian segment that
+// names its child in a module name. A path passing through such a subdirectory
+// gets an extra ".<segment>.<childName>." inserted (e.g. Forms/ФормаДок ->
+// ".Форма.ФормаДок.").
+var subdirSegmentNames = map[string]string{
+	"Forms":    "Форма",
+	"Commands": "Команда",
+}
+
 // bslPathToModuleName converts a relative file path from the dump to a human-readable module name.
 // Example: "Documents/РеализацияТоваров/Ext/ObjectModule.bsl" -> "Документ.РеализацияТоваров.МодульОбъекта"
 func bslPathToModuleName(relPath string) string {
@@ -109,19 +118,12 @@ func bslPathToModuleName(relPath string) string {
 		}
 	}
 
-	// If the path has a Forms subdirectory, include form name.
+	// If the path has a Forms/Commands subdirectory, include the form/command
+	// name as an extra segment (e.g. ".Форма.ФормаДок." or ".Команда.Печать.").
 	for i, p := range parts {
-		if p == "Forms" && i+1 < len(parts) {
-			formName := parts[i+1]
-			return prefix + "." + objectName + ".Форма." + formName + "." + suffix
-		}
-	}
-
-	// If the path has a Commands subdirectory, include command name.
-	for i, p := range parts {
-		if p == "Commands" && i+1 < len(parts) {
-			commandName := parts[i+1]
-			return prefix + "." + objectName + ".Команда." + commandName + "." + suffix
+		if kind, ok := subdirSegmentNames[p]; ok && i+1 < len(parts) {
+			childName := parts[i+1]
+			return prefix + "." + objectName + "." + kind + "." + childName + "." + suffix
 		}
 	}
 
