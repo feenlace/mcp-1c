@@ -1232,6 +1232,40 @@ func (idx *Index) ModuleCount() int {
 	return n
 }
 
+// ModuleNames returns a defensive copy of the indexed BSL module names.
+// Each entry is the human-readable, russian-translated ID as produced by
+// bslPathToModuleName (e.g. "Документ.РеализацияТоваров.МодульОбъекта"),
+// which is the same key used by GetContent.
+//
+// Returns an empty slice (never nil) when no modules are indexed. The copy
+// is taken under idx.mu.RLock to be safe against concurrent index updates
+// (IndexDoc/DeleteDoc) — callers may modify or sort the returned slice
+// without affecting the index.
+func (idx *Index) ModuleNames() []string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	if idx.names == nil {
+		return []string{}
+	}
+	return slices.Clone(idx.names)
+}
+
+// BuildError returns the most recent error captured during background index
+// build (loadBSLFiles failure, shard error, or manifest-fallback failure), or
+// nil if no error was recorded. Safe to call after <-idx.Done() has unblocked
+// to distinguish "build completed successfully" (Ready() == true, BuildError()
+// == nil) from "build aborted" (Ready() == false, BuildError() != nil).
+//
+// Read is unconditional: consumers may observe a non-nil BuildError() even
+// while Ready() is still false during the build, but the field is set exactly
+// once on error paths so the return value is stable across repeated reads.
+func (idx *Index) BuildError() error {
+	if errPtr := idx.buildErr.Load(); errPtr != nil {
+		return *errPtr
+	}
+	return nil
+}
+
 // Dir returns the dump directory path.
 func (idx *Index) Dir() string {
 	return idx.dir

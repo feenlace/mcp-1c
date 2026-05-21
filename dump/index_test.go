@@ -3,10 +3,12 @@ package dump
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1104,5 +1106,138 @@ func TestBslPathToModuleName_ValueManagerModule(t *testing.T) {
 				t.Errorf("bslPathToModuleName(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIndex_ModuleNames(t *testing.T) {
+	dir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Номенклатура/Ext/ObjectModule.bsl", "Процедура А()\nКонецПроцедуры\n")
+	mkBSLFile(t, dir, "Documents/Реализация/Ext/ManagerModule.bsl", "Процедура Б()\nКонецПроцедуры\n")
+
+	idx, err := NewIndex(dir, "", false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	waitReady(t, idx, 30*time.Second)
+
+	names := idx.ModuleNames()
+	want := []string{
+		"Справочник.Номенклатура.МодульОбъекта",
+		"Документ.Реализация.МодульМенеджера",
+	}
+	if len(names) != len(want) {
+		t.Fatalf("ModuleNames() returned %d names, want %d: %v", len(names), len(want), names)
+	}
+	for _, w := range want {
+		if !slices.Contains(names, w) {
+			t.Errorf("ModuleNames() missing %q, got: %v", w, names)
+		}
+	}
+
+	// Every returned name must be a valid GetContent key.
+	for _, name := range names {
+		if _, ok := idx.GetContent(name); !ok {
+			t.Errorf("ModuleNames() returned %q, but GetContent could not resolve it", name)
+		}
+	}
+}
+
+func TestIndex_ModuleNames_DefensiveCopy(t *testing.T) {
+	dir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Номенклатура/Ext/ObjectModule.bsl", "Процедура А()\nКонецПроцедуры\n")
+	mkBSLFile(t, dir, "Documents/Реализация/Ext/ManagerModule.bsl", "Процедура Б()\nКонецПроцедуры\n")
+
+	idx, err := NewIndex(dir, "", false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	waitReady(t, idx, 30*time.Second)
+
+	first := idx.ModuleNames()
+	if len(first) != 2 {
+		t.Fatalf("expected 2 names, got %d: %v", len(first), first)
+	}
+
+	// Mutating and sorting the returned slice must not affect the index.
+	slices.Sort(first)
+	first[0] = "ИЗМЕНЕНО"
+
+	second := idx.ModuleNames()
+	if slices.Contains(second, "ИЗМЕНЕНО") {
+		t.Error("mutating the returned slice leaked into the index")
+	}
+	if len(second) != 2 {
+		t.Errorf("expected index to still hold 2 names, got %d: %v", len(second), second)
+	}
+}
+
+func TestIndex_ModuleNames_EmptyIsNotNil(t *testing.T) {
+	dir := t.TempDir()
+	idx, err := NewIndex(dir, "", false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	waitReady(t, idx, 30*time.Second)
+
+	names := idx.ModuleNames()
+	if names == nil {
+		t.Error("ModuleNames() must return an empty slice, not nil, when nothing is indexed")
+	}
+	if len(names) != 0 {
+		t.Errorf("expected 0 names for an empty dump, got %d: %v", len(names), names)
+	}
+}
+
+func TestIndex_BuildError_NilAfterSuccess(t *testing.T) {
+	dir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Тест/Ext/ObjectModule.bsl", "Процедура Тест()\nКонецПроцедуры\n")
+
+	idx, err := NewIndex(dir, "", false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	waitReady(t, idx, 30*time.Second)
+
+	if got := idx.BuildError(); got != nil {
+		t.Errorf("BuildError() = %v, want nil after a successful build", got)
+	}
+	if !idx.Ready() {
+		t.Error("expected Ready() == true after a successful build")
+	}
+}
+
+func TestIndex_BuildError_ReportsRecordedError(t *testing.T) {
+	idx := &Index{}
+
+	// No error recorded yet.
+	if got := idx.BuildError(); got != nil {
+		t.Errorf("BuildError() = %v, want nil before any error is recorded", got)
+	}
+
+	// setBuildErr is the single mechanism the background build uses to record
+	// a failure (loadBSLFiles failure, shard error, manifest-fallback failure).
+	wantErr := errors.New("loading BSL files: boom")
+	idx.setBuildErr(wantErr)
+
+	got := idx.BuildError()
+	if got == nil {
+		t.Fatal("BuildError() = nil, want the recorded build error")
+	}
+	if got.Error() != wantErr.Error() {
+		t.Errorf("BuildError() = %q, want %q", got.Error(), wantErr.Error())
+	}
+
+	// The field is stable across repeated reads.
+	if again := idx.BuildError(); again == nil || again.Error() != wantErr.Error() {
+		t.Errorf("BuildError() not stable across reads: %v", again)
+	}
+
+	// A build that recorded an error is not Ready.
+	if idx.Ready() {
+		t.Error("expected Ready() == false for a build that recorded an error")
 	}
 }
