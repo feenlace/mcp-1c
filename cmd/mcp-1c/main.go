@@ -49,6 +49,10 @@ func main() {
 	dbPassword := flag.String("db-password", "", "1C database password for DESIGNER (install mode)")
 	quiet := flag.Bool("quiet", false, "Suppress all stderr output even when running in a terminal. Takes precedence over --verbose. Also activated by env MCP_1C_NO_TTY=1.")
 	verbose := flag.Bool("verbose", false, "Force verbose stderr output even when stdin is a pipe (useful for MCP client debugging). Overrides auto-detect and is itself overridden by --quiet.")
+	// Sentinel 0 => "flag not passed", so the MCP_1C_MAX_RESPONSE_SIZE env var
+	// (read in config.Load) keeps effect; a passed flag overrides it.
+	maxResponseSize := flag.Int("max-response-size", 0, "Maximum size of a 1C HTTP response, in mebibytes (MiB). A larger response is rejected with a clear error instead of a cryptic decode failure. Default: 128.")
+	requestTimeout := flag.Int("request-timeout", 0, "Timeout for an HTTP request to 1C, in seconds. Raise it if fetching a very large response (e.g. extensions of a big database) times out. Default: 300.")
 	flag.Parse()
 
 	if *cacheDir == "" {
@@ -154,8 +158,17 @@ func main() {
 	if *password != "" {
 		cfg.Password = *password
 	}
+	if *maxResponseSize > 0 {
+		cfg.MaxResponseSizeMiB = *maxResponseSize
+	}
+	if *requestTimeout > 0 {
+		cfg.RequestTimeout = time.Duration(*requestTimeout) * time.Second
+	}
 
-	client := onec.NewClient(cfg.BaseURL, cfg.User, cfg.Password)
+	client := onec.NewClient(cfg.BaseURL, cfg.User, cfg.Password,
+		onec.WithMaxResponseSize(cfg.MaxResponseSizeMiB),
+		onec.WithRequestTimeout(cfg.RequestTimeout),
+	)
 
 	go checkExtensionVersion(client)
 
