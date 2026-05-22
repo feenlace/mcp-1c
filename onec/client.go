@@ -61,6 +61,15 @@ func WithRequestTimeout(timeout time.Duration) Option {
 	}
 }
 
+// MaxResponseSize возвращает действующий лимит размера ответа 1С в байтах.
+// Возвращается уже пересчитанное значение в байтах (не MiB), чтобы вызывающий
+// код мог напрямую использовать его в io.LimitReader и аналогичных API.
+// Используется кодом, который выполняет «сырые» HTTP-запросы (минуя Get/Post)
+// и должен соблюдать тот же лимит, что и встроенный декодер do().
+func (c *Client) MaxResponseSize() int64 {
+	return c.maxResponseSize
+}
+
 // NewClient creates a client for 1C HTTP service.
 // When user is non-empty, basic auth is added to every request.
 // Без опций используются значения по умолчанию: лимит ответа
