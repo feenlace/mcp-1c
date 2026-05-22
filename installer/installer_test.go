@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -681,5 +682,113 @@ func TestPlatformOlderThan(t *testing.T) {
 					tt.major, tt.minor, tt.targetMajor, tt.targetMinor, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestClassifyDesignerError(t *testing.T) {
+	// Helper checks for fragments that any user-friendly message must include.
+	containsAll := func(t *testing.T, got string, fragments ...string) {
+		t.Helper()
+		for _, frag := range fragments {
+			if !strings.Contains(got, frag) {
+				t.Errorf("missing fragment %q in classified message:\n%s", frag, got)
+			}
+		}
+	}
+
+	tests := []struct {
+		name         string
+		input        string
+		wantHint     bool
+		fragments    []string
+	}{
+		{
+			name: "compat mode batch error: 'не найдено' after UpdateDBCfg",
+			// Real DESIGNER batch-mode output observed on the mrfzorin'у incident.
+			// Base config has compat mode 8.3.8 which silently rejects extensions;
+			// LoadConfigFromFiles claims success but UpdateDBCfg reports the
+			// extension is missing.
+			input: "1C DESIGNER failed (exit code 1):\n" +
+				"Не найдено: расширение конфигурации с указанным именем не найдено: MCP_HTTPService",
+			wantHint: true,
+			fragments: []string{
+				"Установка расширения не удалась",
+				"режим совместимости конфигурации запрещает расширения",
+				"Конфигуратор",
+				"Свойства корня",
+				"Не использовать",
+				"8.3.11",
+				"--db-user",
+				"--db-password",
+				"только-чтение",
+				"Оригинальная ошибка DESIGNER",
+				"MCP_HTTPService",
+			},
+		},
+		{
+			name: "compat mode variant: 'расширение конфигурации с указанным именем не найдено'",
+			input: "DESIGNER batch error: расширение конфигурации с указанным именем не найдено",
+			wantHint: true,
+			fragments: []string{
+				"Установка расширения не удалась",
+				"режим совместимости",
+				"Оригинальная ошибка DESIGNER",
+			},
+		},
+		{
+			name: "case-insensitive match: capitalised phrase",
+			input: "Ошибка: Расширение конфигурации с указанным именем НЕ НАЙДЕНО: MCP_HTTPService",
+			wantHint: true,
+			fragments: []string{
+				"Установка расширения не удалась",
+			},
+		},
+		{
+			name:     "unrelated error: passes through verbatim",
+			input:    "1C DESIGNER failed (exit code 1):\nНеверный пароль базы данных",
+			wantHint: false,
+		},
+		{
+			name:     "compat mode mismatch (different code path): pass through",
+			input:    "Несовместимый режим совместимости расширения",
+			wantHint: false,
+		},
+		{
+			name:     "empty input: pass through",
+			input:    "",
+			wantHint: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origErr := fmt.Errorf("%s", tc.input)
+			got := classifyDesignerError(origErr)
+
+			if tc.wantHint {
+				containsAll(t, got.Error(), tc.fragments...)
+				// Bullet-style guidance must use `• ` not `-` per project memory.
+				if !strings.Contains(got.Error(), "• ") {
+					t.Errorf("expected bullet character `• ` in user-friendly message, got:\n%s", got.Error())
+				}
+				// Forbidden: em-dash and double-dash in user-facing text per
+				// project memory (feedback_no_dashes_in_text).
+				if strings.Contains(got.Error(), "—") {
+					t.Errorf("em-dash present in user-friendly message:\n%s", got.Error())
+				}
+			} else {
+				// Without a recognised pattern the original error text must be
+				// preserved verbatim (no extra wrapping).
+				if got.Error() != tc.input {
+					t.Errorf("non-matching error must pass through unchanged.\nwant: %q\n got: %q", tc.input, got.Error())
+				}
+			}
+		})
+	}
+}
+
+func TestClassifyDesignerError_NilError(t *testing.T) {
+	if got := classifyDesignerError(nil); got != nil {
+		t.Errorf("classifyDesignerError(nil) = %v, want nil", got)
 	}
 }

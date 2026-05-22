@@ -3,6 +3,7 @@ package installer
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -262,7 +263,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		}
 
 		if err != nil {
-			return fmt.Errorf("loading extension config: %w", err)
+			return classifyDesignerError(fmt.Errorf("loading extension config: %w", err))
 		}
 	}
 
@@ -281,22 +282,67 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			); reloadErr != nil {
-				return fmt.Errorf("reloading extension config after strip: %w", reloadErr)
+				return classifyDesignerError(fmt.Errorf("reloading extension config after strip: %w", reloadErr))
 			}
 			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/UpdateDBCfg",
 				"-Extension", extensionName,
 			); retryErr != nil {
-				return fmt.Errorf("updating database config: %w", retryErr)
+				return classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr))
 			}
 			fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
 			fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
 			fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
 			return nil
 		}
-		return fmt.Errorf("updating database config: %w", err)
+		return classifyDesignerError(fmt.Errorf("updating database config: %w", err))
 	}
 	return nil
+}
+
+// compatModeNotFoundRe matches the DESIGNER batch-mode error reported when the
+// base configuration is in a compat mode that does not support extensions at
+// all (typically 8.3.8 or older). LoadConfigFromFiles claims success but the
+// extension is silently rejected, so the subsequent UpdateDBCfg or any later
+// command reports the extension as missing. In the 1C Configurator GUI this
+// surfaces as "Структура данных не поддерживает хранение расширений"; in batch
+// mode the platform only emits the misleading generic "не найдено" message.
+//
+// Matching is case-insensitive and tolerates the phrase appearing inside any
+// surrounding text (wrapped err output, exit codes, mixed-language prefixes).
+//
+//garble:ignore
+var compatModeNotFoundRe = regexp.MustCompile(
+	`(?i)расширение\s+конфигурации\s+с\s+указанным\s+именем\s+не\s+найдено`,
+)
+
+// classifyDesignerError replaces DESIGNER errors whose surface text matches a
+// known confusing pattern with a user-friendly message that names the most
+// likely cause and lists fallback hypotheses. The original error text is
+// preserved verbatim under "Оригинальная ошибка DESIGNER" so power users still
+// see the underlying details.
+//
+// Returns nil when err is nil, and returns the original error untouched when
+// no known pattern matches.
+//
+//garble:ignore
+func classifyDesignerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if compatModeNotFoundRe.MatchString(msg) {
+		return errors.New("Установка расширения не удалась.\n\n" +
+			"Самая частая причина: режим совместимости конфигурации запрещает расширения.\n" +
+			"Проверьте: Конфигуратор -> Свойства корня -> Режим совместимости.\n" +
+			"Для поддержки расширений нужно «Не использовать» или «Версия 8.3.11» и новее.\n\n" +
+			"Другие возможные причины:\n" +
+			"  • Неверные --db-user / --db-password (имя из Конфигуратор -> Администрирование -> Пользователи)\n" +
+			"  • База открыта в Конфигураторе и заблокирована\n" +
+			"  • База в режиме только-чтение\n\n" +
+			"Оригинальная ошибка DESIGNER:\n" + msg)
+	}
+	return err
 }
 
 // runDesigner executes 1C DESIGNER with given arguments, capturing output via /Out.
