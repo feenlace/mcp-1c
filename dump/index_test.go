@@ -1241,3 +1241,86 @@ func TestIndex_BuildError_ReportsRecordedError(t *testing.T) {
 		t.Error("expected Ready() == false for a build that recorded an error")
 	}
 }
+
+// TestLoadBSLFilesDeterministic verifies that the enumerate path produces a
+// stable, lexicographically sorted idx.names slice regardless of goroutine
+// scheduling (loadBSLFiles worker pool) or map iteration order
+// (loadFromManifestAndDiff manifest fast-path). This is the invariant that
+// downstream stages (cache key, chunking, vocabulary, TF-IDF) rely on for
+// reproducibility across runs on the same dump.
+func TestLoadBSLFilesDeterministic(t *testing.T) {
+	dumpDir := t.TempDir()
+
+	// Spread 20 modules across several categories and module types so the
+	// resulting names are diverse enough to expose any ordering bug.
+	// Names are intentionally NOT created in sorted order on disk.
+	specs := []struct {
+		path    string
+		content string
+	}{
+		{"Documents/Реализация/Ext/ObjectModule.bsl", "Процедура ОбработкаПроведения()\nКонецПроцедуры\n"},
+		{"Catalogs/Номенклатура/Ext/ObjectModule.bsl", "Процедура ПередЗаписью()\nКонецПроцедуры\n"},
+		{"Documents/Реализация/Ext/ManagerModule.bsl", "Функция ПолучитьШапку()\nВозврат Неопределено;\nКонецФункции\n"},
+		{"CommonModules/ОбщегоНазначения/Ext/Module.bsl", "Функция СтрокаПусто(Стр)\nВозврат Стр = \"\";\nКонецФункции\n"},
+		{"Catalogs/Контрагенты/Ext/ObjectModule.bsl", "Процедура ПриЗаписи()\nКонецПроцедуры\n"},
+		{"Reports/Продажи/Ext/ObjectModule.bsl", "Процедура ПриКомпоновкеРезультата()\nКонецПроцедуры\n"},
+		{"Documents/ПоступлениеТоваров/Ext/ObjectModule.bsl", "Процедура ОбработкаПроведения()\nКонецПроцедуры\n"},
+		{"InformationRegisters/Курсы/Ext/RecordSetModule.bsl", "Процедура ПередЗаписью()\nКонецПроцедуры\n"},
+		{"Catalogs/Сотрудники/Ext/ManagerModule.bsl", "Функция ПолучитьСотрудника()\nВозврат Неопределено;\nКонецФункции\n"},
+		{"Documents/Заказ/Forms/ФормаДокумента/Ext/Form/Module.bsl", "Процедура ПриОткрытии()\nКонецПроцедуры\n"},
+		{"Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl", "Процедура ПриОткрытии()\nКонецПроцедуры\n"},
+		{"CommonModules/РаботаСФайлами/Ext/Module.bsl", "Функция ПрочитатьФайл(Имя)\nВозврат Неопределено;\nКонецФункции\n"},
+		{"Reports/Закупки/Ext/ObjectModule.bsl", "Процедура ПриКомпоновкеРезультата()\nКонецПроцедуры\n"},
+		{"AccumulationRegisters/ТоварыНаСкладах/Ext/RecordSetModule.bsl", "Процедура ПередЗаписью()\nКонецПроцедуры\n"},
+		{"Catalogs/Склады/Ext/ObjectModule.bsl", "Процедура ПередЗаписью()\nКонецПроцедуры\n"},
+		{"Documents/Оплата/Ext/ObjectModule.bsl", "Процедура ОбработкаПроведения()\nКонецПроцедуры\n"},
+		{"Catalogs/Валюты/Ext/ManagerModule.bsl", "Функция КурсВалюты()\nВозврат 1;\nКонецФункции\n"},
+		{"CommonModules/Сервер/Ext/Module.bsl", "Функция ВызовСервера()\nВозврат Истина;\nКонецФункции\n"},
+		{"Documents/Перемещение/Ext/ObjectModule.bsl", "Процедура ОбработкаПроведения()\nКонецПроцедуры\n"},
+		{"Catalogs/Партнеры/Ext/ObjectModule.bsl", "Процедура ПриЗаписи()\nКонецПроцедуры\n"},
+	}
+	for _, s := range specs {
+		mkBSLFile(t, dumpDir, s.path, s.content)
+	}
+
+	// Build the index 5 times against the SAME isolated cacheDir so the
+	// sequence exercises both code paths:
+	//   - run 0: no cache -> full buildShards -> loadBSLFiles (worker pool)
+	//   - runs 1..4: cache present -> loadFromManifestAndDiff (map iter)
+	// Both paths must yield the same lexicographically sorted slice; this is
+	// what guarantees reproducibility for cache keys and downstream stages.
+	cacheDir := t.TempDir()
+	const runs = 5
+	captured := make([][]string, 0, runs)
+	for i := range runs {
+		idx, err := NewIndex(dumpDir, cacheDir, false)
+		if err != nil {
+			t.Fatalf("run %d: NewIndex: %v", i, err)
+		}
+		waitReady(t, idx, 30*time.Second)
+
+		got := idx.ModuleNames()
+		if err := idx.Close(); err != nil {
+			t.Fatalf("run %d: Close: %v", i, err)
+		}
+
+		if len(got) != len(specs) {
+			t.Fatalf("run %d: expected %d modules, got %d", i, len(specs), len(got))
+		}
+
+		// Invariant: names must be lexicographically sorted on both paths.
+		if !slices.IsSorted(got) {
+			t.Errorf("run %d: idx.names is not sorted lexicographically: %v", i, got)
+		}
+
+		captured = append(captured, got)
+	}
+
+	// All runs must produce identical orderings.
+	for i := 1; i < runs; i++ {
+		if !slices.Equal(captured[0], captured[i]) {
+			t.Errorf("idx.names differs between run 0 and run %d\nrun 0: %v\nrun %d: %v",
+				i, captured[0], i, captured[i])
+		}
+	}
+}

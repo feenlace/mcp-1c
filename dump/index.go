@@ -631,6 +631,14 @@ func (idx *Index) loadBSLFiles(dir string) error {
 		idx.pathByName[m.name] = absPath
 	}
 
+	// Workers finish in nondeterministic timing order, so the resulting
+	// idx.names slice depends on goroutine scheduling. Sort lexicographically
+	// to guarantee a stable enumeration order across runs on the same dump,
+	// which is required for reproducible cache keys, chunking, vocabulary
+	// and TF-IDF downstream. Maps (contentByName, pathToDocID, pathByName)
+	// are unaffected because they are keyed by name/relPath.
+	slices.Sort(idx.names)
+
 	return nil
 }
 
@@ -1123,6 +1131,9 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	}
 
 	// Populate names, pathByName, pathToDocID from manifest (no filesystem I/O).
+	// Go map iteration order is randomised, so idx.names must be sorted after
+	// the loop to preserve the same lexicographic enumeration invariant as
+	// loadBSLFiles. Maps (pathByName, pathToDocID) are unaffected.
 	idx.mu.Lock()
 	idx.pathToDocID = make(map[string]string, len(manifest.Files))
 	for relPath, entry := range manifest.Files {
@@ -1131,6 +1142,7 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 		idx.pathByName[entry.DocID] = absPath
 		idx.pathToDocID[relPath] = entry.DocID
 	}
+	slices.Sort(idx.names)
 	idx.mu.Unlock()
 
 	// Diff walks the filesystem once to detect changes.
