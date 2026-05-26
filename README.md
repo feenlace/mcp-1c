@@ -102,6 +102,30 @@ mcp-1c --install "srv-1c\buh_prod" --server --db-user Admin --db-password pass
 >
 > Если версия платформы не определяется автоматически (нестандартный путь без номера версии), укажите её явно: `mcp-1c --install "путь" --platform "/custom/path/to/1cv8" --platform-version 8.3.13`
 
+#### Бэкенды установщика
+
+Флаг `--installer` выбирает способ загрузки расширения в базу:
+
+- **`--installer=designer`** (по умолчанию) — пакетный режим `1cv8.exe DESIGNER /LoadConfigFromFiles`. Работает на платформах от 8.3.10. Минусы: 3-8 минут на установку, открывает GUI-окно 1С (на Windows Server может зависнуть в Session 0), ограниченная поддержка Linux 1С.
+- **`--installer=ibcmd`** (быстро, headless, требует 8.3.18+) — утилита `ibcmd config import`. ~30 секунд, без GUI, нативная поддержка Linux 1С.
+
+```bash
+# Файловая база — быстрая установка через ibcmd:
+mcp-1c --install ~/Documents/InfoBase --installer=ibcmd
+
+# Клиент-серверная база — ibcmd подключается напрямую к СУБД,
+# поэтому путь кластера 1С (cluster:1541\db) НЕ работает.
+# Передавайте хост СУБД отдельно через --ibcmd-db-server:
+mcp-1c --install "buh_prod" --server --installer=ibcmd \
+       --ibcmd-db-server "pg-host port=6432" \
+       --db-user dt_user --db-password secret
+
+# На загруженных production-базах с активными сеансами увеличьте таймаут:
+mcp-1c --install ... --installer=ibcmd --ibcmd-timeout=300s
+```
+
+При lock contention (extension actively in use by rphost sessions) ibcmd выдаст понятную ошибку с тремя вариантами действий: подождать idle, увеличить `--ibcmd-timeout`, или откатиться на `--installer=designer`.
+
 ### 3. Запустить HTTP-сервис 1С
 
 **Рекомендуемый способ** — стандартная публикация через Apache или IIS (Конфигуратор → Администрирование → Публикация на веб-сервере). Работает на Windows и Linux. Подробности — в [пошаговой инструкции](docs/getting-started.md#шаг-3-запустить-http-сервис-1с).
@@ -165,8 +189,11 @@ mcp-1c --install "srv-1c\buh_prod" --server --db-user Admin --db-password pass
 | `--server` | — | — | Режим клиент-серверной базы: `--install` принимает строку подключения `сервер\база` (например `srv-1c\buh_prod`) |
 | `--platform` | — | — | Путь к бинарнику 1С (автоопределение, если не указан) |
 | `--platform-version` | — | — | Версия платформы 1С (например `8.3.13`). Определяется автоматически из пути к платформе. Укажите вручную, если платформа установлена в нестандартный путь без информации о версии. Минимальная поддерживаемая версия: 8.3.10 |
-| `--db-user` | — | — | Пользователь базы 1С для DESIGNER (режим --install) |
-| `--db-password` | — | — | Пароль базы 1С для DESIGNER (режим --install) |
+| `--db-user` | — | — | Пользователь СУБД для DESIGNER/ibcmd (режим --install) |
+| `--db-password` | — | — | Пароль СУБД для DESIGNER/ibcmd (режим --install) |
+| `--installer` | — | `designer` | Бэкенд установщика: `designer` (по умолчанию, GUI-batch, 3-8 мин) или `ibcmd` (headless, ~30 сек, требует платформу 8.3.18+) |
+| `--ibcmd-timeout` | — | `60s` | Таймаут одного вызова ibcmd (только с `--installer=ibcmd`). Увеличьте до 300s+ на загруженных production-базах с активными сеансами rphost. |
+| `--ibcmd-db-server` | — | — | Хост СУБД для прямого подключения ibcmd (например `pg-host port=6432`). Требуется для `--installer=ibcmd --server`, потому что ibcmd обходит кластер 1С и подключается к PostgreSQL/MSSQL напрямую. Синтаксис пути кластера DESIGNER (`cluster:1541\db`) для ibcmd НЕ работает. |
 
 ## Логирование и вывод
 

@@ -47,6 +47,14 @@ func main() {
 	platformVersion := flag.String("platform-version", "", "1C platform version override (e.g. 8.3.13), auto-detected from path if omitted")
 	dbUser := flag.String("db-user", "", "1C database user for DESIGNER (install mode)")
 	dbPassword := flag.String("db-password", "", "1C database password for DESIGNER (install mode)")
+	installerBackend := flag.String("installer", "designer",
+		"Installer backend: 'designer' (default, GUI-batch, 3-8 min) or 'ibcmd' (headless, ~30s, platform 8.3.18+)")
+	ibcmdTimeout := flag.Duration("ibcmd-timeout", 60*time.Second,
+		"Timeout per ibcmd invocation (only with --installer=ibcmd). Bump to 300s+ on busy bases with active sessions.")
+	ibcmdDBServer := flag.String("ibcmd-db-server", "",
+		"DBMS host for ibcmd direct connection (e.g. 'pg-host port=6432'). Required for --installer=ibcmd with --server, "+
+			"because ibcmd bypasses 1C cluster and connects to PostgreSQL/MSSQL directly. "+
+			"DESIGNER cluster path syntax (cluster:1541\\db) does NOT apply to ibcmd.")
 	quiet := flag.Bool("quiet", false, "Suppress all stderr output even when running in a terminal. Takes precedence over --verbose. Also activated by env MCP_1C_NO_TTY=1.")
 	verbose := flag.Bool("verbose", false, "Force verbose stderr output even when stdin is a pipe (useful for MCP client debugging). Overrides auto-detect and is itself overridden by --quiet.")
 	// Sentinel 0 => "flag not passed", so the MCP_1C_MAX_RESPONSE_SIZE env var
@@ -95,9 +103,27 @@ func main() {
 
 	// Install mode.
 	if *installDB != "" {
-		fmt.Println("Installing MCP extension into 1C database...")
-		if err := installer.Install(extension.Source, *installDB, *serverMode, *platformPath, *dbUser, *dbPassword, *platformVersion); err != nil {
-			fmt.Fprintf(os.Stderr, "Installation error: %v\n", err)
+		fmt.Printf("Installing MCP extension into 1C database (backend=%s)...\n", *installerBackend)
+		var installErr error
+		switch *installerBackend {
+		case "ibcmd":
+			installErr = installer.InstallViaIbcmd(extension.Source, installer.IbcmdOptions{
+				DBPath:          *installDB,
+				ServerMode:      *serverMode,
+				PlatformExe:     *platformPath,
+				DBUser:          *dbUser,
+				DBPassword:      *dbPassword,
+				PlatformVersion: *platformVersion,
+				Timeout:         *ibcmdTimeout,
+				DBServer:        *ibcmdDBServer,
+			})
+		case "designer", "":
+			installErr = installer.Install(extension.Source, *installDB, *serverMode, *platformPath, *dbUser, *dbPassword, *platformVersion)
+		default:
+			installErr = fmt.Errorf("unknown installer backend %q (valid: 'designer' or 'ibcmd')", *installerBackend)
+		}
+		if installErr != nil {
+			fmt.Fprintf(os.Stderr, "Installation error: %v\n", installErr)
 			os.Exit(1)
 		}
 		fmt.Println("Extension installed successfully.")
