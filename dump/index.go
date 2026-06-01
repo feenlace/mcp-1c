@@ -84,8 +84,21 @@ var subdirSegmentNames = map[string]string{
 	"Commands": "Команда",
 }
 
+// extensionDirName is the top-level dump directory that holds configuration
+// extensions ("Расширения"). Inside it each extension owns a subtree that
+// mirrors the base-config layout: Расширения/<ext>/<Kind>/<name>/Ext/<File>.bsl.
+const extensionDirName = "Расширения"
+
 // bslPathToModuleName converts a relative file path from the dump to a human-readable module name.
 // Example: "Documents/РеализацияТоваров/Ext/ObjectModule.bsl" -> "Документ.РеализацияТоваров.МодульОбъекта"
+//
+// Extension modules live under "Расширения/<ext>/" and mirror the base-config
+// layout below that prefix. They are keyed as "ext.<ext>.<base-config name>",
+// e.g. "Расширения/Доработки3D/CommonModules/WA_ПовтИсп/Ext/Module.bsl" ->
+// "ext.Доработки3D.ОбщийМодуль.WA_ПовтИсп.Модуль". This matches the storage key
+// the module resolver derives from a normalised user path
+// (ext.<extension>.<Normalize(module)>), so code_read/module_code can find
+// extension modules in a Hierarchical dump.
 func bslPathToModuleName(relPath string) string {
 	// Normalise separators.
 	relPath = filepath.ToSlash(relPath)
@@ -95,6 +108,29 @@ func bslPathToModuleName(relPath string) string {
 		return relPath
 	}
 
+	// Extension subtree: Расширения/<ext>/<Kind>/<name>/.../<File>.bsl. Strip the
+	// two leading segments and run the base-config parser on the remainder so the
+	// CommonModules->Модуль special-case and the dumpDirNames/moduleNameSuffixes
+	// maps apply exactly as for base config, then prefix with "ext.<ext>.".
+	// A path too short to carry a full <Kind>/<name>/<File> remainder
+	// (len(parts) < 4) falls through to the base parser unchanged, which keeps
+	// the previous behaviour and never panics.
+	if parts[0] == extensionDirName && len(parts) >= 4 {
+		extName := parts[1]
+		return "ext." + extName + "." + baseConfigModuleName(parts[2:])
+	}
+
+	return baseConfigModuleName(parts)
+}
+
+// baseConfigModuleName maps the path segments of a base-configuration BSL file
+// to its human-readable module name (e.g. ["Documents","РеализацияТоваров",
+// "Ext","ObjectModule.bsl"] -> "Документ.РеализацияТоваров.МодульОбъекта").
+// It is also reused for the per-extension subtree by bslPathToModuleName, which
+// passes the segments below "Расширения/<ext>/" and adds the "ext.<ext>." prefix.
+//
+// parts must have at least two segments; callers guarantee this.
+func baseConfigModuleName(parts []string) string {
 	// First part is the category directory.
 	category := parts[0]
 	prefix, ok := dumpDirNames[category]

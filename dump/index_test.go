@@ -1109,6 +1109,79 @@ func TestBslPathToModuleName_ValueManagerModule(t *testing.T) {
 	}
 }
 
+// TestBslPathToModuleName_Extensions verifies the Расширения/<ext>/ subtree is
+// keyed as ext.<ext>.<base-config name>, exactly matching the storage key the
+// resolver derives from a normalised user path (ext.<extension>.<Normalize>).
+// Before the fix these paths collapsed to a blind 3-segment key
+// "Расширения.<ext>.<suffix>" (with the CommonModules->Модуль special-case never
+// firing, so even the suffix was wrong), and two different ext objects collided.
+func TestBslPathToModuleName_Extensions(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		// Extension CommonModule: the CommonModules->Модуль special-case must
+		// fire on the stripped remainder (suffix Модуль, not МодульФормы).
+		{"ext common module",
+			"Расширения/Доработки3D/CommonModules/WA_ПовтИсп/Ext/Module.bsl",
+			"ext.Доработки3D.ОбщийМодуль.WA_ПовтИсп.Модуль"},
+		// Extension DataProcessor object module.
+		{"ext data processor object module",
+			"Расширения/Доработки3D/DataProcessors/DP1/Ext/ObjectModule.bsl",
+			"ext.Доработки3D.Обработка.DP1.МодульОбъекта"},
+		// Extension document manager module (suffix from moduleNameSuffixes).
+		{"ext document manager module",
+			"Расширения/TestExt/Documents/Заказ/Ext/ManagerModule.bsl",
+			"ext.TestExt.Документ.Заказ.МодульМенеджера"},
+		// Extension form module: the Forms-subdir 5-segment expansion must work
+		// inside an extension too.
+		{"ext form module",
+			"Расширения/TestExt/Documents/Заказ/Forms/ФормаЗаказа/Ext/Module.bsl",
+			"ext.TestExt.Документ.Заказ.Форма.ФормаЗаказа.МодульФормы"},
+		// Control: a base-config path with a literal first segment "Расширения"
+		// is impossible (it is a reserved dump dir), but a too-short path under
+		// it must not panic and falls back to base parsing.
+		{"too short under Расширения falls back",
+			"Расширения/TestExt/Module.bsl",
+			"Расширения.TestExt.МодульФормы"},
+		// Base-config control: unchanged.
+		{"base common module unaffected",
+			"CommonModules/ОбщийМодуль1/Ext/Module.bsl",
+			"ОбщийМодуль.ОбщийМодуль1.Модуль"},
+		{"base object module unaffected",
+			"Catalogs/Номенклатура/Ext/ObjectModule.bsl",
+			"Справочник.Номенклатура.МодульОбъекта"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bslPathToModuleName(tt.path)
+			if got != tt.want {
+				t.Errorf("bslPathToModuleName(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBslPathToModuleName_ExtensionsNoCollision proves two distinct extension
+// objects no longer collapse to the same key. The pre-fix logic keyed both as
+// "Расширения.<ext>.<suffix>", so an ext CommonModule and an ext DataProcessor
+// of the SAME extension (and even two objects of different kinds) overwrote each
+// other in the index. After the fix every object owns a distinct key.
+func TestBslPathToModuleName_ExtensionsNoCollision(t *testing.T) {
+	a := bslPathToModuleName("Расширения/TestExt/CommonModules/CM1/Ext/Module.bsl")
+	b := bslPathToModuleName("Расширения/TestExt/DataProcessors/DP1/Ext/ObjectModule.bsl")
+	if a == b {
+		t.Fatalf("two distinct ext objects collide on key %q", a)
+	}
+	if a != "ext.TestExt.ОбщийМодуль.CM1.Модуль" {
+		t.Errorf("ext CommonModule key = %q, want ext.TestExt.ОбщийМодуль.CM1.Модуль", a)
+	}
+	if b != "ext.TestExt.Обработка.DP1.МодульОбъекта" {
+		t.Errorf("ext DataProcessor key = %q, want ext.TestExt.Обработка.DP1.МодульОбъекта", b)
+	}
+}
+
 func TestIndex_ModuleNames(t *testing.T) {
 	dir := t.TempDir()
 	mkBSLFile(t, dir, "Catalogs/Номенклатура/Ext/ObjectModule.bsl", "Процедура А()\nКонецПроцедуры\n")
