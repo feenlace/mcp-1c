@@ -53,4 +53,20 @@ func init() {
 	// CommonModules has no corresponding singular object type. It only
 	// appears as a dump directory, so we add it to dumpDirNames directly.
 	dumpDirNames["CommonModules"] = "ОбщийМодуль"
+
+	// CommonForms / CommonCommands are Common-typed metadata: like
+	// CommonModules they have no singular object type used in tool input, so
+	// they are added to dumpDirNames directly. Without them the indexer emitted
+	// raw-English-prefix keys (e.g. "CommonForms.X.МодульФормы") that no
+	// resolver ever queries. On-disk these subtrees never contain a plural
+	// "Forms"/"Commands" segment, so the keys stay FLAT (no .Форма./.Команда.
+	// infix): "ОбщаяФорма.X.МодульФормы", "ОбщаяКоманда.X.МодульКоманды".
+	dumpDirNames["CommonForms"] = "ОбщаяФорма"
+	dumpDirNames["CommonCommands"] = "ОбщаяКоманда"
+
+	// DocumentJournals: same missing-prefix root cause. The Russian singular
+	// "ЖурналДокументов" is the canonical NameRu for DocumentJournal (verified
+	// against the metadata type table). Kept on its own line so it can be
+	// dropped trivially if a future dump shape ever proves otherwise.
+	dumpDirNames["DocumentJournals"] = "ЖурналДокументов"
 }

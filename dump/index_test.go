@@ -1139,6 +1139,18 @@ func TestBslPathToModuleName_Extensions(t *testing.T) {
 		{"ext form module",
 			"Расширения/TestExt/Documents/Заказ/Forms/ФормаЗаказа/Ext/Module.bsl",
 			"ext.TestExt.Документ.Заказ.Форма.ФормаЗаказа.МодульФормы"},
+		// Extension form module, REAL on-disk shape: the customer dump carries a
+		// "Form" directory between "Ext" and "Module.bsl"
+		// (.../Forms/<f>/Ext/Form/Module.bsl), unlike the shorter .../Ext/Module.bsl
+		// row above. The indexer keys on the file name + the Forms infix, so the
+		// intermediate "Form" segment is irrelevant and BOTH shapes yield the same
+		// 5-segment key. This row locks the EXACT customer path
+		// (DataProcessor АРМ_ПробитиеЧековССайта form module of extension Доработки3D)
+		// to the key the resolver builds via "ext."+ext+BuildFormModulePath, which
+		// the modulefetch extension form-module fix depends on.
+		{"ext form module real shape (Ext/Form/Module.bsl)",
+			"Расширения/Доработки3D/DataProcessors/АРМ_ПробитиеЧековССайта/Forms/Форма/Ext/Form/Module.bsl",
+			"ext.Доработки3D.Обработка.АРМ_ПробитиеЧековССайта.Форма.Форма.МодульФормы"},
 		// Control: a base-config path with a literal first segment "Расширения"
 		// is impossible (it is a reserved dump dir), but a too-short path under
 		// it must not panic and falls back to base parsing.
@@ -1152,6 +1164,64 @@ func TestBslPathToModuleName_Extensions(t *testing.T) {
 		{"base object module unaffected",
 			"Catalogs/Номенклатура/Ext/ObjectModule.bsl",
 			"Справочник.Номенклатура.МодульОбъекта"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bslPathToModuleName(tt.path)
+			if got != tt.want {
+				t.Errorf("bslPathToModuleName(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBslPathToModuleName_CommonFormsCommandsJournals locks the flat keys for
+// three dump directories that were MISSING from dumpDirNames (CommonForms,
+// CommonCommands, DocumentJournals), so the indexer emitted raw-English-prefix
+// keys ("CommonForms.X.МодульФормы" etc.) that the resolver never queries.
+//
+// Verified real on-disk shapes:
+//   - CommonForm:    CommonForms/<имя>/Ext/Form/Module.bsl  (intermediate dir is
+//     SINGULAR "Form", not the plural "Forms" that triggers the .Форма. infix —
+//     so the key is FLAT: ОбщаяФорма.X.МодульФормы, no 5-segment expansion).
+//   - CommonCommand: CommonCommands/<имя>/Ext/CommandModule.bsl (flat).
+//   - DocumentJournals: DocumentJournals/<имя>/Ext/ManagerModule.bsl (flat).
+//
+// Extension-prefixed variants strip the 2-segment "Расширения/<ext>/" prefix and
+// re-prefix "ext.<ext>." around the same flat base key.
+func TestBslPathToModuleName_CommonFormsCommandsJournals(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		// Base CommonForm: real shape carries the singular "Form" dir between
+		// "Ext" and "Module.bsl". "Form" is NOT in subdirSegmentNames (only the
+		// plural "Forms" is), so no .Форма. infix — the key stays flat.
+		{"base common form",
+			"CommonForms/ФормаНастроек/Ext/Form/Module.bsl",
+			"ОбщаяФорма.ФормаНастроек.МодульФормы"},
+		// Base CommonCommand: no intermediate dir at all, flat ManagerModule-style.
+		{"base common command",
+			"CommonCommands/ОткрытьПочту/Ext/CommandModule.bsl",
+			"ОбщаяКоманда.ОткрытьПочту.МодульКоманды"},
+		// Base DocumentJournal manager module, flat.
+		{"base document journal manager module",
+			"DocumentJournals/Складской/Ext/ManagerModule.bsl",
+			"ЖурналДокументов.Складской.МодульМенеджера"},
+
+		// Extension CommonForm: ext.<ext>. prefix around the flat base key.
+		{"ext common form",
+			"Расширения/Доработки3D/CommonForms/ФормаНастроек/Ext/Form/Module.bsl",
+			"ext.Доработки3D.ОбщаяФорма.ФормаНастроек.МодульФормы"},
+		// Extension CommonCommand.
+		{"ext common command",
+			"Расширения/Доработки3D/CommonCommands/ОткрытьПочту/Ext/CommandModule.bsl",
+			"ext.Доработки3D.ОбщаяКоманда.ОткрытьПочту.МодульКоманды"},
+		// Extension DocumentJournal manager module.
+		{"ext document journal manager module",
+			"Расширения/TestExt/DocumentJournals/Складской/Ext/ManagerModule.bsl",
+			"ext.TestExt.ЖурналДокументов.Складской.МодульМенеджера"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
