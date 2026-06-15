@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -49,4 +50,59 @@ func cacheShardDirs(cacheDir string) []string {
 	}
 	slices.Sort(dirs)
 	return dirs
+}
+
+// serveLockName is the lock file an Index writes into its cache directory while
+// the cache is open. Its presence tells an offline `--build-index` run that a
+// server (or another build) is using the cache, so a destructive rebuild does not
+// clobber memory-mapped shard files out from under the live process.
+const serveLockName = "serve.lock"
+
+// writeCacheLock records this process as the holder of the cache at cpath by
+// writing serveLockName with the current PID. Best-effort: callers log and
+// continue on error rather than refusing to serve.
+func writeCacheLock(cpath string) error {
+	if cpath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(cpath, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(cpath, serveLockName), []byte(strconv.Itoa(os.Getpid())), 0o644)
+}
+
+// removeCacheLock removes the cache lock at cpath, but only if it still records
+// this process. A foreign lock (another running server/build acquired it after
+// us) is left untouched.
+func removeCacheLock(cpath string) {
+	if cpath == "" {
+		return
+	}
+	lock := filepath.Join(cpath, serveLockName)
+	if data, err := os.ReadFile(lock); err == nil {
+		if pid, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil && pid != os.Getpid() {
+			return
+		}
+	}
+	_ = os.Remove(lock)
+}
+
+// readCacheLock reports the PID recorded in the cache lock at cpath and whether a
+// lock is present. A present lock means another process currently has this cache
+// open; clobbering it would corrupt that process's mmap'd view and/or race its
+// writes. When the lock exists but its contents are not a PID, pid is 0 and
+// present is true (treated as in use).
+func readCacheLock(cpath string) (pid int, present bool) {
+	if cpath == "" {
+		return 0, false
+	}
+	data, err := os.ReadFile(filepath.Join(cpath, serveLockName))
+	if err != nil {
+		return 0, false
+	}
+	pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, true
+	}
+	return pid, true
 }

@@ -41,6 +41,7 @@ func main() {
 	dumpDir := flag.String("dump", "", "Path to DumpConfigToFiles output (enables search_code)")
 	cacheDir := flag.String("cache-dir", "", "Directory for index cache and logs (default: platform cache dir)")
 	reindex := flag.Bool("reindex", false, "Force rebuild of search index cache")
+	buildIndex := flag.Bool("build-index", false, "Build (or refresh) the search index cache for --dump and exit. Pre-warms the on-disk cache so a later start opens it instantly instead of doing an in-memory cold build. Requires --dump and a writable cache dir (--cache-dir or MCP_1C_CACHE_DIR).")
 	installDB := flag.String("install", "", "Install extension into 1C database at given path")
 	serverMode := flag.Bool("server", false, `Treat --install value as server connection string (server\database)`)
 	platformPath := flag.String("platform", "", "Path to 1C platform executable (auto-detected if omitted)")
@@ -101,6 +102,25 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("Extension installed successfully.")
+		return
+	}
+
+	// Build-index mode: offline pre-warm of the search cache, then exit. Mirrors
+	// the install/version command modes and runs before the MCP stderr redirect,
+	// so build progress is visible on a terminal launch.
+	if *buildIndex {
+		if *dumpDir == "" {
+			fmt.Fprintln(os.Stderr, "--build-index requires --dump")
+			os.Exit(2)
+		}
+		dump.SetShowProgress(effectiveTTY && !*debug)
+		fmt.Printf("Building search index for %s ...\n", *dumpDir)
+		start := time.Now()
+		if err := dump.BuildCache(*dumpDir, *cacheDir, *reindex); err != nil {
+			fmt.Fprintf(os.Stderr, "build-index failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Index cache built in %.1fs.\n", time.Since(start).Seconds())
 		return
 	}
 

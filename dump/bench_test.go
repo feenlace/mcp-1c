@@ -109,7 +109,7 @@ func BenchmarkBuildIndex_Sharded(b *testing.B) {
 		for i := range n {
 			go func(shardID int) {
 				path := dir + fmt.Sprintf("/shard_%d", shardID)
-				idx, err := buildShard(path, groups[shardID], contentByName, shardID, n, bslMapping, &atomic.Int64{})
+				idx, err := buildShard(path, groups[shardID], func(name string) string { return contentByName[name] }, shardID, n, bslMapping, &atomic.Int64{})
 				results <- result{idx: idx, err: err}
 			}(i)
 		}

@@ -104,7 +104,7 @@ func TestBuildShard(t *testing.T) {
 	names := []string{"Справочник.Тест.МодульОбъекта", "Документ.Док1.МодульОбъекта"}
 	path := t.TempDir() + "/shard_0"
 
-	idx, err := buildShard(path, names, contentByName, 0, 1, buildBSLMapping(), &atomic.Int64{})
+	idx, err := buildShard(path, names, func(name string) string { return contentByName[name] }, 0, 1, buildBSLMapping(), &atomic.Int64{})
 	if err != nil {
 		t.Fatalf("buildShard: %v", err)
 	}

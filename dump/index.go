@@ -41,6 +41,58 @@ func stripBOM(s string) string {
 	return strings.TrimPrefix(s, utf8BOM)
 }
 
+// readErrLogInterval bounds how often module-read-error warnings are emitted, so
+// a broadly unreadable dump (a locked directory, an antivirus quarantine, a
+// paused cloud-sync folder) cannot flood the log with one line per file.
+const readErrLogInterval = 5 * time.Second
+
+// readRetryDelay is the pause before the single retry readModuleContent makes
+// when a file read fails. Transient Windows file locks (antivirus / OneDrive /
+// the OS search indexer briefly holding the handle) usually clear within it.
+const readRetryDelay = 50 * time.Millisecond
+
+var (
+	readErrLogLast       atomic.Int64 // UnixNano of the last emitted read-error warning
+	readErrLogSuppressed atomic.Int64 // read-error warnings suppressed since the last emit
+)
+
+// warnModuleReadErr emits a rate-limited warning that a module file could not be
+// read, so its exclusion from a build or a search result is observable instead of
+// a silent false-negative. At most one warning per readErrLogInterval is emitted;
+// the number suppressed in between is folded into the next emitted line.
+func warnModuleReadErr(path string, err error) {
+	now := time.Now().UnixNano()
+	prev := readErrLogLast.Load()
+	if now-prev < int64(readErrLogInterval) || !readErrLogLast.CompareAndSwap(prev, now) {
+		readErrLogSuppressed.Add(1)
+		return
+	}
+	slog.Warn("dump: module file unreadable, excluded from this result "+
+		"(check file lock / antivirus / cloud-sync)",
+		"path", path,
+		"error", err,
+		"suppressed_since_last", readErrLogSuppressed.Swap(0))
+}
+
+// readModuleContent reads a BSL module's source from disk and strips the UTF-8
+// BOM. It retries once after a short pause on failure, because module files are
+// occasionally locked for a moment by antivirus / cloud-sync / the OS search
+// indexer (common on Windows). If the read still fails the module is reported as
+// unavailable (so callers exclude it) and a rate-limited warning is logged — the
+// file does not silently disappear from results without a trace.
+func readModuleContent(path string) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		time.Sleep(readRetryDelay)
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		warnModuleReadErr(path, err)
+		return "", false
+	}
+	return stripBOM(string(data)), true
+}
+
 // Match represents a single search hit in a BSL module.
 type Match struct {
 	Module  string  // Human-readable module path (e.g. "Документ.РеализацияТоваров.МодульОбъекта")
@@ -205,6 +257,7 @@ type Index struct {
 	pathByName    map[string]string // docID -> absolute file path (always populated)
 	pathToDocID   map[string]string // relative path (ToSlash) -> module name
 	pathIndex     *PathIndex        // decomposed path index for fast category/module filtering
+	lockDir       string            // cache dir whose serve-lock this index holds (empty = none); released in Close
 	ready         atomic.Bool
 	mu            sync.RWMutex
 	contentMu     sync.RWMutex // protects lazy content loading
@@ -249,20 +302,21 @@ func (idx *Index) GetContent(id string) (string, bool) {
 		return "", false
 	}
 
-	// Lazy load from disk under write lock.
-	idx.contentMu.Lock()
-	defer idx.contentMu.Unlock()
-
-	// Double-check after acquiring write lock.
-	if content, ok := idx.contentByName[id]; ok {
-		return content, true
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
+	// Read (with one retry) WITHOUT holding contentMu, so a transient read
+	// failure's retry pause does not block other readers. A concurrent caller may
+	// read the same file in parallel; that is harmless (identical content) and is
+	// resolved by the double-check below.
+	content, ok := readModuleContent(path)
+	if !ok {
 		return "", false
 	}
-	content := stripBOM(string(data))
+
+	idx.contentMu.Lock()
+	defer idx.contentMu.Unlock()
+	// Double-check: another goroutine may have populated the cache meanwhile.
+	if existing, ok := idx.contentByName[id]; ok {
+		return existing, true
+	}
 	idx.contentByName[id] = content
 	return content, true
 }
@@ -292,8 +346,31 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 	cpath, cacheErr := cachePath(dir, cacheDir)
 	useCache := cacheErr == nil
 
+	if !useCache {
+		// No writable cache location: os.UserCacheDir() failed and no
+		// MCP_1C_CACHE_DIR override is set. Shards are then built in memory and
+		// NOT persisted, so every start pays the full cold build (slow and
+		// memory-intensive). Make this visible instead of failing silently.
+		slog.Warn("Dump index cache disabled: no writable cache directory "+
+			"(os.UserCacheDir failed and MCP_1C_CACHE_DIR is unset/unwritable). "+
+			"The full-text index will be rebuilt in memory on every start. Set "+
+			"MCP_1C_CACHE_DIR to a writable, persistent directory to enable the "+
+			"on-disk cache.", "error", cacheErr)
+		if showProgress.Load() {
+			fmt.Fprintf(os.Stderr, "Внимание: кэш индекса отключён — нет доступной для "+
+				"записи кэш-директории. Индекс будет строиться в памяти при каждом "+
+				"запуске. Задайте MCP_1C_CACHE_DIR на постоянный каталог с правом записи.\n")
+		}
+	}
+
 	if useCache && reindex {
-		os.RemoveAll(cpath)
+		// Refuse to wipe a cache that a running server has memory-mapped: on
+		// Windows RemoveAll fails on mmap'd files, and proceeding past a partial
+		// delete would corrupt the rebuild. Surface it instead of ignoring it.
+		if err := os.RemoveAll(cpath); err != nil {
+			return nil, fmt.Errorf("clearing index cache for --reindex "+
+				"(is a server using this dump? stop it first): %w", err)
+		}
 	}
 
 	// Try to open existing sharded cache.
@@ -303,6 +380,7 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 			if err == nil {
 				idx.shards = shards
 				idx.alias.Add(shards...)
+				idx.acquireCacheLock(cpath)
 
 				// Fast startup: populate index from manifest, then apply incremental diff.
 				go func() {
@@ -328,17 +406,87 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 				return idx, nil
 			}
 			// Cache corrupt — remove and rebuild.
-			os.RemoveAll(cpath)
+			if err := os.RemoveAll(cpath); err != nil {
+				slog.Warn("could not remove corrupt index cache before rebuild; "+
+					"the rebuild may fail or mix stale shards",
+					"path", cpath, "error", err)
+			}
 		}
 	}
 
 	// No usable cache — full sharded build in background.
+	if useCache {
+		idx.acquireCacheLock(cpath)
+	}
 	go func() {
 		defer close(idx.done)
 		idx.buildShards(cpath, useCache)
 	}()
 
 	return idx, nil
+}
+
+// acquireCacheLock marks cpath as in use by this process for the lifetime of the
+// index (released in Close), so a concurrent `--build-index` does not clobber a
+// cache the running server has memory-mapped. Best-effort: a failure to write the
+// lock is logged but does not stop the server.
+func (idx *Index) acquireCacheLock(cpath string) {
+	if cpath == "" {
+		return
+	}
+	if err := writeCacheLock(cpath); err != nil {
+		slog.Warn("dump: could not write cache lock; a concurrent --build-index "+
+			"could clobber this cache", "path", cpath, "error", err)
+		return
+	}
+	idx.lockDir = cpath
+}
+
+// BuildCache synchronously builds (or refreshes) the on-disk search-index cache
+// for dir and returns once the build has completed and been persisted. It is the
+// offline pre-warm entry point behind the --build-index CLI flag: running it
+// before `serve` lets the server open a warm cache instead of paying the
+// expensive in-memory cold build (high transient RSS) on first start.
+//
+// cacheDir follows NewIndex semantics: empty selects the platform cache dir
+// (os.UserCacheDir), otherwise the given directory is used. reindex forces a full
+// rebuild. BuildCache returns an error if no writable cache location is available
+// (nothing would be persisted, so every serve would rebuild) or if the build
+// fails.
+func BuildCache(dir, cacheDir string, reindex bool) error {
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		return fmt.Errorf("no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
+	}
+
+	// Refuse to rebuild a cache that a running server (or another build) has open
+	// and memory-mapped: a destructive rebuild would corrupt that process's view
+	// and/or race its writes. The lock is written by NewIndex while a cache is
+	// open and removed on Close.
+	if pid, present := readCacheLock(cpath); present {
+		who := "another mcp-1c process"
+		if pid > 0 {
+			who = fmt.Sprintf("mcp-1c (pid %d)", pid)
+		}
+		return fmt.Errorf("index cache %s is in use by %s; stop the running server "+
+			"before using --build-index. If no server is running this is a stale lock — "+
+			"delete %s and retry", cpath, who, filepath.Join(cpath, serveLockName))
+	}
+
+	idx, err := NewIndex(dir, cacheDir, reindex)
+	if err != nil {
+		return err
+	}
+	defer idx.Close()
+
+	<-idx.Done()
+	if err := idx.BuildError(); err != nil {
+		return fmt.Errorf("building index cache: %w", err)
+	}
+	if !idx.Ready() {
+		return fmt.Errorf("index build did not complete")
+	}
+	return nil
 }
 
 // setBuildErr stores a build error atomically.
@@ -348,10 +496,16 @@ func (idx *Index) setBuildErr(err error) {
 
 // buildShards loads BSL files and builds N shards in parallel.
 func (idx *Index) buildShards(cpath string, useCache bool) {
-	if err := idx.loadBSLFiles(idx.dir); err != nil {
-		idx.setBuildErr(fmt.Errorf("loading BSL files: %w", err))
+	// Load module paths only (no file content). The shard builders below read
+	// each .bsl from disk on demand, so the full corpus (hundreds of MB) is never
+	// resident at once — the dominant cold-build memory peak. Sort names into the
+	// same lexicographic order loadBSLFiles produced, which reproducible shard
+	// keys and stable regex/exact scan order depend on.
+	if err := idx.loadBSLPaths(idx.dir); err != nil {
+		idx.setBuildErr(fmt.Errorf("loading BSL paths: %w", err))
 		return
 	}
+	slices.Sort(idx.names)
 
 	total := len(idx.names)
 	if total == 0 {
@@ -387,8 +541,33 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 	// Build the BSL mapping once and share across all shards.
 	bslMapping := buildBSLMapping()
 
-	// Disable GC for entire parallel build.
-	oldGC := debug.SetGCPercent(-1)
+	// Content resolver: shard builders read each module's source from disk on
+	// demand (bounded memory) instead of from a fully-resident content map.
+	// pathByName is only read during the build, so concurrent access from the
+	// shard goroutines needs no lock.
+	pathByName := idx.pathByName
+	getContent := func(name string) string {
+		path := pathByName[name]
+		if path == "" {
+			return ""
+		}
+		// readModuleContent retries once and logs a rate-limited warning on
+		// failure, so a file unreadable at build time (lock / antivirus /
+		// cloud-sync) is not silently indexed with empty content.
+		content, _ := readModuleContent(path)
+		return content
+	}
+
+	// Tighten GC for the parallel build instead of disabling it. Previously the
+	// whole build ran with GC OFF (debug.SetGCPercent(-1)), so tokenization and
+	// analysis transients accumulated across every shard and inflated peak RSS
+	// many-fold on a cold build — the serve-time OOM. A lower-than-default GC
+	// target keeps heap headroom small during this allocation-heavy phase and is
+	// restored afterwards. It is relative (no fixed byte budget), so it adapts to
+	// any config size. With GC enabled, a process memory limit set via
+	// debug.SetMemoryLimit (e.g. the Advanced --memory-limit flag) is now also
+	// honoured — it was a no-op while GC was disabled.
+	oldGC := debug.SetGCPercent(buildGCPercent)
 	defer debug.SetGCPercent(oldGC)
 
 	start := time.Now()
@@ -437,7 +616,7 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 				shardPath = filepath.Join(basePath, fmt.Sprintf("shard_%d", shardID))
 			}
 
-			shard, err := buildShard(shardPath, groups[shardID], idx.contentByName, shardID, n, bslMapping, &indexed)
+			shard, err := buildShard(shardPath, groups[shardID], getContent, shardID, n, bslMapping, &indexed)
 			results <- shardResult{index: shard, id: shardID, err: err}
 		}(i)
 	}
@@ -465,7 +644,10 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 			}
 		}
 		if cpath != "" {
-			os.RemoveAll(cpath)
+			if err := os.RemoveAll(cpath); err != nil {
+				slog.Warn("could not remove partial index cache after build failure",
+					"path", cpath, "error", err)
+			}
 		}
 		idx.setBuildErr(firstErr)
 		return
@@ -474,6 +656,13 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 	idx.shards = shards
 	idx.alias.Add(shards...)
 	idx.pathIndex = NewPathIndex(idx.names)
+
+	// contentByName is intentionally left empty: the cold build streamed content
+	// from disk (see getContent above) and never populated it. GetContent lazily
+	// loads individual modules from disk via pathByName, and regex/exact scans
+	// stream content (see searchLineByLine/contentForScan), so the full corpus is
+	// never resident after the build either.
+
 	idx.ready.Store(true)
 
 	// Save manifest for future incremental updates.
@@ -713,55 +902,32 @@ func (idx *Index) loadBSLPaths(dir string) error {
 	return nil
 }
 
-// ensureAllContentLoaded bulk-loads all file content that hasn't been lazily loaded yet.
-// Used by searchLineByLine (regex/exact modes) which need to scan all modules.
-// Reads files in parallel using a worker pool for performance.
+// contentForScan returns the BSL source for name for a full-index scan. It uses
+// the in-memory content cache when the module is present there, otherwise it
+// reads the file from disk via pathByName WITHOUT caching the result.
 //
-// Lock ordering: mu.RLock is acquired and released first (phase 1), then contentMu
-// is used separately (phase 2, 3). This avoids deadlock with GetContent which takes
-// contentMu then mu.
-func (idx *Index) ensureAllContentLoaded() {
-	// Phase 1: collect all name->path mappings (under mu only).
-	idx.mu.RLock()
-	allPaths := make(map[string]string, len(idx.pathByName))
-	for name, path := range idx.pathByName {
-		allPaths[name] = path
-	}
-	idx.mu.RUnlock()
-
-	// Phase 2: find which ones need loading (under contentMu only).
+// Regex/exact search scans every candidate module, so caching here would re-grow
+// contentByName to the full corpus size — the very allocation the cold-build fix
+// drops after building (see buildShards). Streaming instead keeps a full scan's
+// memory bounded to one file at a time, reclaimed by the GC. The returned content
+// is identical to the cached value (same stripBOM), so search results are
+// unchanged.
+func (idx *Index) contentForScan(name string) (string, bool) {
 	idx.contentMu.RLock()
-	var toLoad []struct{ name, path string }
-	for name, path := range allPaths {
-		if _, ok := idx.contentByName[name]; !ok {
-			toLoad = append(toLoad, struct{ name, path string }{name, path})
-		}
-	}
+	c, ok := idx.contentByName[name]
 	idx.contentMu.RUnlock()
-
-	if len(toLoad) == 0 {
-		return
+	if ok {
+		return c, true
 	}
 
-	// Phase 3: load files in parallel, write to contentByName.
-	sem := make(chan struct{}, runtime.NumCPU())
-	var wg sync.WaitGroup
-	for _, item := range toLoad {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(name, path string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return
-			}
-			idx.contentMu.Lock()
-			idx.contentByName[name] = stripBOM(string(data))
-			idx.contentMu.Unlock()
-		}(item.name, item.path)
+	idx.mu.RLock()
+	path, hasPath := idx.pathByName[name]
+	idx.mu.RUnlock()
+	if !hasPath {
+		return "", false
 	}
-	wg.Wait()
+
+	return readModuleContent(path)
 }
 
 // moduleNameParts holds the parsed components of a human-readable module name.
@@ -1075,32 +1241,75 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 		return nil, 0, err
 	}
 
-	// Bulk-load all content for line-by-line scan.
-	idx.ensureAllContentLoaded()
-
-	idx.contentMu.RLock()
-	defer idx.contentMu.RUnlock()
-
 	var matches []Match
 	total := 0
 
-	for _, name := range candidates {
-		content := idx.contentByName[name]
-		lines := strings.Split(content, "\n")
-		for i, line := range lines {
-			matchLine := line
-			if preLower {
-				matchLine = strings.ToLower(line)
-			}
-			if match(matchLine, q) {
-				total++
+	// Scan candidates in bounded parallel chunks. Each candidate's content is
+	// streamed from disk (or taken from cache if present) and discarded after
+	// scanning — nothing is permanently cached, so a full regex/exact scan stays
+	// memory-bounded (the cold-build fix removed the all-content map). Chunk
+	// results are merged in candidate order, so the output — match order, total
+	// count, and first-Limit cap — is byte-identical to a sequential scan.
+	type candResult struct {
+		matches []Match
+		count   int
+	}
+
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	chunkSize := workers * 8
+
+	for start := 0; start < len(candidates); start += chunkSize {
+		end := min(start+chunkSize, len(candidates))
+		chunk := candidates[start:end]
+		results := make([]candResult, len(chunk))
+
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, workers)
+		for i, name := range chunk {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(i int, name string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				content, ok := idx.contentForScan(name)
+				if !ok {
+					return
+				}
+				lines := strings.Split(content, "\n")
+				var ms []Match
+				cnt := 0
+				for li, line := range lines {
+					matchLine := line
+					if preLower {
+						matchLine = strings.ToLower(line)
+					}
+					if match(matchLine, q) {
+						cnt++
+						// Buffer at most Limit matches per candidate; the global
+						// cap is applied during the ordered merge below.
+						if len(ms) < params.Limit {
+							ms = append(ms, Match{
+								Module:  name,
+								Line:    li + 1,
+								Context: extractContext(lines, li, 2),
+							})
+						}
+					}
+				}
+				results[i] = candResult{matches: ms, count: cnt}
+			}(i, name)
+		}
+		wg.Wait()
+
+		for _, r := range results {
+			total += r.count
+			for _, m := range r.matches {
 				if len(matches) < params.Limit {
-					ctx := extractContext(lines, i, 2)
-					matches = append(matches, Match{
-						Module:  name,
-						Line:    i + 1,
-						Context: ctx,
-					})
+					matches = append(matches, m)
 				}
 			}
 		}
@@ -1456,6 +1665,9 @@ func (idx *Index) saveManifest(cacheDir string) {
 func (idx *Index) Close() error {
 	idx.cancel()
 	<-idx.done
+	if idx.lockDir != "" {
+		removeCacheLock(idx.lockDir)
+	}
 	var firstErr error
 	for _, shard := range idx.shards {
 		if err := shard.Close(); err != nil && firstErr == nil {
