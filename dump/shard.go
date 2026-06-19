@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync/atomic"
 
@@ -89,6 +90,34 @@ func buildShard(path string, names []string, getContent func(name string) string
 	return buildShardInMemory(names, getContent, shardID, totalShards, bslMapping, progress)
 }
 
+// coLocateBuildScratch returns a scratch-directory prefix on the SAME filesystem
+// as dstPath for bleve's offline (scorch) index builder, plus a cleanup func.
+//
+// bleve.NewBuilder streams its in-progress .zap segments into
+// os.MkdirTemp(buildPathPrefix, ...) and, at Close, os.Rename()s the final merged
+// segment into <dstPath>/store. When buildPathPrefix is empty that scratch lives
+// under os.TempDir(); if the destination cache is on a DIFFERENT device than
+// os.TempDir() — the flagship container layout, where a named volume / k8s PVC
+// holds the cache while /tmp is the container's ephemeral overlay — that final
+// rename fails with EXDEV ("invalid cross-device link") and aborts the whole cold
+// build (BuildGeneration → no READY generation → serve broken). Co-locating the
+// scratch beside the destination makes the rename an intra-device move.
+//
+// The prefix is unique per destination, so the parallel shard builders never
+// collide, and this needs NO process-global os.TempDir()/TMPDIR mutation (which
+// would race concurrent builds). The directory name is deliberately kept clear of
+// the "shard_" prefix so cacheShardDirs never mistakes the scratch for a real
+// shard. Callers MUST defer cleanup: bleve removes its own inner temp dir on a
+// clean Close; cleanup additionally removes the scratch if Close is aborted, so no
+// scratch is ever leaked into the cache arena.
+func coLocateBuildScratch(dstPath string) (prefix string, cleanup func(), err error) {
+	prefix = filepath.Join(filepath.Dir(dstPath), ".bleve-scratch-"+filepath.Base(dstPath))
+	if err := os.MkdirAll(prefix, 0o755); err != nil {
+		return "", func() {}, fmt.Errorf("creating co-located build scratch dir %q: %w", prefix, err)
+	}
+	return prefix, func() { _ = os.RemoveAll(prefix) }, nil
+}
+
 // buildShardOffline builds a shard on disk via the bounded-memory offline
 // builder and returns the opened (mutable) index.
 func buildShardOffline(path string, names []string, getContent func(name string) string, shardID, totalShards int, bslMapping *mapping.IndexMappingImpl, progress *atomic.Int64) (bleve.Index, error) {
@@ -99,10 +128,21 @@ func buildShardOffline(path string, names []string, getContent func(name string)
 		return nil, fmt.Errorf("clearing shard %d path: %w", shardID, err)
 	}
 
+	// Keep the offline builder's scratch/segment dir on the same filesystem as the
+	// destination shard so its final segment rename is intra-device, not a
+	// cross-device link (see coLocateBuildScratch — the cross-device volume-backed
+	// cache is exactly the read-only-serve-in-containers target).
+	scratchPrefix, cleanupScratch, err := coLocateBuildScratch(path)
+	if err != nil {
+		return nil, fmt.Errorf("shard %d: %w", shardID, err)
+	}
+	defer cleanupScratch()
+
 	builder, err := bleve.NewBuilder(path, bslMapping, map[string]any{
 		"forceSegmentType":    "zap",
 		"forceSegmentVersion": zapSegmentVersion, // folded into GenSig — see BUMP PROTOCOL
 		"batchSize":           offlineBuilderBatchSize,
+		"buildPathPrefix":     scratchPrefix,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating bleve builder for shard %d: %w", shardID, err)

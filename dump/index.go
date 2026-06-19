@@ -812,10 +812,19 @@ func openCachedShards(dirs []string, readOnly bool, boltTimeout string) ([]bleve
 func buildIndexBuilder(indexPath string, names []string, contentByName map[string]string) (bleve.Index, error) {
 	bslMapping := buildBSLMapping()
 
+	// Co-locate the offline builder's scratch on the destination filesystem so its
+	// final segment rename never crosses devices (EXDEV). See coLocateBuildScratch.
+	scratchPrefix, cleanupScratch, err := coLocateBuildScratch(indexPath)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupScratch()
+
 	builder, err := bleve.NewBuilder(indexPath, bslMapping, map[string]any{
 		"forceSegmentType":    "zap",
 		"forceSegmentVersion": zapSegmentVersion, // folded into GenSig — see BUMP PROTOCOL
 		"batchSize":           5000,
+		"buildPathPrefix":     scratchPrefix,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating bleve builder: %w", err)
