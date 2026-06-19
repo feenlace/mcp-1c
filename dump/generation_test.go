@@ -406,6 +406,90 @@ func TestBuildGeneration_IdempotentWhenReady(t *testing.T) {
 	}
 }
 
+// TestReapStaleBuildDirs_RemovesStaleKeepsFresh is the FIX #4 (premortem-5)
+// regression: an interrupted build (SIGKILL/OOM/power-loss) leaks a partial
+// .building-* generation dir that GCGenerations deliberately skips, so nothing ever
+// reaps it and disk grows to ENOSPC. The reaper must remove an ABANDONED (stale,
+// no recent writes) temp dir while LEAVING a CONCURRENT leader's fresh in-progress
+// temp dir untouched, and a normal build must still succeed afterwards.
+func TestReapStaleBuildDirs_RemovesStaleKeepsFresh(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Реап/Ext/ObjectModule.bsl", "Процедура Р()\nКонецПроцедуры\n")
+
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	gensDir := generationsDir(cpath)
+	if err := os.MkdirAll(gensDir, 0o755); err != nil {
+		t.Fatalf("mkdir gensDir: %v", err)
+	}
+
+	// STALE: a partial generation an interrupted builder left behind. Age every
+	// entry in its tree past the staleness window (the reaper gates on the NEWEST
+	// mtime anywhere in the tree, so all of them must be old to count as abandoned).
+	staleDir := filepath.Join(gensDir, buildTmpPrefix+"deadbeef-stale")
+	staleShard := filepath.Join(staleDir, "shard_0")
+	if err := os.MkdirAll(staleShard, 0o755); err != nil {
+		t.Fatalf("mkdir staleShard: %v", err)
+	}
+	staleSeg := filepath.Join(staleShard, "segment.zap")
+	if err := os.WriteFile(staleSeg, []byte("partial"), 0o644); err != nil {
+		t.Fatalf("write stale seg: %v", err)
+	}
+	old := time.Now().Add(-2 * buildDirStaleAfter)
+	for _, p := range []string{staleSeg, staleShard, staleDir} { // children-first
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	// FRESH: a CONCURRENT build-leader mid-build that just streamed a segment. Its
+	// tree carries a current mtime, so it MUST survive the reaper.
+	freshDir := filepath.Join(gensDir, buildTmpPrefix+"cafef00d-fresh")
+	if err := os.MkdirAll(filepath.Join(freshDir, "shard_0"), 0o755); err != nil {
+		t.Fatalf("mkdir freshDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(freshDir, "shard_0", "segment.zap"), []byte("live"), 0o644); err != nil {
+		t.Fatalf("write fresh seg: %v", err)
+	}
+
+	// The defect: GCGenerations alone never reaps a .building-* (it skips the
+	// prefix), so without the reaper the stale partial leaks forever.
+	if _, err := GCGenerations(dir, cacheDir, ""); err != nil {
+		t.Fatalf("GCGenerations: %v", err)
+	}
+	if _, err := os.Stat(staleDir); err != nil {
+		t.Fatalf("precondition: GCGenerations should leave .building-* (the leak); stat: %v", err)
+	}
+
+	removed, err := ReapStaleBuildDirs(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("ReapStaleBuildDirs: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != filepath.Base(staleDir) {
+		t.Fatalf("removed = %v, want only the stale dir %q", removed, filepath.Base(staleDir))
+	}
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Fatalf("stale build temp dir still present after reap: %v", err)
+	}
+	if _, err := os.Stat(freshDir); err != nil {
+		t.Fatalf("fresh in-progress build temp dir was reaped (must survive): %v", err)
+	}
+
+	// A normal build still succeeds: the reaper left the arena usable and never
+	// touched a real generation. (BuildGeneration creates and adopts its own temp
+	// dir; the surviving synthetic fresh dir does not interfere.)
+	gensig := mustGenSig(t, dir)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("BuildGeneration after reap: %v", err)
+	}
+	if !generationReadyDir(generationDir(cpath, gensig)) {
+		t.Fatalf("generation %s not READY after post-reap build", gensig)
+	}
+}
+
 // snapshotShardTree records "mtimeNano:size" per file under each shard dir, keyed
 // by "<shardBase>/<relpath>". A directory MOVE (adoption) preserves every inner
 // file's mtime and size exactly; a REBUILD writes fresh files with new mtimes, so

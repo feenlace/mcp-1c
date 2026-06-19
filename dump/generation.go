@@ -54,6 +54,23 @@ const (
 	// defaultBoltTimeout bounds how long a read-only open waits for a conflicting
 	// flock before failing. MUST be a Go duration STRING (see openCachedShards).
 	defaultBoltTimeout = "5s"
+
+	// buildDirStaleAfter is how long a .building-* temp generation dir may go with
+	// NO new write anywhere in its tree before ReapStaleBuildDirs treats it as
+	// abandoned (its builder was SIGKILLed / OOM-killed / lost power mid-build) and
+	// removes it. It is the staleness gate that makes reaping safe to run while a
+	// CONCURRENT build-leader is still writing: a healthy build streams zap segments
+	// into its shard subdirs continuously (bleve's offline builder, batchSize 5000,
+	// with the shard subdirs created up front), so SOME file in a live build's tree
+	// is always fresher than this window — only a build that has written nothing for
+	// the whole window is dead. This is the no-write age (the newest mtime ANYWHERE
+	// in the tree, not the dir's creation time), so it never false-reaps a build that
+	// legitimately runs LONGER than the window — only one that has gone silent. It is
+	// a constant rather than a flag to keep the single-binary surface small, matching
+	// the reader-registry's readerStaleAfter; 30m is far beyond any healthy build's
+	// inter-write gap yet short enough that a crash-cascade's leaks are reclaimed on
+	// the next serve open rather than accumulating to ENOSPC.
+	buildDirStaleAfter = 30 * time.Minute
 )
 
 // Index version components folded into GenSig.
@@ -361,6 +378,102 @@ func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
 		slog.Info("GC: removed old unheld generation", "gen", name)
 	}
 	return removed, nil
+}
+
+// ReapStaleBuildDirs removes ABANDONED .building-* temp generation dirs — the
+// partial generation a builder leaves behind when it dies mid-build (SIGKILL, OOM,
+// power loss) before it can either adopt the build (atomic rename into g/<gensig>/)
+// or roll it back. Nothing else reaps these: GCGenerations deliberately SKIPS
+// .building-* (from its readers/-registry vantage it cannot tell an in-progress
+// build from a dead one), and the post-build deferred cleanup only runs in the
+// process that survives the build. So without this, every interrupted build leaks a
+// partial generation (hundreds of MB of shards) that grows on disk unbounded until
+// ENOSPC — the realistic trigger being an async-readiness kill/rebuild cascade that
+// SIGKILLs the builder repeatedly. The same prefix is used by BuildGeneration and
+// adoptFlatShards, so this reaps an interrupted flat-cache adoption's temp dir too.
+//
+// It is meant to be called on startup / BEFORE electing a build-leader (see the
+// serve open path), not only after a successful build, so leaks are reclaimed even
+// when the leaking process never reaches its own post-build cleanup.
+//
+// SAFETY — a fresh in-progress build MUST survive: a .building-* dir is removed
+// ONLY when the newest mtime ANYWHERE in its tree is older than buildDirStaleAfter,
+// i.e. nothing has been written to it for far longer than any healthy build pauses.
+// A CONCURRENT build-leader actively streaming segments keeps its tree fresh and is
+// therefore never reaped; the caller of this function has not yet started its own
+// build, so it has no live temp dir of its own to protect. Removal is best-effort
+// and per-dir: a permission error (a cross-user temp dir on a shared cacheDir) is
+// skipped, not fatal, so one undeletable dir never blocks reclaiming the others.
+//
+// A crash mid-adoptFlatShards can leave the only copy of the legacy flat shards
+// inside the reaped temp dir (they are MOVED, not copied, and the rollback never
+// ran); reaping it loses a CACHE that the next open rebuilds, never source data.
+// Returns the temp-dir names actually removed.
+func ReapStaleBuildDirs(dir, cacheDir string) ([]string, error) {
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	gensDir := generationsDir(cpath)
+	entries, err := os.ReadDir(gensDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no generations arena yet — nothing to reap
+		}
+		return nil, fmt.Errorf("reading generations dir: %w", err)
+	}
+
+	cutoff := time.Now().Add(-buildDirStaleAfter)
+	var removed []string
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), buildTmpPrefix) {
+			continue
+		}
+		tmpDir := filepath.Join(gensDir, e.Name())
+		if !buildDirStale(tmpDir, cutoff) {
+			continue // fresh — a live build may still be writing it; MUST NOT remove
+		}
+		if err := os.RemoveAll(tmpDir); err != nil {
+			if os.IsPermission(err) {
+				slog.Debug("reap: skipping build temp dir owned by another user", "dir", e.Name(), "error", err)
+			} else {
+				slog.Warn("reap: could not remove stale build temp dir", "dir", e.Name(), "error", err)
+			}
+			continue
+		}
+		removed = append(removed, e.Name())
+		slog.Info("reap: removed abandoned build temp dir", "dir", e.Name())
+	}
+	return removed, nil
+}
+
+// buildDirStale reports whether EVERY entry in the temp build dir tree is older
+// than cutoff — i.e. nothing has been written anywhere in it for buildDirStaleAfter,
+// so the build that owns it is abandoned. It walks the tree but RETURNS EARLY
+// (fs.SkipAll) the instant it finds any entry at-or-after cutoff, so detecting a
+// live build (which has a fresh segment somewhere) is cheap and never reaps it. A
+// walk error is treated as "not stale" (keep) so a transient read error or a dir
+// vanishing mid-walk never causes a removal.
+func buildDirStale(tmpDir string, cutoff time.Time) bool {
+	stale := true
+	walkErr := filepath.WalkDir(tmpDir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.ModTime().Before(cutoff) {
+			stale = false
+			return fs.SkipAll // a fresh entry → this build is live; stop walking
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return false // walk failed → be conservative, do NOT reap
+	}
+	return stale
 }
 
 // loadNamesReadOnly populates names/pathByName/pathToDocID from the generation's
