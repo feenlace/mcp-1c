@@ -34,14 +34,18 @@ import (
 //	<cpath>/g/<gensig>/shard_*   ← generation shards, immutable once READY
 //	<cpath>/g/<gensig>/manifest.json
 //	<cpath>/g/<gensig>/READY      ← sentinel, written LAST (before the atomic adopt)
+//	<cpath>/g/<gensig>/readers/   ← liveness-checked multi-holder reader registry (see readers.go)
 //	<cpath>/g/.building-<gensig>-<rand>/  ← in-progress build temp dir (renamed away on adopt)
 //
-// DEFERRED to later chunks (NOT implemented here): the build-leader election +
-// reader-liveness registry (readers/), old-generation GC, the per-process
-// extension overlay, the schema/format version component of gensig, and the
-// legacy-flat → generation migration shim. This file is the foundational core:
-// read-only open, the immutable generation layout, build-then-swap, and the
-// legacy-flat read fallback.
+// COORDINATOR-SAFETY (implemented here + in readers.go): generation-aware reindex
+// (build a new generation, never wipe a live one — see NewIndex), the
+// liveness-checked reader registry (readers/), and old-generation GC
+// (GCGenerations, which never removes a generation a live reader holds).
+//
+// DEFERRED to later chunks (NOT implemented here): the build-leader election
+// (instancelock) + async-readiness wiring (advanced layer, after re-vendor), the
+// per-process extension overlay, the schema/format version component of gensig,
+// and the legacy-flat → generation migration shim.
 const (
 	generationsDirName = "g"
 	readySentinelName  = "READY"
@@ -176,14 +180,10 @@ func openReadOnlyFrom(dumpDir, genDir string) (*Index, error) {
 		done:          make(chan struct{}),
 	}
 
-	shardDirs := cacheShardDirs(genDir)
-	shards, err := openCachedShards(shardDirs, true, defaultBoltTimeout)
-	if err != nil {
+	if err := idx.attachReadOnlyShards(genDir); err != nil {
 		cancel()
-		return nil, fmt.Errorf("opening read-only generation shards: %w", err)
+		return nil, err
 	}
-	idx.shards = shards
-	idx.alias.Add(shards...)
 
 	go func() {
 		defer close(idx.done)
@@ -194,7 +194,7 @@ func openReadOnlyFrom(dumpDir, genDir string) (*Index, error) {
 		idx.pathIndex = NewPathIndex(idx.names)
 		idx.ready.Store(true)
 		slog.Info("Opened read-only index generation",
-			"shards", len(shards), "modules", len(idx.names), "gen", filepath.Base(genDir))
+			"shards", len(idx.shards), "modules", len(idx.names), "gen", filepath.Base(genDir))
 		if showProgress.Load() {
 			fmt.Fprintf(os.Stderr, "[%s] Индекс открыт только для чтения: %d модулей\n",
 				time.Now().Format("15:04:05"), len(idx.names))
@@ -202,6 +202,100 @@ func openReadOnlyFrom(dumpDir, genDir string) (*Index, error) {
 	}()
 
 	return idx, nil
+}
+
+// attachReadOnlyShards opens the shards under genDir READ-ONLY (bbolt LOCK_SH) and
+// attaches them to idx, marks idx read-only, and registers idx as a live holder of
+// the generation in its readers/ registry so concurrent old-generation GC never
+// reaps a generation this process is serving. The reader is registered BEFORE the
+// shards are opened, so a live reader becomes visible to GC as early as possible;
+// if the open fails the registration is rolled back. The caller is responsible for
+// loading names and flipping Ready().
+func (idx *Index) attachReadOnlyShards(genDir string) error {
+	// Register first so a live reader is visible to GC before any shard FD/mmap
+	// exists. Registration is best-effort: serving without it only risks a benign
+	// GC race (unix readers keep their open shards; Windows removal fails on held
+	// files), so a registration error is logged, not fatal.
+	if reg, err := registerReader(genDir); err != nil {
+		slog.Warn("dump: could not register reader; concurrent GC could reap this "+
+			"generation while it is served", "genDir", genDir, "error", err)
+	} else {
+		idx.readerReg = reg
+	}
+
+	shardDirs := cacheShardDirs(genDir)
+	shards, err := openCachedShards(shardDirs, true, defaultBoltTimeout)
+	if err != nil {
+		if idx.readerReg != nil {
+			idx.readerReg.Close()
+			idx.readerReg = nil
+		}
+		return fmt.Errorf("opening read-only generation shards: %w", err)
+	}
+	idx.readOnly = true
+	idx.shards = shards
+	idx.alias.Add(shards...)
+	return nil
+}
+
+// GCGenerations removes old immutable generations that are safe to delete: any
+// adopted (READY) generation that is NEITHER the current one (keepGensig) NOR held
+// by a live reader (consulted via each generation's readers/ registry). It never
+// removes:
+//   - the current generation (keepGensig),
+//   - a generation a live reader still holds,
+//   - an in-progress build (a .building-* temp dir),
+//   - a non-adopted directory (no READY sentinel) — left for a future cleanup.
+//
+// Removal is best-effort and per-generation: a permission error (a cross-user
+// generation on a shared cacheDir) is skipped, not fatal, so one undeletable
+// generation never blocks reclaiming the others. Returns the gensigs actually
+// removed.
+func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	gensDir := generationsDir(cpath)
+	entries, err := os.ReadDir(gensDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // no generations arena yet — nothing to GC
+		}
+		return nil, fmt.Errorf("reading generations dir: %w", err)
+	}
+
+	var removed []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, buildTmpPrefix) {
+			continue // in-progress (or crashed) build temp dir — never GC here
+		}
+		if name == keepGensig {
+			continue // current generation
+		}
+		genDir := generationDir(cpath, name)
+		if !generationReadyDir(genDir) {
+			continue // not an adopted generation
+		}
+		if generationHasLiveReader(genDir) {
+			continue // a live reader still holds it — MUST NOT remove
+		}
+		if err := os.RemoveAll(genDir); err != nil {
+			if os.IsPermission(err) {
+				slog.Debug("GC: skipping generation owned by another user", "gen", name, "error", err)
+			} else {
+				slog.Warn("GC: could not remove old generation", "gen", name, "error", err)
+			}
+			continue
+		}
+		removed = append(removed, name)
+		slog.Info("GC: removed old unheld generation", "gen", name)
+	}
+	return removed, nil
 }
 
 // loadNamesReadOnly populates names/pathByName/pathToDocID from the generation's
@@ -220,6 +314,12 @@ func (idx *Index) loadNamesReadOnly(genDir string) error {
 	}
 
 	idx.mu.Lock()
+	// pathToDocID is not pre-initialized on every Index-creation path (NewIndex's
+	// reindex path reuses its own idx, which leaves it nil); init it lazily, as
+	// loadBSLPaths does, so this shared helper is safe regardless of caller.
+	if idx.pathToDocID == nil {
+		idx.pathToDocID = make(map[string]string, len(manifest.Files))
+	}
 	for relPath, entry := range manifest.Files {
 		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
 		idx.names = append(idx.names, entry.DocID)

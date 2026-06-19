@@ -52,6 +52,27 @@ func cacheShardDirs(cacheDir string) []string {
 	return dirs
 }
 
+// removeFlatCacheContents removes the LEGACY flat cache artifacts directly under
+// cpath (shard_* dirs, manifest.json, serve.lock, the stderr/server logs, ...)
+// WITHOUT touching the immutable generations subtree (g/). It is the safe
+// replacement for os.RemoveAll(cpath) on the reindex fallback path: a flat rebuild
+// must never destroy a generation a concurrent read-only serve may hold. Best-effort.
+func removeFlatCacheContents(cpath string) {
+	if cpath == "" {
+		return
+	}
+	entries, err := os.ReadDir(cpath)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.Name() == generationsDirName {
+			continue // preserve immutable generations
+		}
+		_ = os.RemoveAll(filepath.Join(cpath, e.Name()))
+	}
+}
+
 // serveLockName is the lock file an Index writes into its cache directory while
 // the cache is open. Its presence tells an offline `--build-index` run that a
 // server (or another build) is using the cache, so a destructive rebuild does not

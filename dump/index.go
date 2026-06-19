@@ -110,7 +110,7 @@ func extractContext(lines []string, idx, window int) string {
 
 // synonymMapOnce ensures buildSynonymMap is called only once.
 var (
-	synonymMapOnce  sync.Once
+	synonymMapOnce   sync.Once
 	cachedSynonymMap map[string]string
 )
 
@@ -253,12 +253,13 @@ type Index struct {
 	alias         bleve.IndexAlias
 	shards        []bleve.Index
 	names         []string
-	contentByName map[string]string // cache: docID -> content (lazy populated)
-	pathByName    map[string]string // docID -> absolute file path (always populated)
-	pathToDocID   map[string]string // relative path (ToSlash) -> module name
-	pathIndex     *PathIndex        // decomposed path index for fast category/module filtering
-	lockDir       string            // cache dir whose serve-lock this index holds (empty = none); released in Close
-	readOnly      bool              // true when shards were opened read-only (immutable generation serve); runtime base writes are rejected
+	contentByName map[string]string   // cache: docID -> content (lazy populated)
+	pathByName    map[string]string   // docID -> absolute file path (always populated)
+	pathToDocID   map[string]string   // relative path (ToSlash) -> module name
+	pathIndex     *PathIndex          // decomposed path index for fast category/module filtering
+	lockDir       string              // cache dir whose serve-lock this index holds (empty = none); released in Close
+	readOnly      bool                // true when shards were opened read-only (immutable generation serve); runtime base writes are rejected
+	readerReg     *readerRegistration // live reader-registry handle for the served generation (nil = none); deregistered in Close
 	ready         atomic.Bool
 	mu            sync.RWMutex
 	contentMu     sync.RWMutex // protects lazy content loading
@@ -365,13 +366,21 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 	}
 
 	if useCache && reindex {
-		// Refuse to wipe a cache that a running server has memory-mapped: on
-		// Windows RemoveAll fails on mmap'd files, and proceeding past a partial
-		// delete would corrupt the rebuild. Surface it instead of ignoring it.
-		if err := os.RemoveAll(cpath); err != nil {
-			return nil, fmt.Errorf("clearing index cache for --reindex "+
-				"(is a server using this dump? stop it first): %w", err)
-		}
+		// Generation-aware reindex. The old behavior os.RemoveAll(cpath)'d the WHOLE
+		// per-dump cache dir — including g/ and any immutable generation a concurrent
+		// read-only serve holds (an unlink storm on unix, a hard failure on Windows
+		// mmap'd files, and corruption of the holder's view). Instead, build a fresh
+		// immutable generation (temp→READY→adopt) which by construction never touches
+		// a live generation's files, then serve it read-only. The heavy build runs in
+		// the background (Ready() flips when done) so `serve --reindex` start never
+		// blocks the MCP initialize handshake.
+		go func() {
+			defer close(idx.done)
+			if err := idx.reindexGeneration(dir, cacheDir); err != nil {
+				idx.setBuildErr(err)
+			}
+		}()
+		return idx, nil
 	}
 
 	// Try to open existing sharded cache.
@@ -429,6 +438,77 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 	}()
 
 	return idx, nil
+}
+
+// reindexGeneration performs a generation-aware reindex: it builds a fresh
+// immutable generation for the current dump signature and attaches it to idx
+// read-only. It NEVER wipes a generation a live reader holds — that is the core
+// safety property. Old generations are left on disk and reaped by the GC pass at
+// the end. Runs in NewIndex's background goroutine; the caller closes idx.done.
+func (idx *Index) reindexGeneration(dir, cacheDir string) error {
+	gensig, err := GenSig(dir)
+	if err != nil {
+		// Cannot compute a generation signature (e.g. the dump dir is unreadable).
+		// Fall back to a legacy flat rebuild that still preserves g/ — never wipe the
+		// generations subtree, which a concurrent reader may hold.
+		slog.Warn("reindex: could not compute generation signature; falling back to a "+
+			"flat rebuild (generations preserved)", "dir", dir, "error", err)
+		if cpath, cerr := cachePath(dir, cacheDir); cerr == nil {
+			removeFlatCacheContents(cpath)
+			idx.acquireCacheLock(cpath)
+			idx.buildShards(cpath, true)
+		} else {
+			idx.buildShards("", false) // no writable cache: in-memory build
+		}
+		return idx.BuildError()
+	}
+
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		return fmt.Errorf("reindex: no writable cache directory: %w", err)
+	}
+	genDir := generationDir(cpath, gensig)
+
+	// Force-rebuild semantics: BuildGeneration is content-addressed and no-ops on an
+	// already-READY gensig, so to honor --reindex (e.g. recovering a corrupt cache)
+	// drop the current generation first — but ONLY if no live reader holds it.
+	// Never wipe a generation a concurrent serve has memory-mapped.
+	if generationHasLiveReader(genDir) {
+		slog.Warn("reindex: a live reader holds the current generation; serving the "+
+			"existing generation WITHOUT an in-place rebuild (stop other servers on this "+
+			"dump to force a full rebuild)", "gen", gensig)
+	} else if err := os.RemoveAll(genDir); err != nil {
+		slog.Warn("reindex: could not drop the current generation before rebuild; "+
+			"BuildGeneration will reuse it if still adoptable", "gen", gensig, "error", err)
+	}
+
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		return fmt.Errorf("reindex: building generation: %w", err)
+	}
+
+	if err := idx.attachReadOnlyShards(genDir); err != nil {
+		return err
+	}
+	if err := idx.loadNamesReadOnly(genDir); err != nil {
+		return err
+	}
+	idx.pathIndex = NewPathIndex(idx.names)
+	idx.ready.Store(true)
+
+	// Now that a fresh generation is current, reap old, unheld generations.
+	if dropped, gcErr := GCGenerations(dir, cacheDir, gensig); gcErr != nil {
+		slog.Warn("reindex: GC of old generations failed", "error", gcErr)
+	} else if len(dropped) > 0 {
+		slog.Info("reindex: GC removed old generations", "count", len(dropped))
+	}
+
+	slog.Info("Reindex built and adopted a fresh generation",
+		"gen", gensig, "modules", len(idx.names))
+	if showProgress.Load() {
+		fmt.Fprintf(os.Stderr, "[%s] Переиндексация завершена: %d модулей (поколение %s)\n",
+			time.Now().Format("15:04:05"), len(idx.names), gensig)
+	}
+	return nil
 }
 
 // acquireCacheLock marks cpath as in use by this process for the lifetime of the
@@ -1707,6 +1787,11 @@ func (idx *Index) saveManifest(cacheDir string) {
 func (idx *Index) Close() error {
 	idx.cancel()
 	<-idx.done
+	if idx.readerReg != nil {
+		// Deregister from the generation's readers/ registry so GC can reclaim the
+		// generation once no live reader holds it.
+		idx.readerReg.Close()
+	}
 	if idx.lockDir != "" {
 		removeCacheLock(idx.lockDir)
 	}
