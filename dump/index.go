@@ -258,6 +258,7 @@ type Index struct {
 	pathToDocID   map[string]string // relative path (ToSlash) -> module name
 	pathIndex     *PathIndex        // decomposed path index for fast category/module filtering
 	lockDir       string            // cache dir whose serve-lock this index holds (empty = none); released in Close
+	readOnly      bool              // true when shards were opened read-only (immutable generation serve); runtime base writes are rejected
 	ready         atomic.Bool
 	mu            sync.RWMutex
 	contentMu     sync.RWMutex // protects lazy content loading
@@ -376,7 +377,11 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 	// Try to open existing sharded cache.
 	if useCache && !reindex {
 		if shardDirs := cacheShardDirs(cpath); len(shardDirs) > 0 {
-			shards, err := openCachedShards(shardDirs)
+			// Legacy flat layout stays read-WRITE: this path runs the incremental
+			// warm-start diff (loadFromManifestAndDiff) which mutates the base
+			// shards on drift. Concurrent same-dump serve uses the read-only
+			// immutable-generation path (OpenGenerationReadOnly) instead.
+			shards, err := openCachedShards(shardDirs, false, "")
 			if err == nil {
 				idx.shards = shards
 				idx.alias.Add(shards...)
@@ -679,10 +684,34 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 
 // openCachedShards opens pre-built Bleve shard indexes from disk.
 // On any error, all previously opened shards are closed.
-func openCachedShards(dirs []string) ([]bleve.Index, error) {
+//
+// When readOnly is true the shards are opened with scorch's read_only mode
+// (bleve.OpenUsing(..., {"read_only": true})), which takes a bbolt LOCK_SH on
+// each shard's root.bolt instead of the default exclusive LOCK_EX. That lets N
+// processes open the SAME generation concurrently — the core of concurrent
+// same-dump serve. boltTimeout bounds how long a conflicting open waits for the
+// flock before failing; it MUST be a Go duration STRING (e.g. "5s"): scorch
+// reads bolt_timeout via config["bolt_timeout"].(string)+time.ParseDuration, so
+// a wrong type (int / time.Duration) is silently dropped and the open reverts to
+// the wait-forever default (Timeout=0) — the original infinite hang. An empty
+// boltTimeout leaves scorch's default (wait indefinitely); pass a non-empty
+// value whenever a conflicting holder is possible.
+func openCachedShards(dirs []string, readOnly bool, boltTimeout string) ([]bleve.Index, error) {
 	shards := make([]bleve.Index, len(dirs))
 	for i, dir := range dirs {
-		blevIdx, err := bleve.Open(dir)
+		var (
+			blevIdx bleve.Index
+			err     error
+		)
+		if readOnly {
+			cfg := map[string]any{"read_only": true}
+			if boltTimeout != "" {
+				cfg["bolt_timeout"] = boltTimeout // MUST be a duration STRING — see doc above
+			}
+			blevIdx, err = bleve.OpenUsing(dir, cfg)
+		} else {
+			blevIdx, err = bleve.Open(dir)
+		}
 		if err != nil {
 			for j := range i {
 				shards[j].Close()
@@ -965,6 +994,9 @@ func (idx *Index) IndexDoc(id string, content string) error {
 	if !idx.ready.Load() {
 		return fmt.Errorf("index not ready: cannot IndexDoc while building")
 	}
+	if idx.readOnly {
+		return fmt.Errorf("index opened read-only: cannot IndexDoc (extension overlay not yet available)")
+	}
 	if len(idx.shards) == 0 {
 		return fmt.Errorf("index has no shards")
 	}
@@ -1012,6 +1044,13 @@ func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 	if !idx.ready.Load() {
 		return fmt.Errorf("index not ready: cannot IndexDocWithMeta while building")
 	}
+	if idx.readOnly {
+		// Base shards are immutable (read-only generation serve). Runtime
+		// ingest (e.g. live extensions) belongs in a per-process in-memory
+		// overlay; that overlay is a later chunk. Reject rather than write to a
+		// read-only shard.
+		return fmt.Errorf("index opened read-only: cannot IndexDocWithMeta (extension overlay not yet available)")
+	}
 	if len(idx.shards) == 0 {
 		return fmt.Errorf("index has no shards")
 	}
@@ -1058,6 +1097,9 @@ func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 func (idx *Index) DeleteDoc(id string) error {
 	if !idx.ready.Load() {
 		return fmt.Errorf("index not ready: cannot DeleteDoc while building")
+	}
+	if idx.readOnly {
+		return fmt.Errorf("index opened read-only: cannot DeleteDoc (extension overlay not yet available)")
 	}
 	if len(idx.shards) == 0 {
 		return fmt.Errorf("index has no shards")
