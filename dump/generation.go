@@ -616,6 +616,27 @@ func migrateFlatToGeneration(dir, cacheDir string) (string, bool, error) {
 	return gensig, generationReadyDir(genDir), nil
 }
 
+// AdoptFlatGeneration is the exported entry point for the serve build-leader's
+// flat→generation adoption shim. It attempts to migrate an existing LEGACY flat
+// cache to the immutable generation layout via the cheap O(shards) adopt-by-rename
+// (which also RECLAIMS the flat cache, since the shards are MOVED, not copied),
+// falling back to a one-time build ONLY when adoption is unsafe — and NEVER to a
+// flat NewIndex rebuild. It returns the current gensig, whether a READY generation
+// for it now exists (true after an adopt or a one-time build), and any error.
+//
+// When there is no flat cache to migrate it is a no-op (migrated=false, err=nil):
+// the caller is serving a genuinely cache-less dump and must build a fresh
+// generation itself. Distinct from OpenForServe, this never builds a flat cache on
+// a cache miss, so a build-leader can branch on "adopted vs needs-cold-build"
+// WITHOUT regressing a fresh dump to the single-writer flat path.
+//
+// The flat-shard move is guarded by the read-cache lock (serve.lock): a flat cache
+// another live process still serves is reported non-adoptable, so that process's
+// memory-mapped shards are never moved out from under it.
+func AdoptFlatGeneration(dir, cacheDir string) (gensig string, migrated bool, err error) {
+	return migrateFlatToGeneration(dir, cacheDir)
+}
+
 // flatCacheAdoptable reports whether the legacy flat cache under cpath can be
 // SAFELY adopted as the generation for the current dump — i.e. moved into
 // g/<gensig>/ and trusted to match that signature by construction — and, if not, a
