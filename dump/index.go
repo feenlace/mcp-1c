@@ -252,6 +252,7 @@ type Index struct {
 	dir           string
 	alias         bleve.IndexAlias
 	shards        []bleve.Index
+	overlay       bleve.Index // per-process in-memory bleve overlay for runtime extension ingest when base is read-only; merged into alias for smart search; nil in RW mode (writes go to shards as before)
 	names         []string
 	contentByName map[string]string   // cache: docID -> content (lazy populated)
 	pathByName    map[string]string   // docID -> absolute file path (always populated)
@@ -1116,6 +1117,30 @@ func (idx *Index) IndexDoc(id string, content string) error {
 	return nil
 }
 
+// ensureOverlay lazily creates the per-process in-memory bleve overlay used for
+// runtime extension ingest when the base shards are read-only (immutable
+// generation serve). The overlay is added to the search alias so smart search
+// merges base (read-only, shared) + overlay (in-memory, per-process). Created at
+// most once per Index (guarded by idx.mu); closed in Close.
+func (idx *Index) ensureOverlay() (bleve.Index, error) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.overlay != nil {
+		return idx.overlay, nil
+	}
+	ov, err := bleve.NewUsing("", buildBSLMapping(), "scorch", "scorch", map[string]any{
+		"unsafe_batch": true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating extension overlay: %w", err)
+	}
+	if idx.alias != nil {
+		idx.alias.Add(ov)
+	}
+	idx.overlay = ov
+	return ov, nil
+}
+
 // IndexDocWithMeta adds or replaces a document in the index with explicit metadata.
 // Unlike IndexDoc, it does NOT call parseModuleName — category and module are set directly.
 // The document is routed to a shard by FNV-1a hash of the id.
@@ -1123,16 +1148,6 @@ func (idx *Index) IndexDoc(id string, content string) error {
 func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 	if !idx.ready.Load() {
 		return fmt.Errorf("index not ready: cannot IndexDocWithMeta while building")
-	}
-	if idx.readOnly {
-		// Base shards are immutable (read-only generation serve). Runtime
-		// ingest (e.g. live extensions) belongs in a per-process in-memory
-		// overlay; that overlay is a later chunk. Reject rather than write to a
-		// read-only shard.
-		return fmt.Errorf("index opened read-only: cannot IndexDocWithMeta (extension overlay not yet available)")
-	}
-	if len(idx.shards) == 0 {
-		return fmt.Errorf("index has no shards")
 	}
 
 	doc := bslDocument{
@@ -1142,9 +1157,25 @@ func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 		Content:  content,
 	}
 
-	si := shardForID(id, len(idx.shards))
-	if err := idx.shards[si].Index(id, doc); err != nil {
-		return fmt.Errorf("indexing doc %q in shard %d: %w", id, si, err)
+	if idx.readOnly {
+		// Base shards are immutable (read-only generation serve). Live
+		// extensions are per-process, so they go to an in-memory overlay that
+		// is merged into the search alias; the immutable base is never written.
+		ov, err := idx.ensureOverlay()
+		if err != nil {
+			return err
+		}
+		if err := ov.Index(id, doc); err != nil {
+			return fmt.Errorf("indexing doc %q in overlay: %w", id, err)
+		}
+	} else {
+		if len(idx.shards) == 0 {
+			return fmt.Errorf("index has no shards")
+		}
+		si := shardForID(id, len(idx.shards))
+		if err := idx.shards[si].Index(id, doc); err != nil {
+			return fmt.Errorf("indexing doc %q in shard %d: %w", id, si, err)
+		}
 	}
 
 	// Check existence under both locks to decide whether this is a new doc.
@@ -1178,16 +1209,28 @@ func (idx *Index) DeleteDoc(id string) error {
 	if !idx.ready.Load() {
 		return fmt.Errorf("index not ready: cannot DeleteDoc while building")
 	}
-	if idx.readOnly {
-		return fmt.Errorf("index opened read-only: cannot DeleteDoc (extension overlay not yet available)")
-	}
-	if len(idx.shards) == 0 {
-		return fmt.Errorf("index has no shards")
-	}
 
-	si := shardForID(id, len(idx.shards))
-	if err := idx.shards[si].Delete(id); err != nil {
-		return fmt.Errorf("deleting doc %q from shard %d: %w", id, si, err)
+	if idx.readOnly {
+		// Extension docs live only in the in-memory overlay (base is immutable,
+		// and DeleteDoc is only ever called with ext.-prefixed IDs). Remove from
+		// the overlay if one exists; if nothing was ever ingested there is
+		// nothing to delete.
+		idx.mu.RLock()
+		ov := idx.overlay
+		idx.mu.RUnlock()
+		if ov != nil {
+			if err := ov.Delete(id); err != nil {
+				return fmt.Errorf("deleting doc %q from overlay: %w", id, err)
+			}
+		}
+	} else {
+		if len(idx.shards) == 0 {
+			return fmt.Errorf("index has no shards")
+		}
+		si := shardForID(id, len(idx.shards))
+		if err := idx.shards[si].Delete(id); err != nil {
+			return fmt.Errorf("deleting doc %q from shard %d: %w", id, si, err)
+		}
 	}
 
 	idx.contentMu.Lock()
@@ -1800,6 +1843,12 @@ func (idx *Index) Close() error {
 		if err := shard.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if idx.overlay != nil {
+		if err := idx.overlay.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		idx.overlay = nil
 	}
 	return firstErr
 }
