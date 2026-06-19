@@ -2,6 +2,7 @@ package dump
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -402,5 +403,405 @@ func TestBuildGeneration_IdempotentWhenReady(t *testing.T) {
 		if len(e.Name()) >= len(buildTmpPrefix) && e.Name()[:len(buildTmpPrefix)] == buildTmpPrefix {
 			t.Fatalf("leftover build temp dir: %s", e.Name())
 		}
+	}
+}
+
+// snapshotShardTree records "mtimeNano:size" per file under each shard dir, keyed
+// by "<shardBase>/<relpath>". A directory MOVE (adoption) preserves every inner
+// file's mtime and size exactly; a REBUILD writes fresh files with new mtimes, so
+// an unequal snapshot before/after proves shards were rebuilt rather than adopted.
+func snapshotShardTree(t *testing.T, shardDirs []string) map[string]string {
+	t.Helper()
+	snap := map[string]string{}
+	for _, sd := range shardDirs {
+		base := filepath.Base(sd)
+		err := filepath.WalkDir(sd, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			rel, rerr := filepath.Rel(sd, path)
+			if rerr != nil {
+				return rerr
+			}
+			info, ierr := d.Info()
+			if ierr != nil {
+				return ierr
+			}
+			snap[base+"/"+filepath.ToSlash(rel)] = fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size())
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("snapshotShardTree %s: %v", sd, err)
+		}
+	}
+	return snap
+}
+
+// sameSnapshot reports whether two shard-tree snapshots are identical.
+func sameSnapshot(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// TestGenSig_SchemaZapBumpChangesSignatureAndIsolatesGenerations is the schema-key
+// regression guard (design #2/#6): folding the schema and zap-format versions into
+// the gensig means a bump of either yields a DIFFERENT signature, and a reader
+// computing the bumped signature never finds — and OpenGenerationReadOnly never
+// adopts — a generation built under the previous schema. It also confirms
+// GenSig == genSig with the current versions, so the production path and the test
+// seam agree.
+func TestGenSig_SchemaZapBumpChangesSignatureAndIsolatesGenerations(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Схема/Ext/ObjectModule.bsl",
+		"Процедура С()\n\t// маркерСхема\nКонецПроцедуры\n")
+
+	g1, err := genSig(dir, dumpIndexSchemaVersion, zapSegmentVersion)
+	if err != nil {
+		t.Fatalf("genSig (current versions): %v", err)
+	}
+	if got := mustGenSig(t, dir); got != g1 {
+		t.Fatalf("GenSig (%q) != genSig with current versions (%q)", got, g1)
+	}
+
+	gSchema, err := genSig(dir, dumpIndexSchemaVersion+1, zapSegmentVersion)
+	if err != nil {
+		t.Fatalf("genSig (schema+1): %v", err)
+	}
+	if gSchema == g1 {
+		t.Fatal("schema-version bump did not change the gensig")
+	}
+
+	gZap, err := genSig(dir, dumpIndexSchemaVersion, zapSegmentVersion+1)
+	if err != nil {
+		t.Fatalf("genSig (zap+1): %v", err)
+	}
+	if gZap == g1 {
+		t.Fatal("zap-version bump did not change the gensig")
+	}
+	if gZap == gSchema {
+		t.Fatal("schema and zap bumps collided to the same gensig")
+	}
+
+	// Build a generation for the CURRENT-schema signature.
+	if err := BuildGeneration(dir, cacheDir, g1); err != nil {
+		t.Fatalf("BuildGeneration g1: %v", err)
+	}
+	if !GenerationReady(dir, cacheDir, g1) {
+		t.Fatal("current-schema generation not READY after build")
+	}
+
+	// A binary running a bumped schema computes gSchema and MUST NOT see or adopt
+	// the g1 generation built under the previous schema.
+	if GenerationReady(dir, cacheDir, gSchema) {
+		t.Fatal("a generation built under the current schema was visible under a bumped-schema signature")
+	}
+	if _, err := OpenGenerationReadOnly(dir, cacheDir, gSchema); err == nil {
+		t.Fatal("OpenGenerationReadOnly adopted a generation under a mismatched-schema signature")
+	}
+	// The current-schema generation remains adoptable.
+	if !GenerationReady(dir, cacheDir, g1) {
+		t.Fatal("current-schema generation vanished")
+	}
+}
+
+// TestMigrateFlatToGeneration_AdoptsExistingShardsWithoutRebuild verifies the
+// migration shim adopts an existing flat cache by MOVING its shards into the
+// generation layout — no rebuild storm. The flat shards must be gone from the
+// cache root afterwards and the generation must hold the byte-for-byte identical
+// shard tree (proving a rename, not a re-index), and it must serve read-only.
+func TestMigrateFlatToGeneration_AdoptsExistingShardsWithoutRebuild(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Миграция/Ext/ObjectModule.bsl",
+		"Процедура Мигр()\n\t// маркерМиграция\nКонецПроцедуры\n")
+	mkBSLFile(t, dir, "Documents/Перенос/Ext/ObjectModule.bsl",
+		"Процедура Пер()\nКонецПроцедуры\n")
+
+	// Build a LEGACY flat cache (shard_* directly under the per-dump cache dir).
+	if err := BuildCache(dir, cacheDir, false); err != nil {
+		t.Fatalf("BuildCache (flat): %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	flatShards := cacheShardDirs(cpath)
+	if len(flatShards) == 0 {
+		t.Fatal("expected a flat shard layout after BuildCache")
+	}
+	gensig := mustGenSig(t, dir)
+	if generationReadyDir(generationDir(cpath, gensig)) {
+		t.Fatal("a generation already existed before migration")
+	}
+	before := snapshotShardTree(t, flatShards)
+
+	g, migrated, err := migrateFlatToGeneration(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("migrateFlatToGeneration: %v", err)
+	}
+	if !migrated {
+		t.Fatal("migration reported migrated=false for an adoptable flat cache")
+	}
+	if g != gensig {
+		t.Fatalf("migration gensig = %q, want %q", g, gensig)
+	}
+
+	// MOVED, not rebuilt: nothing remains under the cache root, and the generation
+	// holds the identical shard tree.
+	if remaining := cacheShardDirs(cpath); len(remaining) != 0 {
+		t.Fatalf("flat shards still present after adoption (not moved): %v", remaining)
+	}
+	genDir := generationDir(cpath, gensig)
+	if !generationReadyDir(genDir) {
+		t.Fatal("generation not READY after adoption")
+	}
+	genShards := cacheShardDirs(genDir)
+	if len(genShards) != len(flatShards) {
+		t.Fatalf("generation has %d shards, flat had %d", len(genShards), len(flatShards))
+	}
+	if after := snapshotShardTree(t, genShards); !sameSnapshot(before, after) {
+		t.Fatal("shard tree changed during migration — shards were rebuilt, not adopted")
+	}
+
+	// The adopted generation opens read-only and answers queries.
+	idx, err := OpenGenerationReadOnly(dir, cacheDir, gensig)
+	if err != nil {
+		t.Fatalf("OpenGenerationReadOnly after adoption: %v", err)
+	}
+	defer idx.Close()
+	<-idx.Done()
+	if err := idx.BuildError(); err != nil {
+		t.Fatalf("adopted generation build error: %v", err)
+	}
+	if !idx.readOnly {
+		t.Fatal("adopted generation not opened read-only")
+	}
+	m, total, err := idx.Search(SearchParams{Query: "маркерМиграция", Mode: SearchModeSmart, Limit: 10})
+	if err != nil || total == 0 || len(m) == 0 {
+		t.Fatalf("adopted generation search failed: total=%d err=%v", total, err)
+	}
+}
+
+// TestMigrateFlatToGeneration_AdoptsUnstampedLegacyManifest covers the real-world
+// upgrade path: a flat cache built by a binary from BEFORE schema/zap stamping
+// existed has a manifest with neither field (they unmarshal to 0). The baseline
+// accessors map a 0 to the only schema/format that shipped pre-stamping, so such a
+// cache is still adopted (not needlessly rebuilt) when the current binary is on
+// that same baseline.
+func TestMigrateFlatToGeneration_AdoptsUnstampedLegacyManifest(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Легаси/Ext/ObjectModule.bsl",
+		"Процедура Лег()\n\t// маркерЛегаси\nКонецПроцедуры\n")
+
+	if err := BuildCache(dir, cacheDir, false); err != nil {
+		t.Fatalf("BuildCache (flat): %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+
+	// Rewrite the manifest WITHOUT schema/zap stamps (omitempty drops the zero
+	// fields), reproducing a pre-stamping legacy manifest on disk.
+	m, err := LoadManifest(cpath)
+	if err != nil || m == nil {
+		t.Fatalf("LoadManifest: m=%v err=%v", m, err)
+	}
+	m.SchemaVersion = 0
+	m.ZapVersion = 0
+	if err := m.Save(cpath); err != nil {
+		t.Fatalf("re-save unstamped manifest: %v", err)
+	}
+	// Confirm the on-disk manifest is genuinely unstamped, then trusts the baseline.
+	reloaded, err := LoadManifest(cpath)
+	if err != nil || reloaded == nil {
+		t.Fatalf("reload manifest: m=%v err=%v", reloaded, err)
+	}
+	if reloaded.SchemaVersion != 0 || reloaded.ZapVersion != 0 {
+		t.Fatalf("expected an unstamped manifest, got schema=%d zap=%d", reloaded.SchemaVersion, reloaded.ZapVersion)
+	}
+	if reloaded.schemaVersion() != baselineSchemaVersion || reloaded.zapVersion() != baselineZapVersion {
+		t.Fatalf("baseline accessors wrong: schema=%d zap=%d", reloaded.schemaVersion(), reloaded.zapVersion())
+	}
+
+	flatShards := cacheShardDirs(cpath)
+	before := snapshotShardTree(t, flatShards)
+
+	g, migrated, err := migrateFlatToGeneration(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("migrateFlatToGeneration: %v", err)
+	}
+	if !migrated {
+		t.Fatal("an unstamped baseline flat cache should be adopted, not skipped")
+	}
+	// Adopted (moved), not rebuilt.
+	if remaining := cacheShardDirs(cpath); len(remaining) != 0 {
+		t.Fatalf("flat shards not moved on unstamped-legacy adoption: %v", remaining)
+	}
+	genShards := cacheShardDirs(generationDir(cpath, g))
+	if after := snapshotShardTree(t, genShards); !sameSnapshot(before, after) {
+		t.Fatal("unstamped-legacy adoption rebuilt the shards instead of moving them")
+	}
+}
+
+// TestMigrateFlatToGeneration_SchemaMismatchRebuildsInsteadOfAdopting verifies the
+// adoption safety gate: a flat cache whose manifest records a different index
+// schema than the running binary is NOT adopted (adopting would serve
+// incompatibly-formatted shards under a current-schema signature). Instead the
+// shim builds a fresh generation once, leaving the flat shards untouched in place.
+func TestMigrateFlatToGeneration_SchemaMismatchRebuildsInsteadOfAdopting(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Несовм/Ext/ObjectModule.bsl",
+		"Процедура Н()\n\t// маркерНесовм\nКонецПроцедуры\n")
+
+	if err := BuildCache(dir, cacheDir, false); err != nil {
+		t.Fatalf("BuildCache (flat): %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+
+	// Tamper the flat manifest so its schema version no longer matches the binary,
+	// simulating a flat cache built by a binary with an older/newer index schema.
+	m, err := LoadManifest(cpath)
+	if err != nil || m == nil {
+		t.Fatalf("LoadManifest: m=%v err=%v", m, err)
+	}
+	m.SchemaVersion = dumpIndexSchemaVersion + 999
+	if err := m.Save(cpath); err != nil {
+		t.Fatalf("re-save tampered manifest: %v", err)
+	}
+
+	flatBefore := cacheShardDirs(cpath)
+	if len(flatBefore) == 0 {
+		t.Fatal("expected flat shards before migration")
+	}
+
+	g, migrated, err := migrateFlatToGeneration(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("migrateFlatToGeneration: %v", err)
+	}
+	if !migrated {
+		t.Fatal("migration should still produce a generation via the build fallback")
+	}
+
+	// Build fallback (NOT adoption): the flat shards stay in place and a fresh
+	// generation exists alongside them.
+	if remaining := cacheShardDirs(cpath); len(remaining) != len(flatBefore) {
+		t.Fatalf("flat shards were moved on a schema mismatch (should rebuild, not adopt): had %d, now %d",
+			len(flatBefore), len(remaining))
+	}
+	if !generationReadyDir(generationDir(cpath, g)) {
+		t.Fatal("no READY generation after build fallback")
+	}
+
+	idx, err := OpenGenerationReadOnly(dir, cacheDir, g)
+	if err != nil {
+		t.Fatalf("open rebuilt generation: %v", err)
+	}
+	defer idx.Close()
+	<-idx.Done()
+	mtc, total, err := idx.Search(SearchParams{Query: "маркерНесовм", Mode: SearchModeSmart, Limit: 10})
+	if err != nil || total == 0 || len(mtc) == 0 {
+		t.Fatalf("rebuilt generation search failed: total=%d err=%v", total, err)
+	}
+}
+
+// TestMigrateFlatToGeneration_FlatStillOpensWhenBypassed is the backward-compat
+// guard: when the migration shim is bypassed (the legacy NewIndex path is used
+// directly), an existing flat cache must still open read-WRITE and serve, and no
+// generation is created as a side effect.
+func TestMigrateFlatToGeneration_FlatStillOpensWhenBypassed(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Совмест/Ext/ObjectModule.bsl",
+		"Процедура Сов()\n\t// маркерСовмест\nКонецПроцедуры\n")
+
+	if err := BuildCache(dir, cacheDir, false); err != nil {
+		t.Fatalf("BuildCache (flat): %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	if len(cacheShardDirs(cpath)) == 0 {
+		t.Fatal("expected a flat cache")
+	}
+
+	// Bypass migration: NewIndex must still open the flat cache read-WRITE.
+	idx, err := NewIndex(dir, cacheDir, false)
+	if err != nil {
+		t.Fatalf("NewIndex (flat reopen): %v", err)
+	}
+	defer idx.Close()
+	waitReady(t, idx, 30*time.Second)
+	if idx.readOnly {
+		t.Fatal("legacy flat NewIndex unexpectedly opened read-only")
+	}
+	m, total, err := idx.Search(SearchParams{Query: "маркерСовмест", Mode: SearchModeSmart, Limit: 10})
+	if err != nil || total == 0 || len(m) == 0 {
+		t.Fatalf("flat cache search failed: total=%d err=%v", total, err)
+	}
+	if generationReadyDir(generationDir(cpath, mustGenSig(t, dir))) {
+		t.Fatal("a generation was created by the bypassed (flat) path")
+	}
+}
+
+// TestOpenForServe_MigratesAndServesFlatCacheReadOnly is the end-to-end wiring
+// check: OpenForServe on a dump that has only a legacy flat cache migrates it
+// (adoption) and serves the resulting generation READ-ONLY, with the flat shards
+// moved into the generation.
+func TestOpenForServe_MigratesAndServesFlatCacheReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Серв/Ext/ObjectModule.bsl",
+		"Процедура Серв()\n\t// маркерСервМигр\nКонецПроцедуры\n")
+
+	if err := BuildCache(dir, cacheDir, false); err != nil {
+		t.Fatalf("BuildCache (flat): %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	if len(cacheShardDirs(cpath)) == 0 {
+		t.Fatal("expected a flat cache before serve")
+	}
+
+	idx, err := OpenForServe(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("OpenForServe: %v", err)
+	}
+	defer idx.Close()
+	<-idx.Done()
+	if err := idx.BuildError(); err != nil {
+		t.Fatalf("serve build error: %v", err)
+	}
+	if !idx.readOnly {
+		t.Fatal("OpenForServe did not migrate the flat cache to a read-only generation")
+	}
+	if remaining := cacheShardDirs(cpath); len(remaining) != 0 {
+		t.Fatalf("flat shards remain after OpenForServe migration: %v", remaining)
+	}
+	if !generationReadyDir(generationDir(cpath, mustGenSig(t, dir))) {
+		t.Fatal("no READY generation after OpenForServe migration")
+	}
+	m, total, err := idx.Search(SearchParams{Query: "маркерСервМигр", Mode: SearchModeSmart, Limit: 10})
+	if err != nil || total == 0 || len(m) == 0 {
+		t.Fatalf("served generation search failed: total=%d err=%v", total, err)
 	}
 }

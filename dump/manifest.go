@@ -20,9 +20,36 @@ type FileEntry struct {
 }
 
 // Manifest tracks mtime+size per BSL file to detect changes for incremental indexing.
+//
+// SchemaVersion/ZapVersion stamp the index schema and on-disk zap format the cache
+// was built with (see the BUMP PROTOCOL in generation.go). They let the
+// legacy-flat → generation migration verify the existing flat shards are
+// format-compatible with the current binary before adopting them. A manifest
+// written before stamping carries neither field (both unmarshal to 0); the
+// schemaVersion()/zapVersion() accessors map a 0 to the frozen baseline.
 type Manifest struct {
-	Version int                  `json:"v"`
-	Files   map[string]FileEntry `json:"f"` // key = relative path (forward-slash normalized)
+	Version       int                  `json:"v"`
+	SchemaVersion int                  `json:"sv,omitempty"`
+	ZapVersion    int                  `json:"zv,omitempty"`
+	Files         map[string]FileEntry `json:"f"` // key = relative path (forward-slash normalized)
+}
+
+// schemaVersion returns the index schema version the manifest was built with,
+// mapping an unstamped (0) legacy manifest to the frozen baseline.
+func (m *Manifest) schemaVersion() int {
+	if m.SchemaVersion == 0 {
+		return baselineSchemaVersion
+	}
+	return m.SchemaVersion
+}
+
+// zapVersion returns the on-disk zap segment version the manifest was built with,
+// mapping an unstamped (0) legacy manifest to the frozen baseline.
+func (m *Manifest) zapVersion() int {
+	if m.ZapVersion == 0 {
+		return baselineZapVersion
+	}
+	return m.ZapVersion
 }
 
 // DiffResult describes what changed between the manifest and the current filesystem.
@@ -148,8 +175,10 @@ func (m *Manifest) Diff(dumpDir string) (*DiffResult, error) {
 // pathToDocID maps relative paths (forward-slash) to their document IDs (module names).
 func buildManifest(dumpDir string, pathToDocID map[string]string) (*Manifest, error) {
 	m := &Manifest{
-		Version: manifestVersion,
-		Files:   make(map[string]FileEntry, len(pathToDocID)),
+		Version:       manifestVersion,
+		SchemaVersion: dumpIndexSchemaVersion,
+		ZapVersion:    zapSegmentVersion,
+		Files:         make(map[string]FileEntry, len(pathToDocID)),
 	}
 
 	for relPath, docID := range pathToDocID {

@@ -43,9 +43,9 @@ import (
 // (GCGenerations, which never removes a generation a live reader holds).
 //
 // DEFERRED to later chunks (NOT implemented here): the build-leader election
-// (instancelock) + async-readiness wiring (advanced layer, after re-vendor), the
-// per-process extension overlay, the schema/format version component of gensig,
-// and the legacy-flat → generation migration shim.
+// (instancelock) + async-readiness wiring (advanced layer, after re-vendor) and
+// the per-process extension overlay. The schema/format version component of
+// gensig and the legacy-flat → generation migration shim are implemented here.
 const (
 	generationsDirName = "g"
 	readySentinelName  = "READY"
@@ -54,12 +54,65 @@ const (
 	// defaultBoltTimeout bounds how long a read-only open waits for a conflicting
 	// flock before failing. MUST be a Go duration STRING (see openCachedShards).
 	defaultBoltTimeout = "5s"
+)
 
-	// genSigVersion versions the gensig DERIVATION (not the index format). Bump it
-	// only if the way GenSig hashes the dump changes. The index schema/format
-	// version is deliberately NOT folded in yet (deferred); when added it becomes
-	// another component below, naturally yielding a fresh generation on a bump.
+// Index version components folded into GenSig.
+//
+// GenSig hashes THREE independent version integers alongside the dump content, so
+// a bump of ANY of them yields a different gensig → a different generation
+// directory (g/<gensig>/). A reader computes the gensig with the CURRENT versions
+// and therefore only ever finds/adopts a generation built with the SAME versions:
+// it NEVER opens a generation produced by an incompatible derivation, schema, or
+// on-disk format. This is the reader schema-drift protection (design #2/#6).
+//
+// BUMP PROTOCOL — bump the matching const (and ONLY that const) when:
+//
+//   - genSigVersion: the gensig DERIVATION changes — i.e. HOW GenSig walks/hashes
+//     the dump (today: sorted relpath+mtime+size of every .bsl). Bump if that
+//     algorithm changes so old and new signatures can never spuriously collide.
+//
+//   - dumpIndexSchemaVersion: the LOGICAL index schema changes — the BSL field
+//     mapping/analyzers (buildBSLMapping), the indexed document shape
+//     (bslDocument), or the shard-assignment hash (shardForID/splitByHash) — any
+//     change after which a generation built by an OLDER binary would yield wrong
+//     or degraded results if SERVED by a NEWER one. Bumping it forces every reader
+//     onto a freshly-built generation rather than silently mis-reading old shards.
+//
+//   - zapSegmentVersion: the on-disk scorch "zap" segment format version handed to
+//     bleve.NewBuilder (forceSegmentVersion). Bump ONLY when intentionally moving
+//     to a new zap format that the pinned bleve version supports. Bumping it makes
+//     a new binary skip (and rebuild) generations written in the old binary
+//     format instead of failing at open time.
+//
+// Each bump is one-way and additive: it changes the gensig, the new generation is
+// built on demand, and the now-orphaned old-version generations are reaped by the
+// normal old-generation GC (GCGenerations) once no live reader holds them.
+const (
+	// genSigVersion versions the gensig derivation. See BUMP PROTOCOL above.
 	genSigVersion = 1
+
+	// dumpIndexSchemaVersion versions the logical index schema. See BUMP PROTOCOL.
+	dumpIndexSchemaVersion = 1
+
+	// zapSegmentVersion is the scorch zap segment format version used by every
+	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and
+	// folded into the gensig. See BUMP PROTOCOL above.
+	zapSegmentVersion = 16
+)
+
+// baselineSchemaVersion / baselineZapVersion are the schema and zap versions that
+// shipped BEFORE the manifest stamped them (Manifest.SchemaVersion/ZapVersion were
+// added together with this versioning). A legacy manifest written by an older
+// binary carries neither field (they unmarshal to 0); such a manifest is, by
+// construction, the only schema/format that ever existed pre-stamping — exactly
+// these baseline values — so flat-cache adoption treats a 0 as the baseline.
+//
+// FROZEN: these record history. NEVER change them when bumping
+// dumpIndexSchemaVersion / zapSegmentVersion — that would mis-classify genuinely
+// old flat caches as current and adopt incompatible shards.
+const (
+	baselineSchemaVersion = 1
+	baselineZapVersion    = 16
 )
 
 // generationsDir returns <cpath>/g.
@@ -84,17 +137,27 @@ func generationReadyDir(genDir string) bool {
 	return err == nil && !st.IsDir()
 }
 
-// GenSig computes the content signature of a dump directory: a short hex hash
-// over the sorted (relative-path, mtime-ms, size) tuples of every .bsl file. Two
-// dumps with identical file content+metadata yield the same signature and thus
-// share one immutable generation; any drift (add / remove / modify) yields a new
-// signature, so a rebuild produces a fresh generation directory rather than
-// mutating one in use.
+// GenSig computes the content+schema signature of a dump directory: a short hex
+// hash over the gensig derivation version, the index schema version, the on-disk
+// zap segment version, and the sorted (relative-path, mtime-ms, size) tuples of
+// every .bsl file. Two dumps with identical content built by the same-versioned
+// binary yield the same signature and thus share one immutable generation; any
+// drift (add / remove / modify) OR any version bump (see the BUMP PROTOCOL on the
+// version consts) yields a new signature, so the result is a fresh generation
+// directory rather than a mutated one in use or a mis-read incompatible one.
 //
 // It walks the dump once (the same cost as the warm-start manifest diff that
-// already runs on every open today). The schema/format version is not part of
-// the signature yet (deferred to a later chunk).
+// already runs on every open today).
 func GenSig(dir string) (string, error) {
+	return genSig(dir, dumpIndexSchemaVersion, zapSegmentVersion)
+}
+
+// genSig is the version-parameterised core of GenSig. GenSig always passes the
+// current dumpIndexSchemaVersion / zapSegmentVersion; the parameters exist so the
+// schema-drift invariant (a bumped schema/format yields a different signature, and
+// a generation built under a different schema is never adopted) is directly
+// testable without rebuilding the binary.
+func genSig(dir string, schemaVer, zapVer int) (string, error) {
 	type fileSig struct {
 		rel  string
 		mod  int64
@@ -126,7 +189,9 @@ func GenSig(dir string) (string, error) {
 	slices.SortFunc(files, func(a, b fileSig) int { return strings.Compare(a.rel, b.rel) })
 
 	h := sha256.New()
-	fmt.Fprintf(h, "v%d\n", genSigVersion)
+	// The version header folds the derivation, schema, and on-disk format versions
+	// into the signature so a bump of any one yields a distinct gensig.
+	fmt.Fprintf(h, "gensig-v%d schema-v%d zap-v%d\n", genSigVersion, schemaVer, zapVer)
 	for _, f := range files {
 		fmt.Fprintf(h, "%s\x00%d\x00%d\n", f.rel, f.mod, f.size)
 	}
@@ -451,28 +516,235 @@ func buildGenerationInto(dumpDir, targetDir string) error {
 // is the authority that a generation is complete and adoptable; its contents are
 // advisory (gensig + build timestamp + derivation version) for debugging.
 func writeReadySentinel(genDir, gensig string) error {
-	body := fmt.Sprintf("gensig=%s\ngensig_version=%d\nbuilt=%s\n",
-		gensig, genSigVersion, time.Now().UTC().Format(time.RFC3339))
+	body := fmt.Sprintf("gensig=%s\ngensig_version=%d\nschema_version=%d\nzap_version=%d\nbuilt=%s\n",
+		gensig, genSigVersion, dumpIndexSchemaVersion, zapSegmentVersion,
+		time.Now().UTC().Format(time.RFC3339))
 	return os.WriteFile(readySentinelPath(genDir), []byte(body), 0o644)
 }
 
 // OpenForServe opens dir for serving, preferring the immutable generation path.
 // If a READY generation for the current dump signature exists it is opened
-// READ-ONLY (so N concurrent serves on the same dump coexist); otherwise it
-// falls back to the legacy flat NewIndex behavior (backward-compat read).
+// READ-ONLY (so N concurrent serves on the same dump coexist). If not, but a
+// LEGACY flat cache exists, it is migrated to the generation layout in place
+// (migrateFlatToGeneration — adopt the existing shards, or one-time build if
+// adoption is unsafe) and the resulting generation is opened read-only. Only when
+// neither a generation nor a flat cache is present (or migration fails) does it
+// fall back to the legacy flat NewIndex behavior (backward-compat read/build).
 //
-// This is the foundational read path. It does NOT build a missing generation or
-// elect a build leader — that orchestration (build-on-miss, async readiness,
-// leader election) is the deferred advanced layer; until then a missing
-// generation simply degrades to the existing single-writer flat cache.
+// This is the foundational read path. It does NOT build a missing generation FROM
+// AN EMPTY CACHE or elect a build leader — that orchestration (build-on-miss,
+// async readiness, leader election) is the deferred advanced layer; a first-ever
+// open with no cache still degrades to the single-writer flat build.
 func OpenForServe(dir, cacheDir string) (*Index, error) {
-	if gensig, err := GenSig(dir); err == nil {
-		if GenerationReady(dir, cacheDir, gensig) {
-			return OpenGenerationReadOnly(dir, cacheDir, gensig)
-		}
-	} else {
+	gensig, err := GenSig(dir)
+	if err != nil {
 		slog.Warn("dump: could not compute generation signature; using legacy flat cache",
 			"dir", dir, "error", err)
+		return NewIndex(dir, cacheDir, false)
+	}
+	if GenerationReady(dir, cacheDir, gensig) {
+		return OpenGenerationReadOnly(dir, cacheDir, gensig)
+	}
+	// No READY generation yet. If a legacy flat cache exists, migrate it once to
+	// the generation layout so this and future serves use the concurrent read-only
+	// path instead of the single-writer flat cache.
+	if g, migrated, mErr := migrateFlatToGeneration(dir, cacheDir); mErr != nil {
+		slog.Warn("dump: flat→generation migration failed; using legacy flat cache",
+			"dir", dir, "error", mErr)
+	} else if migrated {
+		return OpenGenerationReadOnly(dir, cacheDir, g)
 	}
 	return NewIndex(dir, cacheDir, false)
+}
+
+// migrateFlatToGeneration migrates an existing LEGACY flat cache (shard_* directly
+// under the per-dump cache dir, no generation for the current signature yet) to
+// the immutable generation layout, WITHOUT a full rebuild storm. It returns the
+// current gensig, whether a READY generation for it now exists, and any error.
+//
+// It PREFERS adopting the existing flat shards as the first generation: a metadata
+// move (rename) of each shard_* dir into g/<gensig>/ plus a READY sentinel, which
+// is O(number-of-shards) and re-indexes nothing. It falls back to a one-time
+// BuildGeneration (logged) ONLY when adoption is unsafe — the flat cache is in use
+// by another process, has no compatible manifest, was built under a different
+// index schema / zap format, or has drifted from the current dump. The build
+// fallback never rewrites the flat cache in place and never touches a generation a
+// live reader holds.
+//
+// Backward-compat: when there is nothing to migrate (no flat cache) it is a no-op
+// (migrated=false) and the caller's legacy flat path still opens/builds normally;
+// a failed adoption rolls the flat shards back so the flat cache remains openable.
+func migrateFlatToGeneration(dir, cacheDir string) (string, bool, error) {
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		return "", false, err
+	}
+	gensig, err := GenSig(dir)
+	if err != nil {
+		return "", false, fmt.Errorf("computing generation signature for migration: %w", err)
+	}
+	genDir := generationDir(cpath, gensig)
+
+	// Already a READY generation for this signature — nothing to migrate.
+	if generationReadyDir(genDir) {
+		return gensig, true, nil
+	}
+	// No legacy flat shards under the cache root — nothing to migrate.
+	shardDirs := cacheShardDirs(cpath)
+	if len(shardDirs) == 0 {
+		return gensig, false, nil
+	}
+
+	ok, reason := flatCacheAdoptable(cpath, dir)
+	if ok {
+		if err := adoptFlatShards(cpath, gensig, shardDirs); err != nil {
+			return gensig, false, fmt.Errorf("adopting flat cache as generation %q: %w", gensig, err)
+		}
+		slog.Info("Migrated legacy flat cache to a generation by adopting its shards (no rebuild)",
+			"gen", gensig, "shards", len(shardDirs))
+		return gensig, generationReadyDir(genDir), nil
+	}
+
+	// Adoption is unsafe — build a fresh generation ONCE instead. This never
+	// rewrites the flat cache in place; the flat shards are left intact as a
+	// backward-compatible fallback until a later (deferred) flat-cache GC.
+	slog.Info("Legacy flat cache not safely adoptable; building a fresh generation once",
+		"gen", gensig, "reason", reason)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		return gensig, false, fmt.Errorf("building generation for migration: %w", err)
+	}
+	return gensig, generationReadyDir(genDir), nil
+}
+
+// flatCacheAdoptable reports whether the legacy flat cache under cpath can be
+// SAFELY adopted as the generation for the current dump — i.e. moved into
+// g/<gensig>/ and trusted to match that signature by construction — and, if not, a
+// human-readable reason for the build fallback. Adoption is safe only when no
+// other process holds the flat cache open, a version-compatible manifest is
+// present, the manifest's schema+zap versions match the running binary, and the
+// flat cache has not drifted from the current dump content.
+func flatCacheAdoptable(cpath, dir string) (bool, string) {
+	// A foreign process serving the flat cache (serve.lock) must not have its
+	// shard files moved out from under it; build a separate generation instead. A
+	// stale lock conservatively forces the (safe) build fallback rather than risk
+	// corrupting a live process — at worst a one-time rebuild.
+	if pid, present := readCacheLock(cpath); present && pid != os.Getpid() {
+		return false, fmt.Sprintf("flat cache is in use (serve.lock pid=%d)", pid)
+	}
+
+	m, err := LoadManifest(cpath)
+	if err != nil {
+		return false, fmt.Sprintf("flat manifest unreadable: %v", err)
+	}
+	if m == nil {
+		// No manifest (or an incompatible manifest version): cannot verify the flat
+		// shards match the current dump+schema, so adopting them under this gensig
+		// would be unfounded. Rebuild instead.
+		return false, "flat manifest missing or incompatible version"
+	}
+	if m.schemaVersion() != dumpIndexSchemaVersion || m.zapVersion() != zapSegmentVersion {
+		return false, fmt.Sprintf("flat cache schema/format mismatch (cache schema=%d zap=%d; current schema=%d zap=%d)",
+			m.schemaVersion(), m.zapVersion(), dumpIndexSchemaVersion, zapSegmentVersion)
+	}
+	diff, err := m.Diff(dir)
+	if err != nil {
+		return false, fmt.Sprintf("flat cache drift check failed: %v", err)
+	}
+	if !diff.Empty() {
+		return false, fmt.Sprintf("flat cache is stale (added=%d modified=%d deleted=%d)",
+			len(diff.Added), len(diff.Modified), len(diff.Deleted))
+	}
+	return true, ""
+}
+
+// adoptFlatShards adopts the legacy flat shards (shardDirs, all directly under
+// cpath) as the immutable generation for gensig by MOVING them — not rebuilding
+// them — into g/<gensig>/. It mirrors BuildGeneration's atomic-adopt invariant:
+// the shards (and the flat manifest, if present) are renamed into a unique temp
+// dir, the READY sentinel is written LAST, and the temp dir is renamed into place,
+// so the generation only ever becomes visible already containing READY. The whole
+// move is metadata-only (same filesystem), so adoption re-indexes nothing — the
+// no-rebuild-storm guarantee.
+//
+// On any failure before the atomic adopt, the already-moved entries are renamed
+// back so the flat cache is restored intact (a bypassed/failed migration must
+// still leave an openable flat cache). If a concurrent migrator/builder adopts the
+// same gensig first, this rolls back too and defers to that equivalent generation.
+func adoptFlatShards(cpath, gensig string, shardDirs []string) error {
+	gensDir := generationsDir(cpath)
+	if err := os.MkdirAll(gensDir, 0o755); err != nil {
+		return fmt.Errorf("creating generations dir: %w", err)
+	}
+	tmpDir, err := os.MkdirTemp(gensDir, buildTmpPrefix+gensig+"-")
+	if err != nil {
+		return fmt.Errorf("creating migration temp dir: %w", err)
+	}
+
+	type move struct{ from, to string }
+	var moved []move
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		// Restore the flat layout (reverse order) so a failed migration leaves a
+		// working flat cache, then drop the temp dir.
+		for i := len(moved) - 1; i >= 0; i-- {
+			if rbErr := os.Rename(moved[i].to, moved[i].from); rbErr != nil {
+				slog.Warn("migration rollback: could not restore flat cache entry",
+					"from", moved[i].to, "to", moved[i].from, "error", rbErr)
+			}
+		}
+		if rmErr := os.RemoveAll(tmpDir); rmErr != nil {
+			slog.Warn("migration: could not remove temp dir after rollback", "path", tmpDir, "error", rmErr)
+		}
+	}()
+
+	// Move each flat shard dir into the temp generation dir (rename = O(1), no
+	// re-index — the whole point of adoption over a rebuild).
+	for _, sd := range shardDirs {
+		dst := filepath.Join(tmpDir, filepath.Base(sd))
+		if err := os.Rename(sd, dst); err != nil {
+			return fmt.Errorf("moving flat shard %s: %w", filepath.Base(sd), err)
+		}
+		moved = append(moved, move{from: sd, to: dst})
+	}
+
+	// Move the flat manifest too so the adopted generation serves names from it
+	// (loadNamesReadOnly reads <genDir>/manifest.json). Absence is tolerated:
+	// loadNamesReadOnly falls back to a read-only dump walk.
+	if src := manifestPath(cpath); fileExists(src) {
+		dst := manifestPath(tmpDir)
+		if err := os.Rename(src, dst); err != nil {
+			return fmt.Errorf("moving flat manifest: %w", err)
+		}
+		moved = append(moved, move{from: src, to: dst})
+	}
+
+	// Write READY LAST, then adopt atomically (temp → g/<gensig>).
+	if err := writeReadySentinel(tmpDir, gensig); err != nil {
+		return fmt.Errorf("writing READY sentinel: %w", err)
+	}
+
+	genDir := generationDir(cpath, gensig)
+	if err := os.Rename(tmpDir, genDir); err != nil {
+		if generationReadyDir(genDir) {
+			// A concurrent migrator/builder adopted this gensig first. Leave
+			// committed=false so the deferred rollback restores our flat cache as a
+			// fallback; the winner's equivalent (same-gensig) generation is what
+			// callers open.
+			slog.Info("migration: a concurrent process adopted this generation first; "+
+				"keeping the flat cache as fallback", "gen", gensig)
+			return nil
+		}
+		return fmt.Errorf("adopting migrated generation %q: %w", gensig, err)
+	}
+	committed = true
+	return nil
+}
+
+// fileExists reports whether path exists and is a regular file.
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular()
 }

@@ -101,7 +101,7 @@ func buildShardOffline(path string, names []string, getContent func(name string)
 
 	builder, err := bleve.NewBuilder(path, bslMapping, map[string]any{
 		"forceSegmentType":    "zap",
-		"forceSegmentVersion": 16,
+		"forceSegmentVersion": zapSegmentVersion, // folded into GenSig — see BUMP PROTOCOL
 		"batchSize":           offlineBuilderBatchSize,
 	})
 	if err != nil {

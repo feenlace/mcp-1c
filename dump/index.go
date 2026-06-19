@@ -813,7 +813,7 @@ func buildIndexBuilder(indexPath string, names []string, contentByName map[strin
 
 	builder, err := bleve.NewBuilder(indexPath, bslMapping, map[string]any{
 		"forceSegmentType":    "zap",
-		"forceSegmentVersion": 16,
+		"forceSegmentVersion": zapSegmentVersion, // folded into GenSig — see BUMP PROTOCOL
 		"batchSize":           5000,
 	})
 	if err != nil {
