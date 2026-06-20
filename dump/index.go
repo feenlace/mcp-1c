@@ -2,6 +2,7 @@ package dump
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -540,6 +541,7 @@ func (idx *Index) acquireCacheLock(cpath string) {
 // (nothing would be persisted, so every serve would rebuild) or if the build
 // fails.
 func BuildCache(dir, cacheDir string, reindex bool) error {
+	start := time.Now()
 	cpath, err := cachePath(dir, cacheDir)
 	if err != nil {
 		return fmt.Errorf("no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
@@ -572,7 +574,70 @@ func BuildCache(dir, cacheDir string, reindex bool) error {
 	if !idx.Ready() {
 		return fmt.Errorf("index build did not complete")
 	}
+
+	// Issue #26: the cache folder is named after an opaque hash of the dump's
+	// absolute path, so it is not obvious which dump a folder maps to. Print the
+	// folder and drop a human-readable dump.json (dump path, module count, build
+	// timing) into it. Both run only after a successful build and are best-effort,
+	// so a failure here never fails the build.
+	fmt.Fprintf(os.Stderr, "Папка индексов: %s\n", cpath)
+	writeDumpInfo(cpath, dir, idx.ModuleCount(), time.Since(start))
+
 	return nil
+}
+
+// BuildVersion is the mcp-1c binary version string (the same value printed by
+// `mcp-1c version`, injected via -ldflags "-X main.version=..."). main sets it at
+// startup. It is recorded in dump.json so a cache folder's mapping file shows
+// which build produced it. The dump package cannot import main, hence this var;
+// it is empty for non-main callers (e.g. tests), in which case the field is
+// omitted from the JSON.
+var BuildVersion string
+
+// dumpInfo is the human-readable mapping written to <hash>/dump.json. The cache
+// folder is named sha256(abs dump path)[:8], which is opaque; this file records
+// the dump path and build facts so a folder can be traced back to its dump
+// (issue #26). The schema field lets the format grow compatibly.
+type dumpInfo struct {
+	Schema       int     `json:"schema"`
+	DumpPath     string  `json:"dump_path"`
+	Modules      int     `json:"modules"`
+	BuildSeconds float64 `json:"build_seconds"`
+	BuiltAt      string  `json:"built_at"`
+	Version      string  `json:"mcp_1c_version,omitempty"`
+	Platform     string  `json:"platform"`
+}
+
+// writeDumpInfo writes the human-readable dump.json into the TOP-LEVEL cache
+// folder cpath, mapping it to dumpDir. dumpDir is absolutized so dump_path matches
+// the absolute path the folder hash is derived from (cachePath hashes the abs
+// path; idx.dir is the raw, possibly relative, dir passed to NewIndex). cpath must
+// be the stable top-level <hash> dir, never a per-generation dir under g/ (those
+// are reaped by GCGenerations). Best-effort: any failure is logged and ignored so
+// it never fails an otherwise-successful index build.
+func writeDumpInfo(cpath, dumpDir string, modules int, elapsed time.Duration) {
+	absDir := dumpDir
+	if abs, err := filepath.Abs(dumpDir); err == nil {
+		absDir = abs
+	}
+	data, err := json.MarshalIndent(dumpInfo{
+		Schema:       1,
+		DumpPath:     absDir,
+		Modules:      modules,
+		BuildSeconds: elapsed.Seconds(),
+		BuiltAt:      time.Now().Format(time.RFC3339),
+		Version:      BuildVersion,
+		Platform:     runtime.GOOS,
+	}, "", "  ")
+	if err != nil {
+		slog.Warn("dump: could not encode dump.json; cache folder mapping skipped", "error", err)
+		return
+	}
+	out := filepath.Join(cpath, "dump.json")
+	if err := os.WriteFile(out, data, 0o644); err != nil {
+		slog.Warn("dump: could not write dump.json; cache folder mapping skipped",
+			"path", out, "error", err)
+	}
 }
 
 // setBuildErr stores a build error atomically.

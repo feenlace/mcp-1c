@@ -12,8 +12,8 @@ import (
 
 	"github.com/feenlace/mcp-1c/dump"
 	"github.com/feenlace/mcp-1c/extension"
-	"github.com/feenlace/mcp-1c/internal/config"
 	"github.com/feenlace/mcp-1c/installer"
+	"github.com/feenlace/mcp-1c/internal/config"
 	"github.com/feenlace/mcp-1c/onec"
 	"github.com/feenlace/mcp-1c/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -88,6 +88,10 @@ func main() {
 			defer f.Close()
 		}
 	}
+
+	// Record the binary version for the dump package so it can be written into the
+	// cache folder's dump.json (the dump package cannot import main).
+	dump.BuildVersion = version
 
 	if *showVersion {
 		fmt.Println("mcp-1c version " + version)
