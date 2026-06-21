@@ -157,8 +157,18 @@ func bslPathToModuleName(relPath string) string {
 	relPath = filepath.ToSlash(relPath)
 	parts := strings.Split(relPath, "/")
 
+	// The returned name is the KEY for every downstream map (idx.names,
+	// contentByName, pathByName, pathToDocID, the Bleve doc id and the
+	// PathIndex). macOS unpacks dumps with the decomposable Cyrillic letters
+	// (short-I / IO) in Unicode NFD, whereas queries and XML-content-derived
+	// names are NFC, so an NFD path-derived key would never match an NFC lookup.
+	// Each return is therefore wrapped in NFC(...) to normalise the key at this
+	// single chokepoint. The raw on-disk path used for file I/O is kept separately
+	// by callers (pathByName values), so files still open. NFC is an allocation-
+	// free no-op on already-NFC input (prod/Windows/HTTP).
+
 	if len(parts) < 2 {
-		return relPath
+		return NFC(relPath)
 	}
 
 	// Extension subtree: Расширения/<ext>/<Kind>/<name>/.../<File>.bsl. Strip the
@@ -170,10 +180,10 @@ func bslPathToModuleName(relPath string) string {
 	// the previous behaviour and never panics.
 	if parts[0] == extensionDirName && len(parts) >= 4 {
 		extName := parts[1]
-		return "ext." + extName + "." + baseConfigModuleName(parts[2:])
+		return NFC("ext." + extName + "." + baseConfigModuleName(parts[2:]))
 	}
 
-	return baseConfigModuleName(parts)
+	return NFC(baseConfigModuleName(parts))
 }
 
 // baseConfigModuleName maps the path segments of a base-configuration BSL file
@@ -289,6 +299,10 @@ func (idx *Index) GetContent(id string) (string, bool) {
 	if !idx.ready.Load() {
 		return "", false
 	}
+
+	// Defensive: normalise the lookup key to NFC so an NFD id (e.g. copy-pasted
+	// from a macOS path) resolves against the NFC-keyed maps. No-op on NFC input.
+	id = NFC(id)
 
 	// Fast path: check content cache under read lock.
 	idx.contentMu.RLock()

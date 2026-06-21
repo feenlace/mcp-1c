@@ -79,6 +79,13 @@ func (pi *PathIndex) Filter(category, objectName, moduleType string) []PathEntry
 		return nil
 	}
 
+	// Defensive: normalise lookup args to NFC so an NFD-supplied filter matches
+	// the NFC keys (byCategory/byObject/byModule are keyed by NFC docID parts).
+	// No-op on already-NFC input.
+	category = NFC(category)
+	objectName = NFC(objectName)
+	moduleType = NFC(moduleType)
+
 	// If no filters, return all non-deleted entries.
 	if category == "" && objectName == "" && moduleType == "" {
 		result := make([]PathEntry, 0, len(pi.entries))
@@ -269,7 +276,9 @@ func (pi *PathIndex) Contains(docID string) bool {
 	if pi == nil {
 		return false
 	}
-	_, ok := pi.docIDSet[docID]
+	// Defensive: normalise to NFC so an NFD docID matches the NFC keys. No-op on
+	// already-NFC input.
+	_, ok := pi.docIDSet[NFC(docID)]
 	return ok
 }
 
