@@ -286,6 +286,120 @@ func openReadOnlyFrom(dumpDir, genDir string) (*Index, error) {
 	return idx, nil
 }
 
+// NewServePlaceholder returns a not-yet-ready, read-only serve Index for dumpDir.
+// It is the async-serve analogue of openReadOnlyFrom: it allocates the Index with
+// Ready()==false and an OPEN Done() channel but attaches NO shards and loads NO
+// names yet. The advanced build-leader path hands this placeholder out IMMEDIATELY
+// — so the MCP initialize handshake is never blocked on a cold BuildGeneration —
+// then completes the open in a background goroutine via (*Index).FinishServeOpen
+// once the generation is built (or records the build failure there).
+//
+// Until FinishServeOpen runs, every reader observes the usual not-ready contract:
+// Search() reports "building", GetContent()/ModuleNames()/ModuleCount() return
+// their not-ready zero values, GetPathIndex() returns nil, and BuildError() is
+// nil. Dependents (the Pro analyzers, extension auto-ingest, Close()) may block on
+// Done() to await readiness.
+//
+// The returned Index has a live ctx/cancel and an open done channel, so Close()
+// (idx.cancel(); <-idx.done) is well-defined even if the open never succeeds: it
+// blocks until FinishServeOpen closes done. FinishServeOpen MUST be called exactly
+// once on the returned Index. The struct literal is kept byte-identical to
+// openReadOnlyFrom's so the two paths can never drift in what a placeholder/opened
+// serve Index initializes.
+func NewServePlaceholder(dumpDir string) *Index {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Index{
+		dir:           dumpDir,
+		alias:         bleve.NewIndexAlias(),
+		contentByName: make(map[string]string),
+		pathByName:    make(map[string]string),
+		pathToDocID:   make(map[string]string),
+		readOnly:      true,
+		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan struct{}),
+	}
+}
+
+// FinishServeOpen completes — or fails — a placeholder created by
+// NewServePlaceholder, IN PLACE on the SAME *Index, and ALWAYS closes Done()
+// exactly once on every exit path (success, failure, a ctx-cancel funneled in via
+// prepErr, or a panic while attaching). It MUST be called exactly once.
+//
+// On success it attaches the already-built READY generation gensig under cacheDir
+// READ-ONLY — registering this process as a live reader of the generation, so
+// concurrent old-generation GC never reaps a generation this process serves —
+// loads names from the generation manifest, builds the path index, and flips
+// Ready() via a RELEASE store. The shards (attachReadOnlyShards) and names
+// (loadNamesReadOnly) are therefore fully published BEFORE ready.Store(true), so
+// any reader that observes Ready()==true (or passes the Search() gate, an ACQUIRE
+// load) sees a fully-populated index with no torn read.
+//
+// On any failure it records BuildError() and returns WITHOUT flipping Ready():
+//   - a non-nil prepErr handed in by the caller (signature compute, build-leader
+//     timeout, BuildGeneration error, ctx cancellation, or a recovered build panic),
+//   - an unresolvable cache path or a generation with no READY sentinel,
+//   - an attach/load error (corrupt shards, unreadable manifest),
+//   - a panic raised while attaching/loading (converted to BuildError by the
+//     deferred recover, so the goroutine never crashes the process).
+//
+// Done() still closes on every one of those paths, so waiters never block and
+// Close()'s <-done never deadlocks; Search()/content readers then surface the
+// recorded build error (index.go Search wraps BuildError) instead of a silent
+// not-found or a hang.
+//
+// This mirrors openReadOnlyFrom (struct + background close) and the tail of
+// reindexGeneration (attach -> loadNames -> NewPathIndex -> ready.Store(true)),
+// but populates an existing placeholder rather than a freshly-allocated Index, so
+// dependents that captured the placeholder pointer (and are waiting on its Done())
+// transition with it instead of being orphaned by a pointer swap.
+func (idx *Index) FinishServeOpen(cacheDir, gensig string, prepErr error) {
+	// Defers run LIFO: close(done) is registered first so it runs LAST — after the
+	// recover below has recorded any panic as BuildError. A waiter unblocked by the
+	// done-close therefore always sees a stable Ready()/BuildError() pair.
+	defer close(idx.done)
+	defer func() {
+		if r := recover(); r != nil {
+			idx.setBuildErr(fmt.Errorf("serve open: panic finishing generation %q: %v", gensig, r))
+		}
+	}()
+
+	if prepErr != nil {
+		idx.setBuildErr(prepErr)
+		return
+	}
+
+	cpath, err := cachePath(idx.dir, cacheDir)
+	if err != nil {
+		idx.setBuildErr(fmt.Errorf("serve open: resolve cache path: %w", err))
+		return
+	}
+	genDir := generationDir(cpath, gensig)
+	if !generationReadyDir(genDir) {
+		idx.setBuildErr(fmt.Errorf("serve open: generation %q is not ready (no %s sentinel at %s)",
+			gensig, readySentinelName, genDir))
+		return
+	}
+
+	if err := idx.attachReadOnlyShards(genDir); err != nil {
+		idx.setBuildErr(err)
+		return
+	}
+	if err := idx.loadNamesReadOnly(genDir); err != nil {
+		idx.setBuildErr(err)
+		return
+	}
+	idx.pathIndex = NewPathIndex(idx.names)
+	idx.ready.Store(true) // release: publishes shards+names to acquire-side readers
+
+	slog.Info("Finished async serve index open",
+		"shards", len(idx.shards), "modules", len(idx.names), "gen", gensig)
+	if showProgress.Load() {
+		fmt.Fprintf(os.Stderr, "[%s] Индекс открыт только для чтения: %d модулей\n",
+			time.Now().Format("15:04:05"), len(idx.names))
+	}
+}
+
 // attachReadOnlyShards opens the shards under genDir READ-ONLY (bbolt LOCK_SH) and
 // attaches them to idx, marks idx read-only, and registers idx as a live holder of
 // the generation in its readers/ registry so concurrent old-generation GC never
