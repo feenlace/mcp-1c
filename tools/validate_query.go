@@ -21,8 +21,7 @@ func ValidateQueryTool() *mcp.Tool {
 		Title: "Проверка синтаксиса запроса",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Проверить синтаксис запроса 1С без выполнения, найдёт ошибки в ВЫБРАТЬ/SELECT. " +
-			"Используй перед execute_query чтобы валидировать запрос. " +
-			"Всегда вызывай перед execute_query для проверки синтаксиса.",
+			"Всегда вызывай перед execute_query для проверки синтаксиса запроса.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {

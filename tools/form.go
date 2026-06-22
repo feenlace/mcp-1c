@@ -27,7 +27,7 @@ func FormStructureTool() *mcp.Tool {
 			"properties": {
 				"object_type": {
 					"type": "string",
-					"description": "Тип объекта: Document, Catalog, DataProcessor, Report и т.д."
+					"description": "Тип объекта: Document, Catalog, DataProcessor, Report и т.д. Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task."
 				},
 				"object_name": {
 					"type": "string",
@@ -35,7 +35,7 @@ func FormStructureTool() *mcp.Tool {
 				},
 				"form_name": {
 					"type": "string",
-					"description": "Имя формы (если не указано - возвращается первая найденная форма)"
+					"description": "Имя формы (если не указано - возвращается первая форма по алфавиту)"
 				}
 			},
 			"required": ["object_type", "object_name"]
