@@ -402,12 +402,27 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 	// Try to open existing sharded cache.
 	if useCache && !reindex {
 		if shardDirs := cacheShardDirs(cpath); len(shardDirs) > 0 {
-			// Legacy flat layout stays read-WRITE: this path runs the incremental
-			// warm-start diff (loadFromManifestAndDiff) which mutates the base
-			// shards on drift. Concurrent same-dump serve uses the read-only
-			// immutable-generation path (OpenGenerationReadOnly) instead.
-			shards, err := openCachedShards(shardDirs, false, "")
-			if err == nil {
+			// Schema gate: a legacy flat cache whose manifest was stamped under an
+			// index schema / zap format the running binary cannot reuse (see the BUMP
+			// PROTOCOL in generation.go) must NOT be served. Its shard docIDs and
+			// manifest keys were produced under a different schema — e.g. before module
+			// names were NFC-normalised, so a macOS dump's decomposable (short-I / IO)
+			// names were stored NFD and never match an NFC query — so reusing it would
+			// silently break module_code / resolve for those names. Drop the flat cache
+			// (preserving any immutable g/ generations) and fall through to a cold
+			// rebuild, which is non-blocking on the consumer side. A schema MATCH (or an
+			// absent / incompatible-version manifest, which loadFromManifestAndDiff
+			// handles via its own fallback walk) still reuses, so there is no gratuitous
+			// rebuild.
+			if flatCacheSchemaStale(cpath) {
+				slog.Info("dump: dropping a legacy flat index cache built under an "+
+					"incompatible index schema; it will be cold-rebuilt", "path", cpath)
+				removeFlatCacheContents(cpath)
+			} else if shards, err := openCachedShards(shardDirs, false, ""); err == nil {
+				// Legacy flat layout stays read-WRITE: this path runs the incremental
+				// warm-start diff (loadFromManifestAndDiff) which mutates the base
+				// shards on drift. Concurrent same-dump serve uses the read-only
+				// immutable-generation path (OpenGenerationReadOnly) instead.
 				idx.shards = shards
 				idx.alias.Add(shards...)
 				idx.acquireCacheLock(cpath)
@@ -434,12 +449,13 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 					}
 				}()
 				return idx, nil
-			}
-			// Cache corrupt — remove and rebuild.
-			if err := os.RemoveAll(cpath); err != nil {
-				slog.Warn("could not remove corrupt index cache before rebuild; "+
-					"the rebuild may fail or mix stale shards",
-					"path", cpath, "error", err)
+			} else {
+				// Cache corrupt — remove and rebuild.
+				if err := os.RemoveAll(cpath); err != nil {
+					slog.Warn("could not remove corrupt index cache before rebuild; "+
+						"the rebuild may fail or mix stale shards",
+						"path", cpath, "error", err)
+				}
 			}
 		}
 	}
@@ -1636,9 +1652,18 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	idx.pathToDocID = make(map[string]string, len(manifest.Files))
 	for relPath, entry := range manifest.Files {
 		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
-		idx.names = append(idx.names, entry.DocID)
-		idx.pathByName[entry.DocID] = absPath
-		idx.pathToDocID[relPath] = entry.DocID
+		// NFC the manifest docID at this chokepoint, mirroring bslPathToModuleName on
+		// the cold-build path. A manifest written by a pre-NFC-fix binary on macOS
+		// stored decomposable (short-I / IO) names in NFD; loading them verbatim would
+		// key idx.names / pathByName / pathToDocID — and the PathIndex built from
+		// idx.names — in NFD, so an NFC GetContent/resolve query would never match.
+		// NFC is an allocation-free no-op on already-NFC keys (prod/Windows/HTTP and
+		// any cache this binary rebuilt). The relPath KEY is the raw on-disk path and
+		// stays unchanged so file I/O and the Diff below still match.
+		docID := NFC(entry.DocID)
+		idx.names = append(idx.names, docID)
+		idx.pathByName[docID] = absPath
+		idx.pathToDocID[relPath] = docID
 	}
 	slices.Sort(idx.names)
 	idx.mu.Unlock()
@@ -1659,7 +1684,11 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 		if !ok {
 			continue
 		}
-		docID := entry.DocID
+		// NFC the manifest docID for the same reason as the load loop above: the
+		// in-memory maps and the PathIndex are NFC-keyed, and a current-schema cache's
+		// shard docIDs are NFC too, so the shard delete and the map deletes all target
+		// the right key. No-op on already-NFC keys.
+		docID := NFC(entry.DocID)
 		si := shardForID(docID, len(idx.shards))
 		if err := idx.shards[si].Delete(docID); err != nil {
 			slog.Warn("Failed to delete from shard", "docID", docID, "error", err)

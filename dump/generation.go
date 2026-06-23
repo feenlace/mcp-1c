@@ -90,10 +90,12 @@ const (
 //
 //   - dumpIndexSchemaVersion: the LOGICAL index schema changes — the BSL field
 //     mapping/analyzers (buildBSLMapping), the indexed document shape
-//     (bslDocument), or the shard-assignment hash (shardForID/splitByHash) — any
-//     change after which a generation built by an OLDER binary would yield wrong
-//     or degraded results if SERVED by a NEWER one. Bumping it forces every reader
-//     onto a freshly-built generation rather than silently mis-reading old shards.
+//     (bslDocument), the document-ID derivation (bslPathToModuleName, including its
+//     NFC key normalisation), or the shard-assignment hash (shardForID/splitByHash)
+//     — any change after which a generation built by an OLDER binary would yield
+//     wrong or degraded results if SERVED by a NEWER one. Bumping it forces every
+//     reader onto a freshly-built generation rather than silently mis-reading old
+//     shards.
 //
 //   - zapSegmentVersion: the on-disk scorch "zap" segment format version handed to
 //     bleve.NewBuilder (forceSegmentVersion). Bump ONLY when intentionally moving
@@ -109,7 +111,15 @@ const (
 	genSigVersion = 1
 
 	// dumpIndexSchemaVersion versions the logical index schema. See BUMP PROTOCOL.
-	dumpIndexSchemaVersion = 1
+	//
+	// v2: module-name docIDs are NFC-normalised at the build chokepoint
+	// (bslPathToModuleName). A v1 cache built on macOS stored decomposable Cyrillic
+	// names (short-I / IO letters) in NFD, so they never matched an NFC
+	// GetContent/resolve query — module_code and resolve returned not-found for any
+	// such name. The bump forces a fresh NFC-keyed build: a v1 generation now derives
+	// a different gensig (rebuilt on serve, never adopted), and a v1 legacy-flat cache
+	// is dropped by the schema gate in NewIndex (flatCacheSchemaStale) and cold-rebuilt.
+	dumpIndexSchemaVersion = 2
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and
@@ -614,9 +624,16 @@ func (idx *Index) loadNamesReadOnly(genDir string) error {
 	}
 	for relPath, entry := range manifest.Files {
 		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
-		idx.names = append(idx.names, entry.DocID)
-		idx.pathByName[entry.DocID] = absPath
-		idx.pathToDocID[relPath] = entry.DocID
+		// Defensive NFC at the manifest chokepoint, mirroring bslPathToModuleName and
+		// loadFromManifestAndDiff. A generation is gensig-keyed (the schema version is
+		// folded into the signature), so a binary only ever opens a generation whose
+		// manifest it wrote itself with NFC keys — but normalising here keeps this
+		// read-only load correct by construction instead of relying on that argument,
+		// and is an allocation-free no-op on already-NFC keys.
+		docID := NFC(entry.DocID)
+		idx.names = append(idx.names, docID)
+		idx.pathByName[docID] = absPath
+		idx.pathToDocID[relPath] = docID
 	}
 	slices.Sort(idx.names)
 	idx.mu.Unlock()
@@ -903,6 +920,29 @@ func flatCacheAdoptable(cpath, dir string) (bool, string) {
 			len(diff.Added), len(diff.Modified), len(diff.Deleted))
 	}
 	return true, ""
+}
+
+// flatCacheSchemaStale reports whether the legacy flat cache under cpath was built
+// under an index schema / on-disk zap format the running binary cannot safely reuse
+// (see the BUMP PROTOCOL above). A stale flat cache must be dropped and cold-rebuilt
+// rather than served: its shard docIDs and manifest keys were produced under a
+// different schema — e.g. before module names were NFC-normalised, so a macOS dump's
+// decomposable (short-I / IO) names were stored NFD and never match an NFC query —
+// so reusing it silently breaks module_code / resolve for those names.
+//
+// It returns true ONLY for a readable, version-compatible manifest whose stamped
+// schema or zap version differs from the current binary's. It returns false (reuse)
+// when the manifest is absent or carries an incompatible manifest version
+// (LoadManifest -> nil): loadFromManifestAndDiff then re-walks the dump with the
+// current schema, so there is nothing trustworthy to gate on. It also returns false
+// on a manifest read error, leaving the existing warm-start path to surface it
+// rather than dropping a cache on a transient I/O hiccup.
+func flatCacheSchemaStale(cpath string) bool {
+	m, err := LoadManifest(cpath)
+	if err != nil || m == nil {
+		return false
+	}
+	return m.schemaVersion() != dumpIndexSchemaVersion || m.zapVersion() != zapSegmentVersion
 }
 
 // adoptFlatShards adopts the legacy flat shards (shardDirs, all directly under

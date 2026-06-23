@@ -677,13 +677,19 @@ func TestMigrateFlatToGeneration_AdoptsExistingShardsWithoutRebuild(t *testing.T
 	}
 }
 
-// TestMigrateFlatToGeneration_AdoptsUnstampedLegacyManifest covers the real-world
-// upgrade path: a flat cache built by a binary from BEFORE schema/zap stamping
-// existed has a manifest with neither field (they unmarshal to 0). The baseline
-// accessors map a 0 to the only schema/format that shipped pre-stamping, so such a
-// cache is still adopted (not needlessly rebuilt) when the current binary is on
-// that same baseline.
-func TestMigrateFlatToGeneration_AdoptsUnstampedLegacyManifest(t *testing.T) {
+// TestMigrateFlatToGeneration_UnstampedLegacyManifest covers the real-world upgrade
+// path: a flat cache built by a binary from BEFORE schema/zap stamping existed has a
+// manifest with neither field (they unmarshal to 0), so the baseline accessors map it
+// to the FROZEN baseline schema/zap. Whether such a cache is adopted-by-move or
+// rebuilt then depends on whether the running binary is STILL on that baseline:
+//   - baseline == current: the unstamped cache is format-compatible and adopted by a
+//     metadata move (no rebuild storm);
+//   - baseline <  current (a schema/zap bump has shipped — e.g. the v2 NFC docID
+//     normalisation): the unstamped cache is a different, older schema and is REBUILT
+//     via the one-time build fallback. Adopting it would serve incompatibly-keyed
+//     shards (e.g. pre-NFC NFD docIDs) under a current-schema signature; instead the
+//     flat shards are left in place beside a fresh generation.
+func TestMigrateFlatToGeneration_UnstampedLegacyManifest(t *testing.T) {
 	dir := t.TempDir()
 	cacheDir := t.TempDir()
 	mkBSLFile(t, dir, "Catalogs/Легаси/Ext/ObjectModule.bsl",
@@ -708,7 +714,8 @@ func TestMigrateFlatToGeneration_AdoptsUnstampedLegacyManifest(t *testing.T) {
 	if err := m.Save(cpath); err != nil {
 		t.Fatalf("re-save unstamped manifest: %v", err)
 	}
-	// Confirm the on-disk manifest is genuinely unstamped, then trusts the baseline.
+	// Confirm the on-disk manifest is genuinely unstamped and maps to the frozen
+	// baseline via the accessors.
 	reloaded, err := LoadManifest(cpath)
 	if err != nil || reloaded == nil {
 		t.Fatalf("reload manifest: m=%v err=%v", reloaded, err)
@@ -721,6 +728,9 @@ func TestMigrateFlatToGeneration_AdoptsUnstampedLegacyManifest(t *testing.T) {
 	}
 
 	flatShards := cacheShardDirs(cpath)
+	if len(flatShards) == 0 {
+		t.Fatal("expected flat shards before migration")
+	}
 	before := snapshotShardTree(t, flatShards)
 
 	g, migrated, err := migrateFlatToGeneration(dir, cacheDir)
@@ -728,15 +738,41 @@ func TestMigrateFlatToGeneration_AdoptsUnstampedLegacyManifest(t *testing.T) {
 		t.Fatalf("migrateFlatToGeneration: %v", err)
 	}
 	if !migrated {
-		t.Fatal("an unstamped baseline flat cache should be adopted, not skipped")
+		t.Fatal("migration should produce a generation (adopt or build fallback)")
 	}
-	// Adopted (moved), not rebuilt.
-	if remaining := cacheShardDirs(cpath); len(remaining) != 0 {
-		t.Fatalf("flat shards not moved on unstamped-legacy adoption: %v", remaining)
+
+	onBaseline := dumpIndexSchemaVersion == baselineSchemaVersion && zapSegmentVersion == baselineZapVersion
+	if onBaseline {
+		// Adopted (moved), not rebuilt.
+		if remaining := cacheShardDirs(cpath); len(remaining) != 0 {
+			t.Fatalf("flat shards not moved on unstamped-baseline adoption: %v", remaining)
+		}
+		genShards := cacheShardDirs(generationDir(cpath, g))
+		if after := snapshotShardTree(t, genShards); !sameSnapshot(before, after) {
+			t.Fatal("unstamped-baseline adoption rebuilt the shards instead of moving them")
+		}
+		return
 	}
-	genShards := cacheShardDirs(generationDir(cpath, g))
-	if after := snapshotShardTree(t, genShards); !sameSnapshot(before, after) {
-		t.Fatal("unstamped-legacy adoption rebuilt the shards instead of moving them")
+
+	// Schema/zap has been bumped past the baseline: the unstamped cache is
+	// schema-stale and must be rebuilt via the build fallback, NOT adopted by move —
+	// the flat shards stay in place beside a fresh generation.
+	if remaining := cacheShardDirs(cpath); len(remaining) != len(flatShards) {
+		t.Fatalf("flat shards were moved on a schema-stale unstamped cache "+
+			"(should rebuild, not adopt): had %d, now %d", len(flatShards), len(remaining))
+	}
+	if !generationReadyDir(generationDir(cpath, g)) {
+		t.Fatal("no READY generation after build fallback")
+	}
+	idx, err := OpenGenerationReadOnly(dir, cacheDir, g)
+	if err != nil {
+		t.Fatalf("open rebuilt generation: %v", err)
+	}
+	defer idx.Close()
+	<-idx.Done()
+	mtc, total, err := idx.Search(SearchParams{Query: "маркерЛегаси", Mode: SearchModeSmart, Limit: 10})
+	if err != nil || total == 0 || len(mtc) == 0 {
+		t.Fatalf("rebuilt generation search failed: total=%d err=%v", total, err)
 	}
 }
 
