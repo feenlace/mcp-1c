@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
-	scorchIndex "github.com/blevesearch/bleve/v2/index/scorch"
 	"github.com/blevesearch/bleve/v2/search/query"
 )
 
@@ -713,11 +712,10 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 		basePath = cpath
 	}
 
-	// Increase persister nap time to favour in-memory segment merging.
-	// Set once before shard goroutines start. Not restored because the persister
-	// goroutines inside each shard continue reading this global after buildShards
-	// returns — restoring it would race with those reads.
-	scorchIndex.DefaultPersisterNapTimeMSec = 500
+	// Persister nap time (favouring in-memory segment merging) is applied per-index
+	// via scorchPersisterOptions inside buildShard, not by writing scorch's process
+	// global DefaultPersisterNapTimeMSec. The global raced when a sibling base
+	// attached read-only shards while this base was building (see scorchPersisterCfg).
 
 	// Build the BSL mapping once and share across all shards.
 	bslMapping := buildBSLMapping()
@@ -858,6 +856,23 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 	}
 }
 
+// scorchPersisterNapTimeMSec is the persister nap time (milliseconds) applied
+// per-index via the "scorchPersisterOptions" scorch config to favour in-memory
+// segment merging during indexing. It replaces a write to scorch's process-global
+// DefaultPersisterNapTimeMSec, which raced when one base built shards while a
+// sibling base concurrently attached read-only shards (parsePersisterOptions reads
+// that global on every index open). Keeping the value out of the shared global
+// removes the race while preserving the same 500ms nap behaviour.
+const scorchPersisterNapTimeMSec = 500
+
+// scorchPersisterCfg returns a fresh per-index persister-options map (a new map on
+// every call so concurrently opened indexes never share one instance). Use it as
+// the "scorchPersisterOptions" entry of a bleve scorch config map; scorch
+// JSON-decodes it into persisterOptions.PersisterNapTimeMSec.
+func scorchPersisterCfg() map[string]any {
+	return map[string]any{"PersisterNapTimeMSec": scorchPersisterNapTimeMSec}
+}
+
 // openCachedShards opens pre-built Bleve shard indexes from disk.
 // On any error, all previously opened shards are closed.
 //
@@ -880,13 +895,18 @@ func openCachedShards(dirs []string, readOnly bool, boltTimeout string) ([]bleve
 			err     error
 		)
 		if readOnly {
-			cfg := map[string]any{"read_only": true}
+			cfg := map[string]any{
+				"read_only":              true,
+				"scorchPersisterOptions": scorchPersisterCfg(),
+			}
 			if boltTimeout != "" {
 				cfg["bolt_timeout"] = boltTimeout // MUST be a duration STRING — see doc above
 			}
 			blevIdx, err = bleve.OpenUsing(dir, cfg)
 		} else {
-			blevIdx, err = bleve.Open(dir)
+			blevIdx, err = bleve.OpenUsing(dir, map[string]any{
+				"scorchPersisterOptions": scorchPersisterCfg(),
+			})
 		}
 		if err != nil {
 			for j := range i {
@@ -950,7 +970,9 @@ func buildIndexBuilder(indexPath string, names []string, contentByName map[strin
 		return nil, fmt.Errorf("closing bleve builder: %w", err)
 	}
 
-	blevIdx, err := bleve.Open(indexPath)
+	blevIdx, err := bleve.OpenUsing(indexPath, map[string]any{
+		"scorchPersisterOptions": scorchPersisterCfg(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("opening built index: %w", err)
 	}
@@ -961,15 +983,14 @@ func buildIndexBuilder(indexPath string, names []string, contentByName map[strin
 // buildIndexBatch creates a Bleve index using NewUsing + manual batch operations.
 // This is the fallback for in-memory builds where NewBuilder cannot be used.
 func buildIndexBatch(indexPath string, names []string, contentByName map[string]string) (bleve.Index, error) {
-	// Increase persister nap time to favour in-memory segment merging with unsafe_batch.
-	oldNap := scorchIndex.DefaultPersisterNapTimeMSec
-	scorchIndex.DefaultPersisterNapTimeMSec = 500
-	defer func() { scorchIndex.DefaultPersisterNapTimeMSec = oldNap }()
-
 	bslMapping := buildBSLMapping()
 
+	// Persister nap time favours in-memory segment merging with unsafe_batch. Set
+	// per-index via scorchPersisterOptions instead of scorch's process-global
+	// DefaultPersisterNapTimeMSec, so it never races a concurrent attach.
 	blevIdx, err := bleve.NewUsing(indexPath, bslMapping, "scorch", "scorch", map[string]any{
-		"unsafe_batch": true,
+		"unsafe_batch":           true,
+		"scorchPersisterOptions": scorchPersisterCfg(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating bleve index: %w", err)
@@ -1233,7 +1254,8 @@ func (idx *Index) ensureOverlay() (bleve.Index, error) {
 		return idx.overlay, nil
 	}
 	ov, err := bleve.NewUsing("", buildBSLMapping(), "scorch", "scorch", map[string]any{
-		"unsafe_batch": true,
+		"unsafe_batch":           true,
+		"scorchPersisterOptions": scorchPersisterCfg(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating extension overlay: %w", err)

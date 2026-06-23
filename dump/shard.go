@@ -167,7 +167,9 @@ func buildShardOffline(path string, names []string, getContent func(name string)
 		return nil, fmt.Errorf("closing bleve builder for shard %d: %w", shardID, err)
 	}
 
-	blevIdx, err := bleve.Open(path)
+	blevIdx, err := bleve.OpenUsing(path, map[string]any{
+		"scorchPersisterOptions": scorchPersisterCfg(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("opening built shard %d: %w", shardID, err)
 	}
@@ -183,7 +185,8 @@ func buildShardOffline(path string, names []string, getContent func(name string)
 // this path runs only with the cache disabled.
 func buildShardInMemory(names []string, getContent func(name string) string, shardID, totalShards int, bslMapping *mapping.IndexMappingImpl, progress *atomic.Int64) (bleve.Index, error) {
 	blevIdx, err := bleve.NewUsing("", bslMapping, "scorch", "scorch", map[string]any{
-		"unsafe_batch": true,
+		"unsafe_batch":           true,
+		"scorchPersisterOptions": scorchPersisterCfg(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating in-memory bleve shard %d: %w", shardID, err)
