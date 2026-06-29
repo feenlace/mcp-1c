@@ -142,6 +142,17 @@ URL в этом случае: `http://localhost/base/hs/mcp-1c`
 
 **Linux:** Используйте публикацию через Apache или автономный сервер ibsrv (способ 1). Встроенный HTTP-сервер (`/HTTPPort`) на Linux недоступен.
 
+В Linux Конфигуратор не видит веб-серверы, поэтому публикацию выполняют утилитой `webinst` (входит в поставку платформы 1С). HTTP-сервис расширения должен попасть в файл публикации `default.vrd` одним из двух способов: через опцию «Публиковать HTTP-сервисы расширений по умолчанию» (атрибут `publishExtensionsByDefault="true"`), либо явным блоком:
+
+```xml
+<httpServices>
+    <service name="MCPService" rootUrl="mcp-1c" enable="true"
+             reuseSessions="autouse" sessionMaxAge="20" poolSize="10" poolTimeout="5"/>
+</httpServices>
+```
+
+После повторной публикации базы файл `default.vrd` перегенерируется, поэтому запись о сервисе нужно добавить заново.
+
 ### Проверка
 
 ```bash
