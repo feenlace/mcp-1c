@@ -35,6 +35,17 @@ func cachePath(dumpDir, cacheDir string) (string, error) {
 	return filepath.Join(cacheBase, "mcp-1c", hash), nil
 }
 
+// CacheDir resolves the per-dump cache directory for (dumpDir, cacheDir) using the
+// same rules as the internal cache path: an explicit cacheDir wins, otherwise the
+// platform user cache base (os.UserCacheDir). It returns an error ONLY when no cache
+// location can be resolved at all — os.UserCacheDir() fails and no explicit cacheDir
+// was given (a scrubbed environment with an unset HOME). That error is the canonical
+// "no writable cache" signal BuildGeneration and BuildCache already report, so the
+// serve coordinator can branch on it to fall back to the in-memory NewIndex path.
+func CacheDir(dumpDir, cacheDir string) (string, error) {
+	return cachePath(dumpDir, cacheDir)
+}
+
 // cacheShardDirs returns sorted paths of shard_* subdirectories in cacheDir.
 // Returns nil if the directory does not exist or contains no shards.
 func cacheShardDirs(cacheDir string) []string {

@@ -451,7 +451,8 @@ func (idx *Index) attachReadOnlyShards(genDir string) error {
 //   - the current generation (keepGensig),
 //   - a generation a live reader still holds,
 //   - an in-progress build (a .building-* temp dir),
-//   - a non-adopted directory (no READY sentinel) — left for a future cleanup.
+//   - a non-adopted directory (no READY sentinel) — reaped instead by
+//     ReapStaleBuildDirs, which also sweeps orphaned READY-less generations.
 //
 // Removal is best-effort and per-generation: a permission error (a cross-user
 // generation on a shared cacheDir) is skipped, not fatal, so one undeletable
@@ -504,35 +505,43 @@ func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
 	return removed, nil
 }
 
-// ReapStaleBuildDirs removes ABANDONED .building-* temp generation dirs — the
-// partial generation a builder leaves behind when it dies mid-build (SIGKILL, OOM,
-// power loss) before it can either adopt the build (atomic rename into g/<gensig>/)
-// or roll it back. Nothing else reaps these: GCGenerations deliberately SKIPS
-// .building-* (from its readers/-registry vantage it cannot tell an in-progress
-// build from a dead one), and the post-build deferred cleanup only runs in the
-// process that survives the build. So without this, every interrupted build leaks a
-// partial generation (hundreds of MB of shards) that grows on disk unbounded until
-// ENOSPC — the realistic trigger being an async-readiness kill/rebuild cascade that
-// SIGKILLs the builder repeatedly. The same prefix is used by BuildGeneration and
-// adoptFlatShards, so this reaps an interrupted flat-cache adoption's temp dir too.
+// ReapStaleBuildDirs sweeps the generations arena (g/) for the two kinds of
+// reclaimable remnant that nothing else removes and os.RemoveAll's each. It is meant
+// to run on startup / BEFORE a build (see prepareServeGeneration), not only after a
+// successful build, so a leak is reclaimed even when the process that produced it
+// never reached its own cleanup. Removal is best-effort and per-dir: a permission
+// error (a cross-user dir on a shared cacheDir) is skipped, not fatal, so one
+// undeletable dir never blocks reclaiming the others. Returns the dir names removed.
 //
-// It is meant to be called on startup / BEFORE electing a build-leader (see the
-// serve open path), not only after a successful build, so leaks are reclaimed even
-// when the leaking process never reaches its own post-build cleanup.
+// 1) ABANDONED .building-* temp dirs — the partial generation a builder leaves
+// behind when it dies mid-build (SIGKILL, OOM, power loss) before it can adopt the
+// build (atomic rename into g/<gensig>/) or roll it back. GCGenerations deliberately
+// SKIPS .building-* (it cannot tell an in-progress build from a dead one) and the
+// post-build deferred cleanup only runs in the surviving process, so without this
+// every interrupted build leaks hundreds of MB of shards until ENOSPC. The same
+// prefix is used by BuildGeneration and adoptFlatShards, so an interrupted flat-cache
+// adoption's temp dir is reaped too. SAFETY — a fresh in-progress build MUST survive:
+// a .building-* dir is removed ONLY when the newest mtime ANYWHERE in its tree is
+// older than buildDirStaleAfter, so a concurrent build-leader streaming segments
+// (fresh tree) is never reaped; the caller has not yet started its own build, so it
+// has no live temp dir of its own to protect. (A crash mid-adoptFlatShards can leave
+// the only copy of the legacy flat shards inside the reaped temp dir — reaping loses
+// a CACHE the next open rebuilds, never source data.)
 //
-// SAFETY — a fresh in-progress build MUST survive: a .building-* dir is removed
-// ONLY when the newest mtime ANYWHERE in its tree is older than buildDirStaleAfter,
-// i.e. nothing has been written to it for far longer than any healthy build pauses.
-// A CONCURRENT build-leader actively streaming segments keeps its tree fresh and is
-// therefore never reaped; the caller of this function has not yet started its own
-// build, so it has no live temp dir of its own to protect. Removal is best-effort
-// and per-dir: a permission error (a cross-user temp dir on a shared cacheDir) is
-// skipped, not fatal, so one undeletable dir never blocks reclaiming the others.
-//
-// A crash mid-adoptFlatShards can leave the only copy of the legacy flat shards
-// inside the reaped temp dir (they are MOVED, not copied, and the rollback never
-// ran); reaping it loses a CACHE that the next open rebuilds, never source data.
-// Returns the temp-dir names actually removed.
+// 2) ORPHANED READY-less committed generations — a g/<gensig>/ dir that carries
+// shards but NO READY sentinel. A normal build renames a fully-READY temp into place
+// atomically, so a committed dir can only lack READY when a prior GCGenerations'
+// os.RemoveAll partially FAILED: classically on Windows, where after READY and
+// readers/ were stripped the generation's still-mmap-locked shard files could not be
+// deleted, leaving shards with no READY. GCGenerations then skips it forever (it
+// requires READY) and the .building-* branch skips it (wrong prefix), so it leaks
+// permanently. SAFETY — the three gates below are what make deleting a cache dir here
+// safe, and a healthy build never lands in this branch: reap ONLY when there is no
+// READY (a healthy adopted generation is left untouched), no live reader (never yank
+// a generation a co-located serving process holds — consulted via readers/), AND the
+// whole tree is stale (belt-and-suspenders). On Windows an orphan whose shards are
+// still mmap-locked by a living holder simply fails os.RemoveAll again (the holder is
+// never yanked) and is cleared on a later pass once that holder exits.
 func ReapStaleBuildDirs(dir, cacheDir string) ([]string, error) {
 	cpath, err := cachePath(dir, cacheDir)
 	if err != nil {
@@ -550,25 +559,62 @@ func ReapStaleBuildDirs(dir, cacheDir string) ([]string, error) {
 	cutoff := time.Now().Add(-buildDirStaleAfter)
 	var removed []string
 	for _, e := range entries {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), buildTmpPrefix) {
+		if !e.IsDir() {
 			continue
 		}
-		tmpDir := filepath.Join(gensDir, e.Name())
-		if !buildDirStale(tmpDir, cutoff) {
-			continue // fresh — a live build may still be writing it; MUST NOT remove
-		}
-		if err := os.RemoveAll(tmpDir); err != nil {
-			if os.IsPermission(err) {
-				slog.Debug("reap: skipping build temp dir owned by another user", "dir", e.Name(), "error", err)
-			} else {
-				slog.Warn("reap: could not remove stale build temp dir", "dir", e.Name(), "error", err)
+		name := e.Name()
+		genPath := filepath.Join(gensDir, name)
+
+		if strings.HasPrefix(name, buildTmpPrefix) {
+			// (1) Abandoned mid-build temp dir. A fresh tree means a live build may
+			// still be writing it — MUST NOT remove.
+			if !buildDirStale(genPath, cutoff) {
+				continue
+			}
+			if removeReapable(genPath, name, "abandoned build temp dir") {
+				removed = append(removed, name)
 			}
 			continue
 		}
-		removed = append(removed, e.Name())
-		slog.Info("reap: removed abandoned build temp dir", "dir", e.Name())
+
+		// (2) Committed generation dir. Reap ONLY a stale, unheld orphan; any one of
+		// the three gates failing means it is NOT a safe target. Checked cheapest
+		// first: a single READY stat, then a readers/ scan, then a full-tree walk.
+		if generationReadyDir(genPath) {
+			continue // healthy adopted generation — MUST NOT remove
+		}
+		if generationHasLiveReader(genPath) {
+			continue // a live reader still holds it — MUST NOT remove
+		}
+		if !buildDirStale(genPath, cutoff) {
+			continue // fresh — belt-and-suspenders; never reap a just-touched dir
+		}
+		if removeReapable(genPath, name, "orphaned READY-less generation") {
+			removed = append(removed, name)
+		}
 	}
 	return removed, nil
+}
+
+// removeReapable os.RemoveAll's a single reclaimable dir (an abandoned .building-*
+// temp or an orphaned READY-less generation) best-effort and reports whether it was
+// removed. A permission error (a cross-user dir on a shared cacheDir) is logged at
+// Debug and any other error at Warn — never fatal, so one undeletable dir never
+// blocks reclaiming the rest. On Windows a partial failure (an orphan's shard files
+// still mmap-locked by a living holder) returns false and leaves the shrinking
+// remnant for a later pass once that holder exits; the holder's mapping is never
+// yanked because Windows refuses to delete files it still has open.
+func removeReapable(path, name, kind string) bool {
+	if err := os.RemoveAll(path); err != nil {
+		if os.IsPermission(err) {
+			slog.Debug("reap: skipping "+kind+" owned by another user", "dir", name, "error", err)
+		} else {
+			slog.Warn("reap: could not remove "+kind, "dir", name, "error", err)
+		}
+		return false
+	}
+	slog.Info("reap: removed "+kind, "dir", name)
+	return true
 }
 
 // buildDirStale reports whether EVERY entry in the temp build dir tree is older
@@ -712,6 +758,57 @@ func BuildGeneration(dir, cacheDir, gensig string) error {
 	}
 	committed = true
 	slog.Info("Built and adopted index generation", "gen", gensig, "dir", genDir)
+	return nil
+}
+
+// forceDropGeneration removes the immutable generation directory genDir to force a
+// COLD rebuild of gensig, but ONLY when no live reader currently holds it. It is the
+// single force-drop primitive shared by the legacy in-memory reindex
+// (reindexGeneration) and the concurrent serve reindex (ForceRebuildGeneration).
+//
+// The live-reader check is the core safety property: when a co-located process has
+// this generation memory-mapped (generationHasLiveReader), the drop is SKIPPED so
+// the holder's shard files are never yanked — on Windows an mmap-held file cannot be
+// deleted at all, and on unix deleting it would corrupt the holder's view. A skipped
+// (or failed) drop is deliberately non-fatal: the BuildGeneration call that follows
+// then no-ops on the still-READY gensig, so the existing generation simply keeps
+// serving. Forcing a genuine rebuild in that case requires stopping the other
+// servers on this dump first.
+func forceDropGeneration(genDir, gensig string) {
+	if generationHasLiveReader(genDir) {
+		slog.Warn("reindex: a live reader holds the current generation; serving the "+
+			"existing generation WITHOUT an in-place rebuild (stop other servers on this "+
+			"dump to force a full rebuild)", "gen", gensig)
+		return
+	}
+	if err := os.RemoveAll(genDir); err != nil {
+		slog.Warn("reindex: could not drop the current generation before rebuild; "+
+			"BuildGeneration will reuse it if still adoptable", "gen", gensig, "error", err)
+	}
+}
+
+// ForceRebuildGeneration forces a COLD rebuild of the immutable generation for
+// gensig and returns once a fresh generation is READY (or a live reader made the
+// drop a no-op — see below). It is the concurrent serve path's equivalent of the
+// legacy reindexGeneration force-rebuild: `serve --reindex` must rebuild even when
+// the dump content is unchanged (the operator is recovering a suspected-corrupt
+// cache), but a plain BuildGeneration is content-addressed and no-ops on an
+// already-READY gensig. This drops the current generation first (via
+// forceDropGeneration, which respects live readers) and then rebuilds it.
+//
+// Concurrency: when another co-located process is actively serving this exact
+// gensig, forceDropGeneration skips the drop and the subsequent BuildGeneration
+// no-ops, so the in-use generation is preserved and this caller serves it as-is
+// rather than yanking it from the other process.
+func ForceRebuildGeneration(dir, cacheDir, gensig string) error {
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		return fmt.Errorf("force-rebuild: no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
+	}
+	forceDropGeneration(generationDir(cpath, gensig), gensig)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		return fmt.Errorf("force-rebuild: building generation %q: %w", gensig, err)
+	}
 	return nil
 }
 

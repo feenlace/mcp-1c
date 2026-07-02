@@ -196,22 +196,33 @@ func main() {
 
 	go checkExtensionVersion(client)
 
+	// serveBuildCtx bounds any background generation build kicked off by
+	// openServeIndexLocal so a build still in flight when serving ends cannot wedge
+	// process exit. It is cancelled explicitly right after s.Run returns (and via the
+	// defer as a backstop) so the deferred dumpIndex.Close() does not block on it.
+	serveBuildCtx, serveBuildCancel := context.WithCancel(context.Background())
+	defer serveBuildCancel()
+
 	var dumpIndex *dump.Index
 	if *dumpDir != "" {
 		var err error
-		dumpIndex, err = dump.NewIndex(*dumpDir, *cacheDir, *reindex)
+		dumpIndex, err = openServeIndexLocal(serveBuildCtx, *dumpDir, *cacheDir, *reindex)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "loading dump from %s: %v\n", *dumpDir, err)
 			os.Exit(1)
 		}
 		defer dumpIndex.Close()
-		// Index builds in background. ModuleCount is available after Ready().
+		// Index prepares in the background. ModuleCount is available after Ready().
 	}
 
 	s := server.New(version, client, dumpIndex)
 
-	if err := s.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		fmt.Fprintf(os.Stderr, "mcp-1c error: %v\n", err)
+	runErr := s.Run(context.Background(), &mcp.StdioTransport{})
+	// Serving has ended: stop any background build now so it cannot wedge shutdown
+	// (the deferred dumpIndex.Close() waits on the index's Done()).
+	serveBuildCancel()
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "mcp-1c error: %v\n", runErr)
 		os.Exit(1)
 	}
 }

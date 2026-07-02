@@ -502,16 +502,10 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 
 	// Force-rebuild semantics: BuildGeneration is content-addressed and no-ops on an
 	// already-READY gensig, so to honor --reindex (e.g. recovering a corrupt cache)
-	// drop the current generation first — but ONLY if no live reader holds it.
-	// Never wipe a generation a concurrent serve has memory-mapped.
-	if generationHasLiveReader(genDir) {
-		slog.Warn("reindex: a live reader holds the current generation; serving the "+
-			"existing generation WITHOUT an in-place rebuild (stop other servers on this "+
-			"dump to force a full rebuild)", "gen", gensig)
-	} else if err := os.RemoveAll(genDir); err != nil {
-		slog.Warn("reindex: could not drop the current generation before rebuild; "+
-			"BuildGeneration will reuse it if still adoptable", "gen", gensig, "error", err)
-	}
+	// drop the current generation first — but ONLY if no live reader holds it (never
+	// wipe a generation a concurrent serve has memory-mapped). forceDropGeneration is
+	// the single force-drop primitive shared with the concurrent serve path.
+	forceDropGeneration(genDir, gensig)
 
 	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
 		return fmt.Errorf("reindex: building generation: %w", err)

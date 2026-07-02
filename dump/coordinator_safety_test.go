@@ -259,3 +259,125 @@ func TestReaderRegistry_LivenessReapsDeadEntry(t *testing.T) {
 	// Close is idempotent.
 	reg.Close()
 }
+
+// TestForceRebuildGeneration_RebuildsWhenNoLiveReader proves the serve-path fix for
+// `serve --reindex`: BuildGeneration is content-addressed and no-ops on an
+// already-READY gensig, so a plain rebuild of unchanged content does nothing.
+// ForceRebuildGeneration must instead force a COLD rebuild (drop then build) when no
+// live reader holds the generation, so an operator recovering a suspected-corrupt
+// cache actually gets a fresh build.
+func TestForceRebuildGeneration_RebuildsWhenNoLiveReader(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Проба/Ext/ObjectModule.bsl",
+		"Процедура Проба()\n\t// маркерПроба\nКонецПроцедуры\n")
+
+	gensig := mustGenSig(t, dir)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("BuildGeneration: %v", err)
+	}
+
+	// Plant a probe file INSIDE the current generation dir. A genuine cold rebuild
+	// drops the whole generation dir and rebuilds it (temp+rename), so the probe must
+	// be GONE afterwards; a no-op rebuild would leave it in place.
+	cpath, _ := cachePath(dir, cacheDir)
+	genDir := generationDir(cpath, gensig)
+	probe := filepath.Join(genDir, "rebuild-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+		t.Fatalf("plant probe: %v", err)
+	}
+
+	// No live reader holds the generation → ForceRebuildGeneration must drop+rebuild.
+	if err := ForceRebuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("ForceRebuildGeneration: %v", err)
+	}
+
+	if _, err := os.Stat(probe); !os.IsNotExist(err) {
+		t.Fatal("ForceRebuildGeneration did not cold-rebuild: the probe planted in the " +
+			"old generation dir survived, so the build no-oped instead of dropping+rebuilding")
+	}
+	if !GenerationReady(dir, cacheDir, gensig) {
+		t.Fatal("generation is not READY after ForceRebuildGeneration")
+	}
+
+	// The freshly rebuilt generation still serves the content read-only.
+	reader, err := OpenGenerationReadOnly(dir, cacheDir, gensig)
+	if err != nil {
+		t.Fatalf("open rebuilt reader: %v", err)
+	}
+	defer reader.Close()
+	<-reader.Done()
+	if err := reader.BuildError(); err != nil {
+		t.Fatalf("rebuilt reader build error: %v", err)
+	}
+	m, total, err := reader.Search(SearchParams{Query: "маркерПроба", Mode: SearchModeSmart, Limit: 10})
+	if err != nil || total == 0 || len(m) == 0 {
+		t.Fatalf("rebuilt generation lost content: total=%d err=%v", total, err)
+	}
+}
+
+// TestForceRebuildGeneration_SkipsDropWhenLiveReaderHolds is the serve-path
+// counterpart of TestReindex_DoesNotWipeLiveGeneration: when a co-located process is
+// actively serving this exact generation, ForceRebuildGeneration MUST NOT drop it
+// (on Windows the mmap-held shards cannot be deleted; on unix deleting them would
+// corrupt the holder's view). The drop is skipped, BuildGeneration no-ops on the
+// still-READY gensig, the call succeeds, and the held reader keeps answering.
+func TestForceRebuildGeneration_SkipsDropWhenLiveReaderHolds(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Держим/Ext/ObjectModule.bsl",
+		"Процедура Держим()\n\t// маркерДержим\nКонецПроцедуры\n")
+
+	gensig := mustGenSig(t, dir)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("BuildGeneration: %v", err)
+	}
+
+	// A live reader holds the current generation read-only (registers in readers/).
+	reader, err := OpenGenerationReadOnly(dir, cacheDir, gensig)
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	defer reader.Close()
+	<-reader.Done()
+	if err := reader.BuildError(); err != nil {
+		t.Fatalf("reader build error: %v", err)
+	}
+
+	cpath, _ := cachePath(dir, cacheDir)
+	genDir := generationDir(cpath, gensig)
+	readyPath := readySentinelPath(genDir)
+	before, err := os.Stat(readyPath)
+	if err != nil {
+		t.Fatalf("stat READY before: %v", err)
+	}
+	// A probe inside the held generation must SURVIVE (the drop is skipped).
+	probe := filepath.Join(genDir, "held-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+		t.Fatalf("plant probe: %v", err)
+	}
+
+	// Force-rebuild while the reader holds the generation: the drop is skipped and
+	// BuildGeneration no-ops, so this succeeds without touching the live generation.
+	if err := ForceRebuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("ForceRebuildGeneration errored while a reader held the gen: %v", err)
+	}
+
+	if _, err := os.Stat(probe); err != nil {
+		t.Fatal("ForceRebuildGeneration dropped a generation a live reader holds " +
+			"(probe gone) — it must never yank an in-use generation")
+	}
+	after, err := os.Stat(readyPath)
+	if err != nil {
+		t.Fatalf("stat READY after (generation was WIPED): %v", err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("ForceRebuildGeneration rewrote the live generation (READY mtime changed)")
+	}
+
+	// The held reader still answers from its untouched generation.
+	m, total, err := reader.Search(SearchParams{Query: "маркерДержим", Mode: SearchModeSmart, Limit: 10})
+	if err != nil || total == 0 || len(m) == 0 {
+		t.Fatalf("held reader lost content after force-rebuild: total=%d err=%v", total, err)
+	}
+}

@@ -925,3 +925,201 @@ func TestOpenForServe_MigratesAndServesFlatCacheReadOnly(t *testing.T) {
 		t.Fatalf("served generation search failed: total=%d err=%v", total, err)
 	}
 }
+
+// ageDirTree back-dates the mtime of every entry in root's tree to ts (children
+// first, though pure Chtimes never touches a parent's mtime), so buildDirStale — which
+// gates on the NEWEST mtime anywhere in the tree — treats the whole tree as stale.
+func ageDirTree(t *testing.T, root string, ts time.Time) {
+	t.Helper()
+	var paths []string
+	err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		paths = append(paths, p)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	for i := len(paths) - 1; i >= 0; i-- {
+		if err := os.Chtimes(paths[i], ts, ts); err != nil {
+			t.Fatalf("chtimes %s: %v", paths[i], err)
+		}
+	}
+}
+
+// TestReapStaleBuildDirs_ReapsOrphanReadylessGeneration reproduces the Windows
+// orphan-generation leak: a prior GCGenerations os.RemoveAll partially failed —
+// READY and readers/ were stripped but the mmap-locked shard files survived —
+// leaving a committed g/<gensig>/ dir with shards and NO READY. GCGenerations skips
+// it (it requires READY) and the .building-* branch skips it (wrong prefix), so it
+// leaks forever. The reaper must remove such a stale, unheld orphan.
+func TestReapStaleBuildDirs_ReapsOrphanReadylessGeneration(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Сирота/Ext/ObjectModule.bsl", "Процедура С()\nКонецПроцедуры\n")
+
+	gensig := mustGenSig(t, dir)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("BuildGeneration: %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	genDir := generationDir(cpath, gensig)
+
+	// Mimic the partial removal: strip READY (and readers/, absent after a bare
+	// build) but leave the shards, then age the whole tree past the staleness window.
+	if err := os.Remove(readySentinelPath(genDir)); err != nil {
+		t.Fatalf("strip READY: %v", err)
+	}
+	_ = os.RemoveAll(filepath.Join(genDir, readersDirName))
+	if dirs := cacheShardDirs(genDir); len(dirs) == 0 {
+		t.Fatal("precondition: orphan should still carry shard dirs")
+	}
+	if generationReadyDir(genDir) {
+		t.Fatal("precondition: orphan must have no READY")
+	}
+	ageDirTree(t, genDir, time.Now().Add(-2*buildDirStaleAfter))
+
+	// GCGenerations must NOT touch it (it requires READY) — this is the leak.
+	if _, err := GCGenerations(dir, cacheDir, ""); err != nil {
+		t.Fatalf("GCGenerations: %v", err)
+	}
+	if _, err := os.Stat(genDir); err != nil {
+		t.Fatalf("precondition: GCGenerations should leave the orphan (the leak): %v", err)
+	}
+
+	// The reaper removes exactly the orphan.
+	removed, err := ReapStaleBuildDirs(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("ReapStaleBuildDirs: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != gensig {
+		t.Fatalf("removed = %v, want only the orphan gensig %q", removed, gensig)
+	}
+	if _, err := os.Stat(genDir); !os.IsNotExist(err) {
+		t.Fatalf("orphan generation still present after reap: %v", err)
+	}
+}
+
+// TestReapStaleBuildDirs_KeepsReadylessGenerationWithLiveReader is the load-bearing
+// safety guard: a READY-less dir that a LIVE reader (a co-located serving process)
+// still holds MUST NOT be reaped — deleting it would yank the reader's mmap'd shards.
+// The live-reader gate is checked before the staleness gate, so it vetoes regardless.
+func TestReapStaleBuildDirs_KeepsReadylessGenerationWithLiveReader(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Держим2/Ext/ObjectModule.bsl", "Процедура Д()\nКонецПроцедуры\n")
+
+	gensig := mustGenSig(t, dir)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("BuildGeneration: %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	genDir := generationDir(cpath, gensig)
+
+	// A live reader holds the generation, then READY is stripped (it is now a
+	// READY-less dir a live reader still holds).
+	reg, err := registerReader(genDir)
+	if err != nil {
+		t.Fatalf("registerReader: %v", err)
+	}
+	defer reg.Close()
+	if err := os.Remove(readySentinelPath(genDir)); err != nil {
+		t.Fatalf("strip READY: %v", err)
+	}
+	if !generationHasLiveReader(genDir) {
+		t.Fatal("precondition: a freshly registered reader must be live")
+	}
+
+	removed, err := ReapStaleBuildDirs(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("ReapStaleBuildDirs: %v", err)
+	}
+	for _, r := range removed {
+		if r == gensig {
+			t.Fatal("reaped a READY-less generation a live reader holds — mmap would be yanked")
+		}
+	}
+	if _, err := os.Stat(genDir); err != nil {
+		t.Fatalf("held orphan generation was removed (must survive): %v", err)
+	}
+}
+
+// TestReapStaleBuildDirs_KeepsHealthyReadyGeneration proves the READY gate: a normal
+// adopted generation — even one whose whole tree is old — is never reaped, because
+// READY is present. Aging the tree removes the staleness gate as its protector, so
+// only the READY check stands between it and removal.
+func TestReapStaleBuildDirs_KeepsHealthyReadyGeneration(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Здоровый/Ext/ObjectModule.bsl", "Процедура З()\nКонецПроцедуры\n")
+
+	gensig := mustGenSig(t, dir)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("BuildGeneration: %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	genDir := generationDir(cpath, gensig)
+
+	ageDirTree(t, genDir, time.Now().Add(-2*buildDirStaleAfter))
+	if !generationReadyDir(genDir) {
+		t.Fatal("precondition: healthy generation must have READY")
+	}
+
+	removed, err := ReapStaleBuildDirs(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("ReapStaleBuildDirs: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("reaper removed a healthy READY generation: %v", removed)
+	}
+	if !GenerationReady(dir, cacheDir, gensig) {
+		t.Fatal("healthy READY generation was damaged/removed by the reaper")
+	}
+}
+
+// TestReapStaleBuildDirs_KeepsFreshReadylessGeneration proves the staleness gate
+// (belt-and-suspenders) for the orphan branch: a READY-less dir with no live reader
+// but a FRESH tree is left this pass — an orphan is only removed once its whole tree
+// has been quiet for buildDirStaleAfter.
+func TestReapStaleBuildDirs_KeepsFreshReadylessGeneration(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Свежий/Ext/ObjectModule.bsl", "Процедура Св()\nКонецПроцедуры\n")
+
+	gensig := mustGenSig(t, dir)
+	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+		t.Fatalf("BuildGeneration: %v", err)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	genDir := generationDir(cpath, gensig)
+
+	// READY-less, no reader, but the tree is FRESH (not aged) → staleness gate keeps it.
+	if err := os.Remove(readySentinelPath(genDir)); err != nil {
+		t.Fatalf("strip READY: %v", err)
+	}
+
+	removed, err := ReapStaleBuildDirs(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("ReapStaleBuildDirs: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("reaper removed a FRESH READY-less dir (staleness gate failed): %v", removed)
+	}
+	if _, err := os.Stat(genDir); err != nil {
+		t.Fatalf("fresh READY-less dir was removed (must survive this pass): %v", err)
+	}
+}
