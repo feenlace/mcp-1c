@@ -1,8 +1,14 @@
-# mcp-1c
+<p align="center">
+  <img src="docs/logo.svg" width="120" alt="mcp-1c">
+</p>
 
-[![SafeSkill 92/100](https://img.shields.io/badge/SafeSkill-92%2F100_Verified%20Safe-brightgreen)](https://safeskill.dev/scan/feenlace-mcp-1c)
+<h1 align="center">mcp-1c</h1>
 
-MCP-сервер для интеграции AI-ассистентов с 1С:Предприятие.
+<p align="center">MCP-сервер для интеграции AI-ассистентов с 1С:Предприятие</p>
+
+<p align="center">
+  <a href="https://safeskill.dev/scan/feenlace-mcp-1c"><img src="https://img.shields.io/badge/SafeSkill-92%2F100_Verified%20Safe-brightgreen" alt="SafeSkill 92/100"></a>
+</p>
 
 AI видит метаданные вашей конфигурации 1С и генерирует точный код на BSL. Работает с любым MCP-совместимым клиентом.
 
