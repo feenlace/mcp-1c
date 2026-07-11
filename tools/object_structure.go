@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/feenlace/mcp-1c/onec"
@@ -107,6 +108,10 @@ func formatObjectStructure(obj *onec.ObjectStructure) string {
 	}
 
 	if len(obj.Types) > 0 {
+		// Deterministic order: the platform's .Типы() iteration order is not
+		// guaranteed, so sort the composition in place for stable output (and a
+		// stable JSON types slice for any downstream consumer).
+		sort.Strings(obj.Types)
 		b.WriteString("## Состав типа\n")
 		for _, t := range obj.Types {
 			fmt.Fprintf(&b, "- %s\n", t)

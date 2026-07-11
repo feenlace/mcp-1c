@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -350,5 +351,159 @@ func TestObjectStructureTool_DefinedTypeSchema(t *testing.T) {
 	}
 	if strings.Contains(schema, `"enum"`) {
 		t.Errorf("object_type must remain free-text (no enum), schema:\n%s", schema)
+	}
+}
+
+// TestFormatObjectStructure_TypesSorted proves the DefinedType composition is
+// rendered in deterministic (Go-canonical sorted) order regardless of the order
+// the platform returns the types in, so tool output is stable across runs and
+// platform iteration order. Written red against the unsorted renderer.
+func TestFormatObjectStructure_TypesSorted(t *testing.T) {
+	// Deliberately unsorted input; none is a substring of another.
+	input := []string{"Число", "Булево", "Строка", "Дата"}
+
+	want := append([]string(nil), input...)
+	sort.Strings(want)
+
+	out := formatObjectStructure(&onec.ObjectStructure{
+		Name:    "ЗначениеДоступа",
+		Synonym: "Значение доступа",
+		Types:   input,
+	})
+
+	idx := strings.Index(out, "## Состав типа")
+	if idx < 0 {
+		t.Fatalf("expected composition block, got:\n%s", out)
+	}
+	block := out[idx:]
+
+	positions := make([]int, len(want))
+	for i, tp := range want {
+		p := strings.Index(block, tp)
+		if p < 0 {
+			t.Fatalf("type %q missing from composition block:\n%s", tp, block)
+		}
+		positions[i] = p
+	}
+	for i := 1; i < len(positions); i++ {
+		if positions[i-1] >= positions[i] {
+			t.Errorf("composition not in sorted order: %q (pos %d) must precede %q (pos %d)\nblock:\n%s",
+				want[i-1], positions[i-1], want[i], positions[i], block)
+		}
+	}
+}
+
+// TestFormatObjectStructure_TypesStable proves rendering is idempotent: the same
+// input yields byte-identical output on repeated calls (no map/iteration nondeterminism).
+func TestFormatObjectStructure_TypesStable(t *testing.T) {
+	mk := func() string {
+		return formatObjectStructure(&onec.ObjectStructure{
+			Name:    "ЗначениеДоступа",
+			Synonym: "Значение доступа",
+			Types:   []string{"СправочникСсылка.Пользователи", "Булево", "СправочникСсылка.ВнешниеПользователи"},
+		})
+	}
+	if a, b := mk(), mk(); a != b {
+		t.Errorf("output not stable across calls:\n--- first ---\n%s\n--- second ---\n%s", a, b)
+	}
+}
+
+// TestObjectStructureHandler_DefinedType_Primitive proves a composition mixing a
+// reference type with a primitive (Строка) renders both in the "## Состав типа"
+// markdown block.
+func TestObjectStructureHandler_DefinedType_Primitive(t *testing.T) {
+	const mockResponse = `{
+		"name": "ЛюбаяСсылкаИлиСтрока",
+		"synonym": "Любая ссылка или строка",
+		"types": ["СправочникСсылка.Номенклатура", "Строка"]
+	}`
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/object/DefinedType/ЛюбаяСсылкаИлиСтрока" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(mockResponse))
+	}))
+	defer mockServer.Close()
+
+	client := onec.NewClient(mockServer.URL, "", "")
+	handler := NewObjectStructureHandler(client)
+
+	args, _ := json.Marshal(map[string]string{
+		"object_type": "DefinedType",
+		"object_name": "ЛюбаяСсылкаИлиСтрока",
+	})
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "get_object_structure",
+			Arguments: args,
+		},
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tc := result.Content[0].(*mcp.TextContent)
+	idx := strings.Index(tc.Text, "## Состав типа")
+	if idx < 0 {
+		t.Fatalf("expected composition block, got:\n%s", tc.Text)
+	}
+	block := tc.Text[idx:]
+	for _, want := range []string{"СправочникСсылка.Номенклатура", "Строка"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("composition block missing %q, got:\n%s", want, block)
+		}
+	}
+}
+
+// TestObjectStructureHandler_DefinedType_Nested proves the Go rendering path
+// handles a composition that references another DefinedType without error and
+// renders the member string. Real platform .Типы() nested-expansion is not
+// asserted here (needs the real-1C gate).
+func TestObjectStructureHandler_DefinedType_Nested(t *testing.T) {
+	const mockResponse = `{
+		"name": "СоставнойЧерезОпределяемый",
+		"synonym": "Составной через определяемый тип",
+		"types": ["ОпределяемыйТип.ЗначениеДоступа", "СправочникСсылка.Организации"]
+	}`
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/object/DefinedType/СоставнойЧерезОпределяемый" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(mockResponse))
+	}))
+	defer mockServer.Close()
+
+	client := onec.NewClient(mockServer.URL, "", "")
+	handler := NewObjectStructureHandler(client)
+
+	args, _ := json.Marshal(map[string]string{
+		"object_type": "DefinedType",
+		"object_name": "СоставнойЧерезОпределяемый",
+	})
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "get_object_structure",
+			Arguments: args,
+		},
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tc := result.Content[0].(*mcp.TextContent)
+	for _, want := range []string{"ОпределяемыйТип.ЗначениеДоступа", "СправочникСсылка.Организации"} {
+		if !strings.Contains(tc.Text, want) {
+			t.Errorf("expected text to contain %q, got:\n%s", want, tc.Text)
+		}
 	}
 }

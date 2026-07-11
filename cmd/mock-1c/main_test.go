@@ -37,3 +37,61 @@ func TestHandleObject_DefinedType(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleObject_DefinedType_Primitive covers a DefinedType whose composition
+// mixes a reference type with a primitive (Строка): both must appear in "types".
+func TestHandleObject_DefinedType_Primitive(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/mcp/object/DefinedType/ЛюбаяСсылкаИлиСтрока", nil)
+	rec := httptest.NewRecorder()
+
+	handleObject(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var obj onec.ObjectStructure
+	if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, ty := range obj.Types {
+		got[ty] = true
+	}
+	for _, want := range []string{"СправочникСсылка.Номенклатура", "Строка"} {
+		if !got[want] {
+			t.Errorf("types %v missing %q", obj.Types, want)
+		}
+	}
+}
+
+// TestHandleObject_DefinedType_Nested covers a DefinedType whose composition
+// references another DefinedType. The offline fixture only proves the Go path
+// round-trips whatever "types" the platform returns without error; real nested
+// .Типы() expansion is a real-1C concern and is not asserted here.
+func TestHandleObject_DefinedType_Nested(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/mcp/object/DefinedType/СоставнойЧерезОпределяемый", nil)
+	rec := httptest.NewRecorder()
+
+	handleObject(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var obj onec.ObjectStructure
+	if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, ty := range obj.Types {
+		got[ty] = true
+	}
+	for _, want := range []string{"ОпределяемыйТип.ЗначениеДоступа", "СправочникСсылка.Организации"} {
+		if !got[want] {
+			t.Errorf("types %v missing %q", obj.Types, want)
+		}
+	}
+}
