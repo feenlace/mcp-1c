@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://safeskill.dev/scan/feenlace-mcp-1c"><img src="https://img.shields.io/badge/SafeSkill-92%2F100_Verified%20Safe-brightgreen" alt="SafeSkill 92/100"></a>
+  <a href="https://t.me/mcp_1c"><img src="https://img.shields.io/badge/Telegram-mcp__1c-229ED9?logo=telegram&logoColor=white" alt="Telegram"></a>
 </p>
 
 AI видит метаданные вашей конфигурации 1С и генерирует точный код на BSL. Работает с любым MCP-совместимым клиентом.
