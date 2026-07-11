@@ -208,8 +208,8 @@ func TestObjectStructureHandler_DefinedType(t *testing.T) {
 		"name": "ЗначениеДоступа",
 		"synonym": "Значение доступа",
 		"types": [
-			"СправочникСсылка.Пользователи",
-			"СправочникСсылка.ВнешниеПользователи"
+			"Справочник.Пользователи",
+			"Справочник.ВнешниеПользователи"
 		]
 	}`
 
@@ -247,8 +247,8 @@ func TestObjectStructureHandler_DefinedType(t *testing.T) {
 		"ЗначениеДоступа",
 		"Значение доступа",
 		"## Состав типа",
-		"СправочникСсылка.Пользователи",
-		"СправочникСсылка.ВнешниеПользователи",
+		"Справочник.Пользователи",
+		"Справочник.ВнешниеПользователи",
 	} {
 		if !strings.Contains(tc.Text, want) {
 			t.Errorf("expected text to contain %q, got:\n%s", want, tc.Text)
@@ -297,7 +297,7 @@ func TestFormatObjectStructure_TypesGuard(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"empty", []string{}, false},
-		{"one", []string{"СправочникСсылка.Пользователи"}, true},
+		{"one", []string{"Справочник.Пользователи"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -320,7 +320,7 @@ func TestFormatObjectStructure_DefinedTypeNoDash(t *testing.T) {
 	out := formatObjectStructure(&onec.ObjectStructure{
 		Name:    "ЗначениеДоступа",
 		Synonym: "Значение доступа",
-		Types:   []string{"СправочникСсылка.Пользователи", "СправочникСсылка.ВнешниеПользователи"},
+		Types:   []string{"Справочник.Пользователи", "Справочник.ВнешниеПользователи"},
 	})
 	idx := strings.Index(out, "## Состав типа")
 	if idx < 0 {
@@ -400,7 +400,7 @@ func TestFormatObjectStructure_TypesStable(t *testing.T) {
 		return formatObjectStructure(&onec.ObjectStructure{
 			Name:    "ЗначениеДоступа",
 			Synonym: "Значение доступа",
-			Types:   []string{"СправочникСсылка.Пользователи", "Булево", "СправочникСсылка.ВнешниеПользователи"},
+			Types:   []string{"Справочник.Пользователи", "Булево", "Справочник.ВнешниеПользователи"},
 		})
 	}
 	if a, b := mk(), mk(); a != b {
@@ -415,7 +415,7 @@ func TestObjectStructureHandler_DefinedType_Primitive(t *testing.T) {
 	const mockResponse = `{
 		"name": "ЛюбаяСсылкаИлиСтрока",
 		"synonym": "Любая ссылка или строка",
-		"types": ["СправочникСсылка.Номенклатура", "Строка"]
+		"types": ["Справочник.Номенклатура", "Строка"]
 	}`
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -453,7 +453,7 @@ func TestObjectStructureHandler_DefinedType_Primitive(t *testing.T) {
 		t.Fatalf("expected composition block, got:\n%s", tc.Text)
 	}
 	block := tc.Text[idx:]
-	for _, want := range []string{"СправочникСсылка.Номенклатура", "Строка"} {
+	for _, want := range []string{"Справочник.Номенклатура", "Строка"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("composition block missing %q, got:\n%s", want, block)
 		}
@@ -468,7 +468,7 @@ func TestObjectStructureHandler_DefinedType_Nested(t *testing.T) {
 	const mockResponse = `{
 		"name": "СоставнойЧерезОпределяемый",
 		"synonym": "Составной через определяемый тип",
-		"types": ["ОпределяемыйТип.ЗначениеДоступа", "СправочникСсылка.Организации"]
+		"types": ["ОпределяемыйТип.ЗначениеДоступа", "Справочник.Организации"]
 	}`
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -501,7 +501,7 @@ func TestObjectStructureHandler_DefinedType_Nested(t *testing.T) {
 	}
 
 	tc := result.Content[0].(*mcp.TextContent)
-	for _, want := range []string{"ОпределяемыйТип.ЗначениеДоступа", "СправочникСсылка.Организации"} {
+	for _, want := range []string{"ОпределяемыйТип.ЗначениеДоступа", "Справочник.Организации"} {
 		if !strings.Contains(tc.Text, want) {
 			t.Errorf("expected text to contain %q, got:\n%s", want, tc.Text)
 		}

@@ -70,7 +70,7 @@ func mock1CHandler() http.Handler {
 		"DefinedType/ЗначениеДоступа": {
 			Name:    "ЗначениеДоступа",
 			Synonym: "Значение доступа",
-			Types:   []string{"СправочникСсылка.Пользователи", "СправочникСсылка.ВнешниеПользователи"},
+			Types:   []string{"Справочник.Пользователи", "Справочник.ВнешниеПользователи"},
 		},
 	}
 
@@ -394,8 +394,8 @@ func TestIntegration_ObjectStructure_DefinedType(t *testing.T) {
 	for _, want := range []string{
 		"ЗначениеДоступа",
 		"Состав типа",
-		"СправочникСсылка.Пользователи",
-		"СправочникСсылка.ВнешниеПользователи",
+		"Справочник.Пользователи",
+		"Справочник.ВнешниеПользователи",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in response, got:\n%s", want, text)

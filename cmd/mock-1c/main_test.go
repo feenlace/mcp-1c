@@ -27,7 +27,7 @@ func TestHandleObject_DefinedType(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	want := []string{"СправочникСсылка.Пользователи", "СправочникСсылка.ВнешниеПользователи"}
+	want := []string{"Справочник.Пользователи", "Справочник.ВнешниеПользователи"}
 	if len(obj.Types) != len(want) {
 		t.Fatalf("Types = %v, want %v", obj.Types, want)
 	}
@@ -59,7 +59,7 @@ func TestHandleObject_DefinedType_Primitive(t *testing.T) {
 	for _, ty := range obj.Types {
 		got[ty] = true
 	}
-	for _, want := range []string{"СправочникСсылка.Номенклатура", "Строка"} {
+	for _, want := range []string{"Справочник.Номенклатура", "Строка"} {
 		if !got[want] {
 			t.Errorf("types %v missing %q", obj.Types, want)
 		}
@@ -89,7 +89,7 @@ func TestHandleObject_DefinedType_Nested(t *testing.T) {
 	for _, ty := range obj.Types {
 		got[ty] = true
 	}
-	for _, want := range []string{"ОпределяемыйТип.ЗначениеДоступа", "СправочникСсылка.Организации"} {
+	for _, want := range []string{"ОпределяемыйТип.ЗначениеДоступа", "Справочник.Организации"} {
 		if !got[want] {
 			t.Errorf("types %v missing %q", obj.Types, want)
 		}

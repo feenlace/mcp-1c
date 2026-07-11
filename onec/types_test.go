@@ -45,12 +45,12 @@ func TestObjectStructure_DecodeWithoutTypes(t *testing.T) {
 // TestObjectStructure_DecodeWithTypes proves the standard decoder populates Types
 // from a "types" key with no custom UnmarshalJSON.
 func TestObjectStructure_DecodeWithTypes(t *testing.T) {
-	const payload = `{"name":"ЗначениеДоступа","types":["СправочникСсылка.Пользователи","Строка"]}`
+	const payload = `{"name":"ЗначениеДоступа","types":["Справочник.Пользователи","Строка"]}`
 	var obj ObjectStructure
 	if err := json.Unmarshal([]byte(payload), &obj); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(obj.Types) != 2 || obj.Types[0] != "СправочникСсылка.Пользователи" || obj.Types[1] != "Строка" {
-		t.Errorf("Types = %v, want [СправочникСсылка.Пользователи Строка]", obj.Types)
+	if len(obj.Types) != 2 || obj.Types[0] != "Справочник.Пользователи" || obj.Types[1] != "Строка" {
+		t.Errorf("Types = %v, want [Справочник.Пользователи Строка]", obj.Types)
 	}
 }
