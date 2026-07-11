@@ -67,6 +67,11 @@ func mock1CHandler() http.Handler {
 				{Name: "Количество", Synonym: "Количество", Type: "Число"},
 			},
 		},
+		"DefinedType/ЗначениеДоступа": {
+			Name:    "ЗначениеДоступа",
+			Synonym: "Значение доступа",
+			Types:   []string{"СправочникСсылка.Пользователи", "СправочникСсылка.ВнешниеПользователи"},
+		},
 	}
 
 	mux := http.NewServeMux()
@@ -361,6 +366,37 @@ func TestIntegration_ObjectStructure_Register(t *testing.T) {
 
 	text := result.Content[0].(*mcp.TextContent).Text
 	for _, want := range []string{"ТоварыНаСкладах", "Измерения", "Номенклатура", "Склад", "Ресурсы", "Количество"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q in response, got:\n%s", want, text)
+		}
+	}
+}
+
+func TestIntegration_ObjectStructure_DefinedType(t *testing.T) {
+	session, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "get_object_structure",
+		Arguments: map[string]any{
+			"object_type": "DefinedType",
+			"object_name": "ЗначениеДоступа",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected non-empty content")
+	}
+
+	text := result.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{
+		"ЗначениеДоступа",
+		"Состав типа",
+		"СправочникСсылка.Пользователи",
+		"СправочникСсылка.ВнешниеПользователи",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in response, got:\n%s", want, text)
 		}
