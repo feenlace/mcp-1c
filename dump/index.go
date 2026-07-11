@@ -93,6 +93,47 @@ func readModuleContent(path string) (string, bool) {
 	return stripBOM(string(data)), true
 }
 
+// resolveReal returns the absolute, fully symlink-resolved form of p. It returns
+// ok=false when the path cannot be resolved (missing file, dangling symlink, or a
+// race), so callers fail closed rather than trusting an unresolved path.
+func resolveReal(p string) (string, bool) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", false
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", false
+	}
+	return real, true
+}
+
+// pathWithinRoot reports whether the file at path, with every symlink resolved,
+// lies inside root (also resolved). It mirrors the EvalSymlinks containment used
+// by the depgraph / compat dump-path validators: an in-root file — including an
+// in-root symlink whose target stays under root — is contained and served, while
+// a symlink whose real target escapes root is refused. Both sides are resolved so
+// a symlinked root (e.g. macOS /var -> /private/var) does not cause a false
+// mismatch. Anything that fails to resolve is treated as NOT contained.
+//
+// This guards against a malicious dump smuggling an outside host file in as a
+// .bsl symlink (e.g. CommonModules/X/Ext/Module.bsl -> /etc/passwd), which would
+// otherwise be read verbatim and exposed through search_code / GetContent.
+func pathWithinRoot(root, path string) bool {
+	rootReal, ok := resolveReal(root)
+	if !ok {
+		return false
+	}
+	pathReal, ok := resolveReal(path)
+	if !ok {
+		return false
+	}
+	if pathReal == rootReal {
+		return true
+	}
+	return strings.HasPrefix(pathReal, rootReal+string(filepath.Separator))
+}
+
 // Match represents a single search hit in a BSL module.
 type Match struct {
 	Module  string  // Human-readable module path (e.g. "Документ.РеализацияТоваров.МодульОбъекта")
@@ -316,6 +357,15 @@ func (idx *Index) GetContent(id string) (string, bool) {
 	path, hasPath := idx.pathByName[id]
 	idx.mu.RUnlock()
 	if !hasPath {
+		return "", false
+	}
+
+	// Refuse to read a path whose real location escapes the dump root — a symlink
+	// planted by a malicious dump pointing at an outside host file. In-root files
+	// and in-root symlinks resolve within root and are served as before. This is
+	// belt-and-suspenders with loadBSLPaths and the safety net for a path loaded
+	// from a manifest written by a pre-fix binary.
+	if !pathWithinRoot(idx.dir, path) {
 		return "", false
 	}
 
@@ -1107,6 +1157,16 @@ func (idx *Index) loadBSLPaths(dir string) error {
 		if d.IsDir() || !strings.HasSuffix(strings.ToLower(d.Name()), ".bsl") {
 			return nil
 		}
+		// Refuse a .bsl leaf that is a symlink escaping the dump root: following it
+		// would index an outside host file (arbitrary-file exfiltration through
+		// search_code / GetContent). WalkDir does not descend into symlinked
+		// directories, so only a symlinked leaf can escape; an in-root symlink
+		// (target under root) is kept and served. Mirrors the depgraph / compat
+		// EvalSymlinks containment. The symlink-type gate keeps the fast startup
+		// path allocation-free for the ordinary regular-file case.
+		if d.Type()&fs.ModeSymlink != 0 && !pathWithinRoot(dir, path) {
+			return nil
+		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return nil
@@ -1153,6 +1213,12 @@ func (idx *Index) contentForScan(name string) (string, bool) {
 	path, hasPath := idx.pathByName[name]
 	idx.mu.RUnlock()
 	if !hasPath {
+		return "", false
+	}
+
+	// Same dump-root containment as GetContent: never read a path that escapes
+	// the dump root via a symlink (regex / exact scan path).
+	if !pathWithinRoot(idx.dir, path) {
 		return "", false
 	}
 
@@ -1728,6 +1794,14 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	// Apply additions and modifications.
 	for _, relPath := range append(diff.Added, diff.Modified...) {
 		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
+		// Skip a changed .bsl whose real path escapes the dump root (a symlink
+		// planted by a malicious dump). Mirrors loadBSLPaths / GetContent and stops
+		// the incremental path from re-indexing an outside host file into the
+		// searchable shard + content cache on a warm re-open.
+		if !pathWithinRoot(idx.dir, absPath) {
+			slog.Warn("Skipping .bsl whose real path escapes the dump root", "path", relPath)
+			continue
+		}
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			slog.Warn("Cannot read file", "path", relPath, "error", err)
@@ -1890,6 +1964,14 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 	// Apply additions and modifications.
 	for _, relPath := range append(diff.Added, diff.Modified...) {
 		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
+		// Skip a changed .bsl whose real path escapes the dump root (a symlink
+		// planted by a malicious dump). Mirrors loadBSLPaths / GetContent and stops
+		// the incremental path from re-indexing an outside host file into the
+		// searchable shard + content cache on a warm re-open.
+		if !pathWithinRoot(idx.dir, absPath) {
+			slog.Warn("Skipping .bsl whose real path escapes the dump root", "path", relPath)
+			continue
+		}
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			slog.Warn("Cannot read file", "path", relPath, "error", err)
