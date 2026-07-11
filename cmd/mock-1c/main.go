@@ -67,15 +67,15 @@ var (
 		"РегистрыБухгалтерии": {
 			"Хозрасчетный",
 		},
-		"РегистрыРасчета":          {},
-		"ПланыСчетов":              {"Хозрасчетный"},
-		"ПланыВидовХарактеристик":  {"ВидыСубконтоХозрасчетные"},
-		"ПланыВидовРасчета":        {},
-		"ПланыОбмена":              {"ОбменБухгалтерия"},
-		"БизнесПроцессы":           {},
-		"Задачи":                   {},
-		"ЖурналыДокументов":        {"ЖурналОпераций"},
-		"Константы":                {"ВалютаРегламентированногоУчета", "ОсновнаяОрганизация"},
+		"РегистрыРасчета":         {},
+		"ПланыСчетов":             {"Хозрасчетный"},
+		"ПланыВидовХарактеристик": {"ВидыСубконтоХозрасчетные"},
+		"ПланыВидовРасчета":       {},
+		"ПланыОбмена":             {"ОбменБухгалтерия"},
+		"БизнесПроцессы":          {},
+		"Задачи":                  {},
+		"ЖурналыДокументов":       {"ЖурналОпераций"},
+		"Константы":               {"ВалютаРегламентированногоУчета", "ОсновнаяОрганизация"},
 		"ОбщиеМодули": {
 			"ОбщегоНазначения",
 			"ОбщегоНазначенияКлиентСервер",
@@ -172,8 +172,31 @@ var (
 			},
 			Attributes: []onec.Attribute{},
 		},
+		// Types are TECHNICAL metadata names as the extension now emits them for
+		// reference members: Метаданные.НайтиПоТипу(Тип).ПолноеИмя() -> "Справочник.X"
+		// (not the localized synonym Строка(Тип) used to yield). Primitives stay
+		// as Строка(Тип), e.g. "Строка"/"Число".
+		{typ: "DefinedType", name: "ЗначениеДоступа"}: {
+			Name:    "ЗначениеДоступа",
+			Synonym: "Значение доступа",
+			Types:   []string{"Справочник.Пользователи", "Справочник.ВнешниеПользователи"},
+		},
+		// Composition mixing a reference type with a primitive (Строка): community
+		// review coverage for issue #33 — primitives must render alongside refs.
+		{typ: "DefinedType", name: "ЛюбаяСсылкаИлиСтрока"}: {
+			Name:    "ЛюбаяСсылкаИлиСтрока",
+			Synonym: "Любая ссылка или строка",
+			Types:   []string{"Справочник.Номенклатура", "Строка"},
+		},
+		// Composition that references ANOTHER DefinedType. This offline fixture only
+		// exercises Go handling of whatever the "types" array contains; the real
+		// platform .Типы() nested-expansion behavior is out of scope (real-1C gate).
+		{typ: "DefinedType", name: "СоставнойЧерезОпределяемый"}: {
+			Name:    "СоставнойЧерезОпределяемый",
+			Synonym: "Составной через определяемый тип",
+			Types:   []string{"ОпределяемыйТип.ЗначениеДоступа", "Справочник.Организации"},
+		},
 	}
-
 )
 
 // isSelectQuery checks if a query starts with SELECT/ВЫБРАТЬ keyword.

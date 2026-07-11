@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/feenlace/mcp-1c/onec"
@@ -26,7 +27,7 @@ func ObjectStructureTool() *mcp.Tool {
 			"properties": {
 				"object_type": {
 					"type": "string",
-					"description": "Тип объекта метаданных: Catalog, Document, Enum, InformationRegister, AccumulationRegister, AccountingRegister, CalculationRegister, ChartOfAccounts, ChartOfCharacteristicTypes, ChartOfCalculationTypes, ExchangePlan, BusinessProcess, Task, DataProcessor, Report. Для Enum дополнительно возвращается поле values со списком значений перечисления. Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task."
+					"description": "Тип объекта метаданных: Catalog, Document, Enum, InformationRegister, AccumulationRegister, AccountingRegister, CalculationRegister, ChartOfAccounts, ChartOfCharacteristicTypes, ChartOfCalculationTypes, ExchangePlan, BusinessProcess, Task, DataProcessor, Report, DefinedType. Для Enum дополнительно возвращается поле values со списком значений перечисления. Для DefinedType возвращается поле types с составом типов. Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task, ОпределяемыеТипы->DefinedType."
 				},
 				"object_name": {
 					"type": "string",
@@ -102,6 +103,18 @@ func formatObjectStructure(obj *onec.ObjectStructure) string {
 				fmt.Fprintf(&b, " — %s", v.Comment)
 			}
 			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+
+	if len(obj.Types) > 0 {
+		// Deterministic order: the platform's .Типы() iteration order is not
+		// guaranteed, so sort the composition in place for stable output (and a
+		// stable JSON types slice for any downstream consumer).
+		sort.Strings(obj.Types)
+		b.WriteString("## Состав типа\n")
+		for _, t := range obj.Types {
+			fmt.Fprintf(&b, "- %s\n", t)
 		}
 		b.WriteByte('\n')
 	}

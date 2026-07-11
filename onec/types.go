@@ -9,6 +9,7 @@ type ObjectStructure struct {
 	Dimensions   []Attribute   `json:"dimensions,omitempty"`
 	Resources    []Attribute   `json:"resources,omitempty"`
 	Values       []EnumValue   `json:"values,omitempty"`
+	Types        []string      `json:"types,omitempty"` // состав ОпределяемогоТипа (DefinedType)
 }
 
 // Attribute represents a metadata object attribute.
