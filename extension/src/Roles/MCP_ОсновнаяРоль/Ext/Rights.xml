@@ -15,6 +15,13 @@
 		</right>
 	</object>
 	<object>
+		<name>HTTPService.MCPService.URLTemplate.Подсистемы</name>
+		<right>
+			<name>Use</name>
+			<value>true</value>
+		</right>
+	</object>
+	<object>
 		<name>HTTPService.MCPService.URLTemplate.Объект</name>
 		<right>
 			<name>Use</name>
@@ -72,6 +79,13 @@
 	</object>
 	<object>
 		<name>HTTPService.MCPService.URLTemplate.Метаданные.Method.GET</name>
+		<right>
+			<name>Use</name>
+			<value>true</value>
+		</right>
+	</object>
+	<object>
+		<name>HTTPService.MCPService.URLTemplate.Подсистемы.Method.GET</name>
 		<right>
 			<name>Use</name>
 			<value>true</value>
