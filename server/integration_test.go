@@ -19,23 +19,24 @@ import (
 // mock1CHandler simulates the 1C HTTP service endpoints.
 func mock1CHandler() http.Handler {
 	metadata := map[string][]string{
-		"Справочники":            {"Контрагенты", "Номенклатура"},
-		"Документы":              {"РеализацияТоваровУслуг"},
-		"Перечисления":           {"СтавкиНДС", "ВидыНоменклатуры"},
-		"Обработки":              {"ЗагрузкаДанныхИзФайла"},
-		"Отчеты":                 {"ОборотноСальдоваяВедомость"},
-		"РегистрыСведений":       {"КурсыВалют"},
-		"РегистрыНакопления":     {"ТоварыНаСкладах"},
-		"РегистрыБухгалтерии":    {},
-		"ПланыСчетов":            {"Хозрасчетный"},
+		"Справочники":             {"Контрагенты", "Номенклатура"},
+		"Документы":               {"РеализацияТоваровУслуг"},
+		"Перечисления":            {"СтавкиНДС", "ВидыНоменклатуры"},
+		"Обработки":               {"ЗагрузкаДанныхИзФайла"},
+		"Отчеты":                  {"ОборотноСальдоваяВедомость"},
+		"РегистрыСведений":        {"КурсыВалют"},
+		"РегистрыНакопления":      {"ТоварыНаСкладах"},
+		"РегистрыБухгалтерии":     {},
+		"ПланыСчетов":             {"Хозрасчетный"},
 		"ПланыВидовХарактеристик": {"ВидыСубконтоХозрасчетные"},
-		"ПланыОбмена":            {"ОбменБухгалтерия"},
-		"ЖурналыДокументов":      {"ЖурналОпераций"},
-		"Константы":              {"ОсновнаяОрганизация"},
-		"ОбщиеМодули":            {"ОбщийМодуль1"},
-		"Роли":                   {"Администратор", "Бухгалтер"},
-		"Подсистемы":             {"Бухгалтерия"},
-		"HTTPСервисы":            {"MCPService"},
+		"ОпределяемыеТипы":        {"ЗначениеДоступа"},
+		"ПланыОбмена":             {"ОбменБухгалтерия"},
+		"ЖурналыДокументов":       {"ЖурналОпераций"},
+		"Константы":               {"ОсновнаяОрганизация"},
+		"ОбщиеМодули":             {"ОбщийМодуль1"},
+		"Роли":                    {"Администратор", "Бухгалтер"},
+		"Подсистемы":              {"Бухгалтерия"},
+		"HTTPСервисы":             {"MCPService"},
 	}
 
 	objects := map[string]onec.ObjectStructure{
@@ -72,6 +73,60 @@ func mock1CHandler() http.Handler {
 			Synonym: "Значение доступа",
 			Types:   []string{"Справочник.Пользователи", "Справочник.ВнешниеПользователи"},
 		},
+		"Subsystem/Продажи": {
+			Name:    "Продажи",
+			Synonym: "Продажи",
+			Content: []string{"Справочник.Контрагенты", "Документ.РеализацияТоваровУслуг"},
+			Subsystems: []onec.SubsystemNode{
+				{
+					Name:     "Розница",
+					FullName: "Подсистема.Продажи.Подсистема.Розница",
+					Synonym:  "Розница",
+					Content:  []string{"Справочник.Склады"},
+					Subsystems: []onec.SubsystemNode{
+						{
+							Name:     "Касса",
+							FullName: "Подсистема.Продажи.Подсистема.Розница.Подсистема.Касса",
+							Synonym:  "Рабочее место кассира",
+							Content:  []string{"Документ.КассовыйОрдер"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Subsystem forest for the analyze_subsystems tool. Контрагенты sits in
+	// Продажи and its child Розница (same root); РеализацияТоваровУслуг sits in
+	// Продажи and Финансы (different roots, a cross-branch intersection);
+	// Номенклатура and КурсыВалют are applied but orphaned.
+	forest := onec.SubsystemForest{
+		Subsystems: []onec.SubsystemNode{
+			{
+				Name:     "Продажи",
+				FullName: "Подсистема.Продажи",
+				Content:  []string{"Справочник.Контрагенты", "Документ.РеализацияТоваровУслуг"},
+				Subsystems: []onec.SubsystemNode{
+					{
+						Name:     "Розница",
+						FullName: "Подсистема.Продажи.Подсистема.Розница",
+						Content:  []string{"Справочник.Контрагенты", "Справочник.Склады"},
+					},
+				},
+			},
+			{
+				Name:     "Финансы",
+				FullName: "Подсистема.Финансы",
+				Content:  []string{"Документ.РеализацияТоваровУслуг"},
+			},
+		},
+		AllObjects: []string{
+			"Справочник.Контрагенты",
+			"Справочник.Номенклатура",
+			"Справочник.Склады",
+			"Документ.РеализацияТоваровУслуг",
+			"РегистрСведений.КурсыВалют",
+		},
 	}
 
 	mux := http.NewServeMux()
@@ -79,6 +134,11 @@ func mock1CHandler() http.Handler {
 	mux.HandleFunc("/metadata", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(metadata)
+	})
+
+	mux.HandleFunc("/subsystems", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(forest)
 	})
 
 	mux.HandleFunc("/object/", func(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +324,7 @@ func TestIntegration_ListTools(t *testing.T) {
 		"get_metadata_tree", "get_object_structure", "execute_query",
 		"search_code", "get_form_structure", "validate_query",
 		"get_event_log", "get_configuration_info", "bsl_syntax_help",
+		"analyze_subsystems",
 	}
 	for _, want := range expected {
 		if !toolNames[want] {
@@ -298,6 +359,7 @@ func TestIntegration_MetadataTree(t *testing.T) {
 		"Регистры накопления", "Общие модули",
 		"Перечисления", "Планы счетов", "Роли",
 		"Подсистемы", "HTTP-сервисы", "Планы обмена", "Константы",
+		"Определяемые типы",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in summary, got:\n%s", want, text)
@@ -396,6 +458,41 @@ func TestIntegration_ObjectStructure_DefinedType(t *testing.T) {
 		"Состав типа",
 		"Справочник.Пользователи",
 		"Справочник.ВнешниеПользователи",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q in response, got:\n%s", want, text)
+		}
+	}
+}
+
+func TestIntegration_ObjectStructure_Subsystem(t *testing.T) {
+	session, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "get_object_structure",
+		Arguments: map[string]any{
+			"object_type": "Subsystem",
+			"object_name": "Продажи",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected non-empty content")
+	}
+
+	text := result.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{
+		"Продажи",
+		"## Состав",
+		"Справочник.Контрагенты",
+		"Документ.РеализацияТоваровУслуг",
+		"## Подсистемы",
+		"Розница",
+		"Касса",
+		"Документ.КассовыйОрдер",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in response, got:\n%s", want, text)
@@ -635,6 +732,68 @@ func TestIntegration_EventLog(t *testing.T) {
 	}
 }
 
+func TestIntegration_AnalyzeSubsystems(t *testing.T) {
+	session, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// orphans: applied objects in no subsystem.
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "analyze_subsystems",
+		Arguments: map[string]any{"action": "orphans"},
+	})
+	if err != nil {
+		t.Fatalf("orphans CallTool error: %v", err)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Объекты вне подсистем", "Справочник.Номенклатура", "РегистрСведений.КурсыВалют"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("orphans: expected %q, got:\n%s", want, text)
+		}
+	}
+
+	// containing: which subsystems hold РеализацияТоваровУслуг (short name).
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "analyze_subsystems",
+		Arguments: map[string]any{"action": "containing", "object": "РеализацияТоваровУслуг"},
+	})
+	if err != nil {
+		t.Fatalf("containing CallTool error: %v", err)
+	}
+	text = res.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Документ.РеализацияТоваровУслуг", "Продажи", "Финансы"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("containing: expected %q, got:\n%s", want, text)
+		}
+	}
+
+	// intersections cross-branch: only the object spanning distinct roots.
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "analyze_subsystems",
+		Arguments: map[string]any{"action": "intersections", "cross_branch_only": true},
+	})
+	if err != nil {
+		t.Fatalf("intersections CallTool error: %v", err)
+	}
+	text = res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "Документ.РеализацияТоваровУслуг") {
+		t.Errorf("intersections: expected РеализацияТоваровУслуг, got:\n%s", text)
+	}
+	if strings.Contains(text, "## Справочник.Контрагенты") {
+		t.Errorf("intersections cross-branch must exclude same-root Контрагенты, got:\n%s", text)
+	}
+
+	// unknown action returns a clean error.
+	_, err = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "analyze_subsystems",
+		Arguments: map[string]any{"action": "nope"},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown action")
+	}
+}
+
 func TestIntegration_ListPrompts(t *testing.T) {
 	session, cleanup := setupIntegration(t)
 	defer cleanup()
@@ -645,17 +804,17 @@ func TestIntegration_ListPrompts(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"review_module":            false,
-		"write_posting":            false,
-		"optimize_query":           false,
-		"explain_config":           false,
-		"analyze_error":            false,
-		"find_duplicates":          false,
-		"write_report":             false,
-		"explain_object":           false,
-		"1c_query_syntax":          false,
-		"1c_metadata_navigation":   false,
-		"1c_development_workflow":  false,
+		"review_module":           false,
+		"write_posting":           false,
+		"optimize_query":          false,
+		"explain_config":          false,
+		"analyze_error":           false,
+		"find_duplicates":         false,
+		"write_report":            false,
+		"explain_object":          false,
+		"1c_query_syntax":         false,
+		"1c_metadata_navigation":  false,
+		"1c_development_workflow": false,
 	}
 
 	for _, p := range result.Prompts {

@@ -34,6 +34,7 @@ var metadataCategories = []metadataCategory{
 	{"ПланыОбмена", "Планы обмена"},
 	{"БизнесПроцессы", "Бизнес-процессы"},
 	{"Задачи", "Задачи"},
+	{"ОпределяемыеТипы", "Определяемые типы"},
 	{"ЖурналыДокументов", "Журналы документов"},
 	{"Константы", "Константы"},
 	{"ОбщиеМодули", "Общие модули"},
@@ -50,8 +51,8 @@ var metadataCategories = []metadataCategory{
 // MetadataTool returns the MCP tool definition for get_metadata_tree.
 func MetadataTool() *mcp.Tool {
 	return &mcp.Tool{
-		Name:  "get_metadata_tree",
-		Title: "Дерево метаданных конфигурации",
+		Name:        "get_metadata_tree",
+		Title:       "Дерево метаданных конфигурации",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Список всех объектов конфигурации 1С по категориям: справочники, документы, регистры, перечисления, обработки и т.д. " +
 			"Без фильтра: сводка (категории и количество), с filter: полный перечень объектов категории. " +

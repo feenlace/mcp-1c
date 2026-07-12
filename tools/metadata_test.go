@@ -150,3 +150,40 @@ func TestFormatMetadataTree_Order(t *testing.T) {
 		t.Errorf("expected known categories before unknown ones, got:\n%s", result)
 	}
 }
+
+// TestFormatMetadataTree_DefinedTypes proves the ОпределяемыеТипы category renders
+// under its explicit display title (issue #33 fold-in: surface DefinedTypes in
+// the metadata tree instead of relying on the unknown-key fallback).
+func TestFormatMetadataTree_DefinedTypes(t *testing.T) {
+	tree := map[string][]string{
+		"ОпределяемыеТипы": {"ЗначениеДоступа", "СуммаДокумента"},
+	}
+
+	result := formatMetadataTree(tree)
+
+	if !strings.Contains(result, "## Определяемые типы") {
+		t.Errorf("expected 'Определяемые типы' section title, got:\n%s", result)
+	}
+	for _, want := range []string{"ЗначениеДоступа", "СуммаДокумента"} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, result)
+		}
+	}
+}
+
+// TestFormatMetadataSummary_DefinedTypes proves the summary view also lists the
+// ОпределяемыеТипы category with its filter key.
+func TestFormatMetadataSummary_DefinedTypes(t *testing.T) {
+	tree := map[string][]string{
+		"ОпределяемыеТипы": {"ЗначениеДоступа"},
+	}
+
+	result := formatMetadataSummary(tree)
+
+	if !strings.Contains(result, "Определяемые типы") {
+		t.Errorf("expected 'Определяемые типы' in summary, got:\n%s", result)
+	}
+	if !strings.Contains(result, `filter="ОпределяемыеТипы"`) {
+		t.Errorf("expected filter key ОпределяемыеТипы in summary, got:\n%s", result)
+	}
+}

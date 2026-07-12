@@ -44,6 +44,35 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
+			<URLTemplate uuid="b2f7c841-3a19-4c6d-9e52-7d18a4f0c3b6">
+				<Properties>
+					<Name>Подсистемы</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Подсистемы</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Template>/subsystems</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="c8a1e934-6b27-4d15-8f03-2e91b7d54a08">
+						<Properties>
+							<Name>GET</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>GET</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<HTTPMethod>GET</HTTPMethod>
+							<Handler>ПодсистемыGET</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
 			<URLTemplate uuid="d13eb4cf-e792-41e6-b13a-4ea40b45ea99">
 				<Properties>
 					<Name>Объект</Name>
