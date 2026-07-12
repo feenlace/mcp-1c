@@ -163,7 +163,7 @@ curl http://localhost/base/hs/mcp-1c/version
 curl http://localhost:8080/hs/mcp-1c/version
 ```
 
-Ожидаемый ответ: `{"version":"0.4.3"}`
+Ожидаемый ответ: `{"version":"0.4.4"}`
 
 ## Шаг 5. Настроить AI-клиент
 

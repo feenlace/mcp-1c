@@ -18,6 +18,13 @@ type ObjectStructure struct {
 	// name; the other fields are unset. Mirrors the all-matches contract used by
 	// analyze_subsystems action=containing.
 	Ambiguous []string `json:"ambiguous,omitempty"`
+	// Warnings carries non-fatal diagnostics from the 1C subsystem tree builder
+	// (get_object_structure, object_type=Subsystem): a subsystem whose Состав, full
+	// name or child recursion threw while being collected is truncated, and its
+	// name plus the error text are recorded here so a degraded (partial) membership
+	// view is visible to the caller instead of being silently trusted as complete.
+	// Mirrors SubsystemForest.Warnings.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // SubsystemNode represents one subsystem in a subsystem tree: its member

@@ -233,6 +233,18 @@ var (
 			Name:    "ПустаяПодсистема",
 			Synonym: "Пустая подсистема",
 		},
+		// Subsystem carrying non-fatal tree-builder warnings (BUG-3b): the offline
+		// fixture proves the warnings channel round-trips into onec.ObjectStructure so
+		// get_object_structure can surface a degraded (partial) membership view when
+		// the 1C tree builder truncated a subsystem's Состав or child recursion.
+		{typ: "Subsystem", name: "ПродажиСПредупреждениями"}: {
+			Name:    "ПродажиСПредупреждениями",
+			Synonym: "Продажи с предупреждениями",
+			Content: []string{"Документ.РеализацияТоваровУслуг"},
+			Warnings: []string{
+				"Подсистема Розница: Ошибка доступа к составу",
+			},
+		},
 	}
 
 	// subsystemForest backs GET /subsystems (issue #36 Phase 2-4). It exercises

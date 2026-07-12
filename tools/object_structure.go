@@ -80,6 +80,7 @@ func formatObjectStructure(obj *onec.ObjectStructure) string {
 	}
 
 	fmt.Fprintf(&b, "# %s (%s)\n\n", obj.Name, obj.Synonym)
+	writeObjectWarnings(&b, obj)
 
 	attrSections := []struct {
 		title string
@@ -153,6 +154,20 @@ func formatObjectStructure(obj *onec.ObjectStructure) string {
 	}
 
 	return b.String()
+}
+
+// writeObjectWarnings emits a short RU diagnostics line when the 1C subsystem
+// tree builder reported non-fatal warnings (a subsystem's Состав, full name or
+// child recursion threw while being collected and was truncated), so a degraded
+// or partial membership view is visible to the caller instead of being silently
+// trusted as complete. Mirrors analyze_subsystems.writeForestWarnings.
+// Customer-facing RU: no em/en dash.
+func writeObjectWarnings(b *strings.Builder, obj *onec.ObjectStructure) {
+	if len(obj.Warnings) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "> Диагностика: состав подсистемы неполный, предупреждений: %d. Причины: %s\n\n",
+		len(obj.Warnings), strings.Join(obj.Warnings, "; "))
 }
 
 // writeSubsystemTree renders a subsystem tree as an indented ASCII list. Each
