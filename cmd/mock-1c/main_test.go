@@ -242,3 +242,28 @@ func TestHandleObject_Subsystem_Empty(t *testing.T) {
 		t.Errorf("expected empty subsystem, got Content=%v Subsystems=%+v", obj.Content, obj.Subsystems)
 	}
 }
+
+// TestHandleObject_Subsystem_Warnings (BUG-3b) proves the offline fixture carrying
+// non-fatal subsystem tree-builder warnings round-trips its "warnings" channel
+// into onec.ObjectStructure with no live 1C involved.
+func TestHandleObject_Subsystem_Warnings(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/mcp/object/Subsystem/ПродажиСПредупреждениями", nil)
+	rec := httptest.NewRecorder()
+
+	handleObject(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var obj onec.ObjectStructure
+	if err := json.Unmarshal(rec.Body.Bytes(), &obj); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(obj.Warnings) == 0 {
+		t.Fatalf("expected warnings, got none")
+	}
+	if !strings.Contains(obj.Warnings[0], "Подсистема Розница") {
+		t.Errorf("unexpected warning: %q", obj.Warnings[0])
+	}
+}

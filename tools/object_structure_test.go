@@ -795,3 +795,136 @@ func TestObjectStructureTool_SubsystemSchema(t *testing.T) {
 		t.Errorf("object_type must remain free-text (no enum), schema:\n%s", schema)
 	}
 }
+
+// TestFormatObjectStructure_WarningsDiagnostics (BUG-3b) proves an object carrying
+// non-fatal subsystem tree-builder warnings surfaces a diagnostics line right
+// after the header so a truncated (partial) membership view is visible instead of
+// being silently trusted as complete.
+func TestFormatObjectStructure_WarningsDiagnostics(t *testing.T) {
+	out := formatObjectStructure(&onec.ObjectStructure{
+		Name:    "Продажи",
+		Synonym: "Продажи",
+		Content: []string{"Документ.РеализацияТоваровУслуг"},
+		Warnings: []string{
+			"Подсистема Розница: Ошибка доступа к составу",
+			"Подсистема Опт: Недоступно",
+		},
+	})
+	mustContain(t, out,
+		"Диагностика",
+		"предупреждений: 2",
+		"Подсистема Розница: Ошибка доступа к составу",
+		"Подсистема Опт: Недоступно",
+	)
+	// The diagnostics line is customer-facing RU: no em/en dash.
+	if strings.ContainsRune(out, '—') || strings.ContainsRune(out, '–') {
+		t.Errorf("warnings diagnostics contains em/en-dash, violates no-тире rule:\n%s", out)
+	}
+	// Surfaced prominently: the diagnostics line must precede the Состав block.
+	di := strings.Index(out, "Диагностика")
+	ci := strings.Index(out, "## Состав")
+	if di < 0 || (ci >= 0 && di > ci) {
+		t.Errorf("diagnostics must appear before the Состав block:\n%s", out)
+	}
+}
+
+// TestFormatObjectStructure_WarningsBackCompat proves the warnings channel is
+// strictly additive: an object with no warnings renders byte-identically whether
+// the field is nil or an explicitly empty slice, and never emits a diagnostics line.
+func TestFormatObjectStructure_WarningsBackCompat(t *testing.T) {
+	base := onec.ObjectStructure{
+		Name:    "Продажи",
+		Synonym: "Продажи",
+		Content: []string{"Документ.РеализацияТоваровУслуг"},
+		Subsystems: []onec.SubsystemNode{
+			{Name: "Розница", Synonym: "Розница", Content: []string{"Справочник.Кассы"}},
+		},
+	}
+	nilW := base
+	nilW.Warnings = nil
+	emptyW := base
+	emptyW.Warnings = []string{}
+
+	a := formatObjectStructure(&nilW)
+	b := formatObjectStructure(&emptyW)
+	if a != b {
+		t.Errorf("empty Warnings changed output.\n--- nil ---\n%q\n--- empty ---\n%q", a, b)
+	}
+	if strings.Contains(a, "Диагностика") {
+		t.Errorf("no-warnings output must not contain a diagnostics line:\n%s", a)
+	}
+}
+
+// TestObjectStructure_WarningsDecode proves the "warnings" JSON key round-trips
+// into ObjectStructure.Warnings, and that its absence decodes to a nil slice
+// (omitempty back-compat).
+func TestObjectStructure_WarningsDecode(t *testing.T) {
+	const withW = `{"name":"Продажи","synonym":"Продажи","attributes":[],"warnings":["Подсистема Розница: Недоступно"]}`
+	var a onec.ObjectStructure
+	if err := json.Unmarshal([]byte(withW), &a); err != nil {
+		t.Fatalf("decode with warnings: %v", err)
+	}
+	if len(a.Warnings) != 1 || a.Warnings[0] != "Подсистема Розница: Недоступно" {
+		t.Errorf("Warnings = %v, want one entry", a.Warnings)
+	}
+
+	const noW = `{"name":"Продажи","synonym":"Продажи","attributes":[]}`
+	var b onec.ObjectStructure
+	if err := json.Unmarshal([]byte(noW), &b); err != nil {
+		t.Fatalf("decode without warnings: %v", err)
+	}
+	if b.Warnings != nil {
+		t.Errorf("absent warnings must decode to nil, got %v", b.Warnings)
+	}
+}
+
+// TestObjectStructureHandler_SubsystemWarnings (BUG-3b) exercises the warnings
+// channel end to end: a Subsystem object whose JSON carries a "warnings" array
+// must render both the diagnostics line and the normal membership blocks.
+func TestObjectStructureHandler_SubsystemWarnings(t *testing.T) {
+	const mockResponse = `{
+		"name": "Продажи",
+		"synonym": "Продажи",
+		"content": ["Документ.РеализацияТоваровУслуг"],
+		"subsystems": [
+			{"name": "Розница", "fullName": "Подсистема.Продажи.Подсистема.Розница", "synonym": "Розница", "content": ["Справочник.Кассы"]}
+		],
+		"warnings": ["Подсистема Розница: Ошибка чтения состава"]
+	}`
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/object/Subsystem/Продажи" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(mockResponse))
+	}))
+	defer mockServer.Close()
+
+	client := onec.NewClient(mockServer.URL, "", "")
+	handler := NewObjectStructureHandler(client)
+
+	args, _ := json.Marshal(map[string]string{
+		"object_type": "Subsystem",
+		"object_name": "Продажи",
+	})
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "get_object_structure",
+			Arguments: args,
+		},
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tc := result.Content[0].(*mcp.TextContent)
+	mustContain(t, tc.Text,
+		"Диагностика",
+		"Подсистема Розница: Ошибка чтения состава",
+		"## Состав",
+		"Документ.РеализацияТоваровУслуг",
+	)
+}
