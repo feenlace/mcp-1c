@@ -2,14 +2,45 @@ package onec
 
 // ObjectStructure represents the structure of a 1C metadata object.
 type ObjectStructure struct {
-	Name         string        `json:"name"`
-	Synonym      string        `json:"synonym"`
-	Attributes   []Attribute   `json:"attributes"`
-	TabularParts []TabularPart `json:"tabularParts,omitempty"`
-	Dimensions   []Attribute   `json:"dimensions,omitempty"`
-	Resources    []Attribute   `json:"resources,omitempty"`
-	Values       []EnumValue   `json:"values,omitempty"`
-	Types        []string      `json:"types,omitempty"` // состав ОпределяемогоТипа (DefinedType)
+	Name         string          `json:"name"`
+	Synonym      string          `json:"synonym"`
+	Attributes   []Attribute     `json:"attributes"`
+	TabularParts []TabularPart   `json:"tabularParts,omitempty"`
+	Dimensions   []Attribute     `json:"dimensions,omitempty"`
+	Resources    []Attribute     `json:"resources,omitempty"`
+	Values       []EnumValue     `json:"values,omitempty"`
+	Types        []string        `json:"types,omitempty"`      // состав ОпределяемогоТипа (DefinedType)
+	Content      []string        `json:"content,omitempty"`    // Состав подсистемы (Subsystem): полные имена объектов
+	Subsystems   []SubsystemNode `json:"subsystems,omitempty"` // вложенные подсистемы (Subsystem)
+	// Ambiguous carries the full metadata names of every subsystem matching an
+	// ambiguous short Subsystem name (get_object_structure). When set, the server
+	// could not resolve a single subsystem and the caller must retry with a full
+	// name; the other fields are unset. Mirrors the all-matches contract used by
+	// analyze_subsystems action=containing.
+	Ambiguous []string `json:"ambiguous,omitempty"`
+}
+
+// SubsystemNode represents one subsystem in a subsystem tree: its member
+// composition (Content, full metadata names) and any nested child subsystems.
+type SubsystemNode struct {
+	Name       string          `json:"name"`
+	FullName   string          `json:"fullName"`
+	Synonym    string          `json:"synonym"`
+	Content    []string        `json:"content"`
+	Subsystems []SubsystemNode `json:"subsystems,omitempty"`
+}
+
+// SubsystemForest is the response from the /subsystems endpoint: the full tree
+// of root subsystems plus the flat list of all applied objects' full names.
+// It feeds the analyze_subsystems tool (orphans / containing / intersections).
+type SubsystemForest struct {
+	Subsystems []SubsystemNode `json:"subsystems"`
+	AllObjects []string        `json:"allObjects"`
+	// Warnings carries non-fatal diagnostics from the 1C universe builder: an
+	// applied collection that threw while being enumerated is skipped, and its
+	// name plus the error text are recorded here so a degraded (partial) universe
+	// is visible to the caller instead of being silently trusted as complete.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Attribute represents a metadata object attribute.

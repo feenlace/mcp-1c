@@ -36,6 +36,7 @@ func New(version string, onecClient *onec.Client, dumpIndex *dump.Index) *mcp.Se
 	s.AddTool(tools.ValidateQueryTool(), tools.NewValidateQueryHandler(onecClient))
 	s.AddTool(tools.EventLogTool(), tools.NewEventLogHandler(onecClient))
 	s.AddTool(tools.ConfigurationInfoTool(), tools.NewConfigurationInfoHandler(onecClient))
+	s.AddTool(tools.AnalyzeSubsystemsTool(), tools.NewAnalyzeSubsystemsHandler(onecClient))
 	tools.RegisterBSLHelp(s)
 	prompts.RegisterAll(s)
 	return s

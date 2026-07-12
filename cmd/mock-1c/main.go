@@ -74,6 +74,7 @@ var (
 		"ПланыОбмена":             {"ОбменБухгалтерия"},
 		"БизнесПроцессы":          {},
 		"Задачи":                  {},
+		"ОпределяемыеТипы":        {"ЗначениеДоступа", "ЛюбаяСсылкаИлиСтрока", "СоставнойЧерезОпределяемый"},
 		"ЖурналыДокументов":       {"ЖурналОпераций"},
 		"Константы":               {"ВалютаРегламентированногоУчета", "ОсновнаяОрганизация"},
 		"ОбщиеМодули": {
@@ -196,6 +197,100 @@ var (
 			Synonym: "Составной через определяемый тип",
 			Types:   []string{"ОпределяемыйТип.ЗначениеДоступа", "Справочник.Организации"},
 		},
+		// Subsystem structure (issue #36 Phase 1). content = direct members
+		// (full metadata names); subsystems = nested child tree (>=2 levels here
+		// via Розница -> Касса) so the renderer's indentation path is exercised.
+		{typ: "Subsystem", name: "Продажи"}: {
+			Name:    "Продажи",
+			Synonym: "Продажи",
+			Content: []string{"Справочник.Контрагенты", "Документ.РеализацияТоваровУслуг"},
+			Subsystems: []onec.SubsystemNode{
+				{
+					Name:     "Розница",
+					FullName: "Подсистема.Продажи.Подсистема.Розница",
+					Synonym:  "Розница",
+					Content:  []string{"Справочник.Склады"},
+					Subsystems: []onec.SubsystemNode{
+						{
+							Name:     "Касса",
+							FullName: "Подсистема.Продажи.Подсистема.Розница.Подсистема.Касса",
+							Synonym:  "Рабочее место кассира",
+							Content:  []string{"Документ.КассовыйОрдер"},
+						},
+					},
+				},
+				{
+					Name:     "Опт",
+					FullName: "Подсистема.Продажи.Подсистема.Опт",
+					Synonym:  "Оптовые продажи",
+					Content:  []string{"Документ.СчетНаОплатуПокупателю"},
+				},
+			},
+		},
+		// Empty subsystem: no members, no children -> renders neither the
+		// "## Состав" nor the "## Подсистемы" block (edge-case coverage).
+		{typ: "Subsystem", name: "ПустаяПодсистема"}: {
+			Name:    "ПустаяПодсистема",
+			Synonym: "Пустая подсистема",
+		},
+	}
+
+	// subsystemForest backs GET /subsystems (issue #36 Phase 2-4). It exercises
+	// every analyze_subsystems computation and edge case with no live 1C:
+	//   - Справочник.Контрагенты: in Продажи AND Продажи>Розница (same root)
+	//   - Документ.РеализацияТоваровУслуг: in Продажи AND Финансы (different roots)
+	//   - Справочник.Организации, Справочник.Валюты, РегистрСведений.КурсыВалют,
+	//     РегистрНакопления.ТоварыНаСкладах: applied but in no subsystem (orphans)
+	//   - Справочник.НоменклатураПрисоединенныеФайлы: orphaned noise (filtered out)
+	subsystemForest = onec.SubsystemForest{
+		Subsystems: []onec.SubsystemNode{
+			{
+				Name:     "Продажи",
+				FullName: "Подсистема.Продажи",
+				Synonym:  "Продажи",
+				Content:  []string{"Справочник.Контрагенты", "Справочник.Номенклатура", "Документ.РеализацияТоваровУслуг"},
+				Subsystems: []onec.SubsystemNode{
+					{
+						Name:     "Розница",
+						FullName: "Подсистема.Продажи.Подсистема.Розница",
+						Synonym:  "Розница",
+						Content:  []string{"Справочник.Контрагенты", "Справочник.Склады"},
+					},
+					{
+						Name:     "Опт",
+						FullName: "Подсистема.Продажи.Подсистема.Опт",
+						Synonym:  "Оптовые продажи",
+						Content:  []string{"Документ.СчетНаОплатуПокупателю"},
+					},
+				},
+			},
+			{
+				Name:     "Закупки",
+				FullName: "Подсистема.Закупки",
+				Synonym:  "Закупки",
+				Content:  []string{"Документ.ПоступлениеТоваровУслуг"},
+			},
+			{
+				Name:     "Финансы",
+				FullName: "Подсистема.Финансы",
+				Synonym:  "Финансы",
+				Content:  []string{"Документ.РеализацияТоваровУслуг", "Документ.ПлатежноеПоручение"},
+			},
+		},
+		AllObjects: []string{
+			"Справочник.Контрагенты",
+			"Справочник.Номенклатура",
+			"Справочник.Организации",
+			"Справочник.Склады",
+			"Справочник.Валюты",
+			"Документ.РеализацияТоваровУслуг",
+			"Документ.ПоступлениеТоваровУслуг",
+			"Документ.СчетНаОплатуПокупателю",
+			"Документ.ПлатежноеПоручение",
+			"РегистрСведений.КурсыВалют",
+			"РегистрНакопления.ТоварыНаСкладах",
+			"Справочник.НоменклатураПрисоединенныеФайлы",
+		},
 	}
 )
 
@@ -217,6 +312,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func handleMetadata(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s", r.Method, r.URL.Path)
 	writeJSON(w, http.StatusOK, metadata)
+}
+
+func handleSubsystems(w http.ResponseWriter, r *http.Request) {
+	log.Printf("%s %s", r.Method, r.URL.Path)
+	writeJSON(w, http.StatusOK, subsystemForest)
 }
 
 func handleObject(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +514,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp/metadata", handleMetadata)
+	mux.HandleFunc("/mcp/subsystems", handleSubsystems)
 	mux.HandleFunc("/mcp/object/", handleObject)
 	mux.HandleFunc("/mcp/query", handleQuery)
 

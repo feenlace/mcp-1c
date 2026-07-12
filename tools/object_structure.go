@@ -27,7 +27,7 @@ func ObjectStructureTool() *mcp.Tool {
 			"properties": {
 				"object_type": {
 					"type": "string",
-					"description": "Тип объекта метаданных: Catalog, Document, Enum, InformationRegister, AccumulationRegister, AccountingRegister, CalculationRegister, ChartOfAccounts, ChartOfCharacteristicTypes, ChartOfCalculationTypes, ExchangePlan, BusinessProcess, Task, DataProcessor, Report, DefinedType. Для Enum дополнительно возвращается поле values со списком значений перечисления. Для DefinedType возвращается поле types с составом типов. Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task, ОпределяемыеТипы->DefinedType."
+					"description": "Тип объекта метаданных: Catalog, Document, Enum, InformationRegister, AccumulationRegister, AccountingRegister, CalculationRegister, ChartOfAccounts, ChartOfCharacteristicTypes, ChartOfCalculationTypes, ExchangePlan, BusinessProcess, Task, DataProcessor, Report, DefinedType, Subsystem. Для Enum дополнительно возвращается поле values со списком значений перечисления. Для DefinedType возвращается поле types с составом типов. Для Subsystem возвращаются поля content (состав подсистемы) и subsystems (дерево вложенных подсистем). Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task, ОпределяемыеТипы->DefinedType, Подсистемы->Subsystem."
 				},
 				"object_name": {
 					"type": "string",
@@ -63,6 +63,21 @@ func NewObjectStructureHandler(client *onec.Client) mcp.ToolHandler {
 // formatObjectStructure formats the object structure as markdown text.
 func formatObjectStructure(obj *onec.ObjectStructure) string {
 	var b strings.Builder
+
+	// Ambiguity signal (Subsystem short name matched more than one subsystem): the
+	// server could not resolve a single object and returned the full-name
+	// candidates instead. Surface them as a clear RU signal so the caller can
+	// retry with a unique full name. Customer-facing RU: no em/en dash.
+	if len(obj.Ambiguous) > 0 {
+		names := append([]string(nil), obj.Ambiguous...)
+		sort.Strings(names)
+		fmt.Fprintf(&b, "# Неоднозначное имя подсистемы (%d)\n\n", len(names))
+		b.WriteString("Короткому имени соответствует несколько подсистем. Уточните запрос, указав полное имя:\n")
+		for _, n := range names {
+			fmt.Fprintf(&b, "- %s\n", n)
+		}
+		return b.String()
+	}
 
 	fmt.Fprintf(&b, "# %s (%s)\n\n", obj.Name, obj.Synonym)
 
@@ -119,5 +134,58 @@ func formatObjectStructure(obj *onec.ObjectStructure) string {
 		b.WriteByte('\n')
 	}
 
+	// Subsystem (object_type="Subsystem"): direct member composition. Sorted in
+	// place for stable output, ASCII list markers only (no тире).
+	if len(obj.Content) > 0 {
+		sort.Strings(obj.Content)
+		b.WriteString("## Состав\n")
+		for _, c := range obj.Content {
+			fmt.Fprintf(&b, "- %s\n", c)
+		}
+		b.WriteByte('\n')
+	}
+
+	// Subsystem child tree, rendered recursively with per-depth indentation.
+	if len(obj.Subsystems) > 0 {
+		b.WriteString("## Подсистемы\n")
+		writeSubsystemTree(&b, obj.Subsystems, 0)
+		b.WriteByte('\n')
+	}
+
 	return b.String()
+}
+
+// writeSubsystemTree renders a subsystem tree as an indented ASCII list. Each
+// node header is bold; its member composition and child subsystems are indented
+// one level deeper. Nodes and their Состав are sorted for deterministic output
+// (intentional UTF-8 byte-order sort, not linguistic collation: the output is
+// machine-consumed and must be stable across runs and platforms). Each node's
+// full metadata name is surfaced in brackets when present, because it is the
+// only unique key when two nested subsystems share a short name under different
+// roots. No em/en-dash is emitted (no-тире rule).
+func writeSubsystemTree(b *strings.Builder, nodes []onec.SubsystemNode, depth int) {
+	sorted := append([]onec.SubsystemNode(nil), nodes...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	indent := strings.Repeat("  ", depth)
+	for _, n := range sorted {
+		line := fmt.Sprintf("%s- **%s**", indent, n.Name)
+		if n.Synonym != "" {
+			line += fmt.Sprintf(" (%s)", n.Synonym)
+		}
+		if n.FullName != "" {
+			line += fmt.Sprintf(" [%s]", n.FullName)
+		}
+		fmt.Fprintf(b, "%s\n", line)
+
+		content := append([]string(nil), n.Content...)
+		sort.Strings(content)
+		for _, c := range content {
+			fmt.Fprintf(b, "%s  - %s\n", indent, c)
+		}
+
+		if len(n.Subsystems) > 0 {
+			writeSubsystemTree(b, n.Subsystems, depth+1)
+		}
+	}
 }
