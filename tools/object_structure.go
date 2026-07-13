@@ -103,6 +103,11 @@ func formatObjectStructure(obj *onec.ObjectStructure) string {
 		for _, n := range names {
 			fmt.Fprintf(&b, "- %s\n", n)
 		}
+		// A partial parse (a dropped subsystem) can coincide with an ambiguous short
+		// name; render the diagnostics here too so the drop warning is not lost on
+		// this early return. Without this, the ambiguity page silently swallows the
+		// warning the non-ambiguous path below reports.
+		writeObjectWarnings(&b, obj)
 		return b.String()
 	}
 
