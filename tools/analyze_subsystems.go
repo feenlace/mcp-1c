@@ -60,8 +60,25 @@ type analyzeSubsystemsInput struct {
 }
 
 // NewAnalyzeSubsystemsHandler returns a ToolHandler that fetches the subsystem
-// forest from 1C once and runs the requested topology analysis on it.
+// forest from the live 1C extension over /subsystems and runs the requested
+// topology analysis on it. It is exactly the live-only case of
+// NewAnalyzeSubsystemsHandlerWithSource: NewAnalyzeSubsystemsHandler(client) ==
+// NewAnalyzeSubsystemsHandlerWithSource(client, nil).
 func NewAnalyzeSubsystemsHandler(client *onec.Client) mcp.ToolHandler {
+	return NewAnalyzeSubsystemsHandlerWithSource(client, nil)
+}
+
+// NewAnalyzeSubsystemsHandlerWithSource returns a ToolHandler that runs the
+// topology analysis on a subsystem forest obtained either from an offline source
+// or from the live 1C extension.
+//
+// When src is non-nil the forest comes from src(ctx) and the 1C client is never
+// contacted (offline path; a source error is surfaced verbatim). When src is nil
+// the forest is fetched over HTTP with client.Get(ctx, "/subsystems", ...) and
+// the behaviour is byte-for-byte identical to the legacy live path. Validation,
+// analysis and formatting are shared, so a source and the live extension that
+// yield the same forest yield identical output.
+func NewAnalyzeSubsystemsHandlerWithSource(client *onec.Client, src onec.SubsystemForestFunc) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input analyzeSubsystemsInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
@@ -84,8 +101,16 @@ func NewAnalyzeSubsystemsHandler(client *onec.Client) mcp.ToolHandler {
 		}
 
 		var forest onec.SubsystemForest
-		if err := client.Get(ctx, "/subsystems", &forest); err != nil {
-			return nil, fmt.Errorf("fetching subsystems from 1C: %w", err)
+		if src != nil {
+			f, err := src(ctx)
+			if err != nil {
+				return nil, err
+			}
+			forest = f
+		} else {
+			if err := client.Get(ctx, "/subsystems", &forest); err != nil {
+				return nil, fmt.Errorf("fetching subsystems from 1C: %w", err)
+			}
 		}
 
 		switch action {

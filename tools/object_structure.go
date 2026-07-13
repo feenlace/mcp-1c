@@ -39,8 +39,25 @@ func ObjectStructureTool() *mcp.Tool {
 	}
 }
 
-// NewObjectStructureHandler returns a ToolHandler that fetches object structure from 1C.
+// NewObjectStructureHandler returns a ToolHandler that fetches object structure
+// from the live 1C extension. It is exactly the live-only case of
+// NewObjectStructureHandlerWithSource: NewObjectStructureHandler(client) ==
+// NewObjectStructureHandlerWithSource(client, nil).
 func NewObjectStructureHandler(client *onec.Client) mcp.ToolHandler {
+	return NewObjectStructureHandlerWithSource(client, nil)
+}
+
+// NewObjectStructureHandlerWithSource returns a ToolHandler that can serve some
+// object types from an offline source and the rest from the live 1C extension.
+//
+// When sub is non-nil it is consulted first with the requested (objectType,
+// objectName): if it reports handled==true, its result is used verbatim (offline
+// path, no HTTP; a source error is surfaced verbatim), which lets a single type
+// (e.g. Subsystem) be served from an offline dump; if it reports handled==false,
+// the handler falls through to the live request. When sub is nil, every type is
+// fetched over HTTP with client.Get(ctx, "/object/<type>/<name>", ...),
+// byte-for-byte identical to the legacy live path.
+func NewObjectStructureHandlerWithSource(client *onec.Client, sub onec.SubsystemStructFunc) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input objectInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
@@ -48,6 +65,16 @@ func NewObjectStructureHandler(client *onec.Client) mcp.ToolHandler {
 		}
 		if input.ObjectType == "" || input.ObjectName == "" {
 			return nil, fmt.Errorf("object_type and object_name are required")
+		}
+
+		if sub != nil {
+			obj, handled, err := sub(ctx, input.ObjectType, input.ObjectName)
+			if handled {
+				if err != nil {
+					return nil, err
+				}
+				return textResult(formatObjectStructure(&obj)), nil
+			}
 		}
 
 		endpoint := fmt.Sprintf("/object/%s/%s", input.ObjectType, input.ObjectName)
