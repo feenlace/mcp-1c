@@ -11,12 +11,17 @@ import (
 // safeJoin constructs an absolute path by joining segments onto dumpRoot and
 // verifies the result cannot escape the root directory, guarding both classic
 // ".." path traversal (lexical check) and symlink escape (a crafted symlink whose
-// real target leaves the dump). It is the single containment primitive the offline
-// subsystem walker uses before opening any file under a dump.
+// real target leaves the dump). It is the FIRST containment check the offline
+// subsystem walker runs before opening any file under a dump.
 //
-// A path that does not exist yet is tolerated (ErrNotExist): a path that is never
-// opened cannot escape through a symlink, and the lexical check already enforces
-// containment for the name itself. Pure stdlib.
+// A path that does not exist yet is tolerated (ErrNotExist): safeJoin performs only
+// the lexical + resolved-symlink containment check and does not itself open
+// anything, and for an absent path there is no symlink target to resolve. Because
+// the caller DOES open the returned path, and a dangling symlink whose target is
+// created in the check->use window would otherwise slip through, safeJoin is not
+// sufficient on its own: the caller additionally lstat-rejects a non-regular or
+// symlinked final component before opening and os.SameFile-verifies the descriptor
+// after opening (see subsystemWalker.openSubsystemFile). Pure stdlib.
 func safeJoin(dumpRoot string, segments ...string) (string, error) {
 	rootAbs, err := filepath.Abs(filepath.Clean(dumpRoot))
 	if err != nil {
@@ -45,8 +50,11 @@ func safeJoin(dumpRoot string, segments ...string) (string, error) {
 
 // symlinkWithinRoot verifies abs does not escape rootAbs once symbolic links are
 // resolved. Both sides are resolved so a symlinked root (e.g. macOS
-// /var -> /private/var) compares correctly. ErrNotExist is tolerated: there is
-// nothing to open, and the caller's lexical check already enforced containment.
+// /var -> /private/var) compares correctly. ErrNotExist is tolerated so a
+// not-yet-created in-root path still validates; because a dangling symlink's target
+// could be created before the caller opens the path, the caller guards the open
+// itself (lstat + IsRegular before, os.SameFile after) rather than relying on this
+// check alone.
 func symlinkWithinRoot(rootAbs, abs string) error {
 	realRoot, err := filepath.EvalSymlinks(rootAbs)
 	if err != nil {

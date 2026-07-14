@@ -378,11 +378,23 @@ func (w *subsystemWalker) openSubsystemFile(name, filePath string) (*os.File, bo
 		w.warn(name, "файл подсистемы не является обычным файлом и пропущен")
 		return nil, false
 	}
-	f, ferr := os.Open(filePath)
+	f, ferr := openSubsystemFileFinal(filePath)
 	if ferr != nil {
 		if !os.IsNotExist(ferr) {
 			w.warn(name, "не удалось открыть файл подсистемы")
 		}
+		return nil, false
+	}
+	// Close the check->use (TOCTOU) window: the descriptor just opened must be the
+	// very file lstat saw as a regular file. If the final component was swapped
+	// between the lstat and the open (e.g. for a symlink now resolving outside the
+	// dump, or a FIFO), os.SameFile is false and the file is refused. On unix
+	// openSubsystemFileFinal also opens with O_NOFOLLOW|O_NONBLOCK so a swapped-in
+	// symlink fails the open outright and a swapped-in FIFO cannot block it.
+	fi, serr := f.Stat()
+	if serr != nil || !os.SameFile(li, fi) {
+		_ = f.Close()
+		w.warn(name, "файл подсистемы изменился во время чтения и пропущен")
 		return nil, false
 	}
 	return f, true
