@@ -38,6 +38,9 @@ var maxUniverseObjects = 1_000_000
 // computeOrphans reports honestly as "пуст или недоступен" rather than a false
 // "everything is distributed".
 func EnumerateAppliedObjects(dumpDir string) []string {
+	if dumpDirIsNonDir(dumpDir) {
+		return nil // dumpDir itself is a non-directory node: empty universe, refused before the blocking open
+	}
 	root, err := os.OpenRoot(dumpDir)
 	if err != nil {
 		return nil

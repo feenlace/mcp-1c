@@ -57,6 +57,28 @@ var errReadSubsystemsRoot = errors.New("не удалось прочитать �
 // guard, and NAMES the refusal so the drop is never silent.
 var errNotDirectory = errors.New("dump path is not a directory")
 
+// errDumpDirNotDirectory is the path-free RU refusal returned by ParseAllSubsystemsCtx
+// when dumpDir ITSELF is a non-directory node (a FIFO, socket, device, plain file, or a
+// symlink resolving to one). It is errNotDirectory's guard one level up, at the dump
+// root: os.OpenRoot(dumpDir) on a writer-less FIFO blocks on an open() that ctx cannot
+// interrupt, so the node type is checked with os.Stat (which does not open it) BEFORE
+// the open. Customer-facing RU: no тире, never an absolute path.
+var errDumpDirNotDirectory = errors.New("каталог дампа имеет неверный тип")
+
+// dumpDirIsNonDir reports whether dumpDir exists but is NOT a directory: a FIFO,
+// socket, device, plain file, or a symlink resolving to one of those. os.Stat follows a
+// symlink and, crucially, does NOT open the node, so it returns immediately on a
+// writer-less FIFO where os.OpenRoot would block on the ctx-uninterruptible open (the
+// DoS this guards). A missing path or a permission error (err != nil) and a genuine
+// directory (including a symlink to a directory) all report false, so every
+// os.OpenRoot(dumpDir) entry point falls through to its existing missing / unreadable /
+// symlink-to-directory contract unchanged; only a non-directory dumpDir is refused
+// before the blocking open.
+func dumpDirIsNonDir(dumpDir string) bool {
+	fi, err := os.Stat(dumpDir)
+	return err == nil && !fi.IsDir()
+}
+
 // Subsystem is one node of the dump's subsystem forest: its canonical full path,
 // display synonym, direct member composition (Content, canonical RU full names)
 // and any nested child subsystems.
@@ -275,6 +297,9 @@ const (
 // so the walk returns an empty tree; a present but unreadable Subsystems/ yields
 // the path-free errReadSubsystemsRoot.
 func detectSubsystemLayout(dumpDir string) (subsystemLayout, error) {
+	if dumpDirIsNonDir(dumpDir) {
+		return layoutExt, nil // non-directory dumpDir: default layout, empty tree (never open it)
+	}
 	root, err := os.OpenRoot(dumpDir)
 	if err != nil {
 		return layoutExt, nil
@@ -346,6 +371,9 @@ func ParseAllSubsystems(dumpDir string) ([]Subsystem, error) {
 func ParseAllSubsystemsCtx(ctx context.Context, dumpDir string) ([]Subsystem, []string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
+	}
+	if dumpDirIsNonDir(dumpDir) {
+		return nil, nil, errDumpDirNotDirectory // dumpDir itself is a FIFO/socket/device/file: refuse before the blocking open
 	}
 	root, err := os.OpenRoot(dumpDir)
 	if err != nil {
