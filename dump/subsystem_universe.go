@@ -38,7 +38,12 @@ var maxUniverseObjects = 1_000_000
 // computeOrphans reports honestly as "пуст или недоступен" rather than a false
 // "everything is distributed".
 func EnumerateAppliedObjects(dumpDir string) []string {
-	top, err := os.ReadDir(dumpDir)
+	root, err := os.OpenRoot(dumpDir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = root.Close() }()
+	top, err := readDirInRoot(root, ".")
 	if err != nil {
 		return nil
 	}
@@ -51,8 +56,7 @@ func EnumerateAppliedObjects(dumpDir string) []string {
 		if !ok {
 			continue // not an applied kind folder
 		}
-		folderPath := filepath.Join(dumpDir, d.Name())
-		objs, rerr := os.ReadDir(folderPath)
+		objs, rerr := readDirInRoot(root, d.Name())
 		if rerr != nil {
 			continue
 		}
@@ -60,7 +64,7 @@ func EnumerateAppliedObjects(dumpDir string) []string {
 			if len(set) >= maxUniverseObjects {
 				break
 			}
-			name, ok := appliedObjectName(dumpDir, d.Name(), obj)
+			name, ok := appliedObjectName(root, d.Name(), obj)
 			if !ok {
 				continue
 			}
@@ -77,21 +81,20 @@ func EnumerateAppliedObjects(dumpDir string) []string {
 
 // appliedObjectName resolves one entry of an applied-kind folder to its object
 // name, covering both on-disk shapes and confirming the object's XML actually
-// exists (so a stray dir/file is not counted). Every candidate path is safeJoin
-// validated, so a symlink that escapes the dump is refused (a symlinked object dir
-// already has IsDir()==false and is skipped as a non-.xml entry).
-func appliedObjectName(dumpRoot, folder string, entry os.DirEntry) (string, bool) {
+// exists (so a stray dir/file is not counted). Every candidate path is resolved
+// through the dump's os.Root, so an escaping symlink at ANY component (including an
+// intermediate object-dir or Ext symlink) is refused instead of being followed to
+// probe out-of-dump existence or metadata; root.Lstat does not follow the final
+// component, so a symlinked object .xml is not counted either.
+func appliedObjectName(root *os.Root, folder string, entry os.DirEntry) (string, bool) {
 	entryName := entry.Name()
 	if entry.IsDir() {
 		// Ext shape: <Folder>/<Name>/Ext/<Name>.xml
-		cand, err := safeJoin(dumpRoot, folder, entryName, "Ext", entryName+".xml")
-		if err != nil {
-			return "", false
+		rel := filepath.Join(folder, entryName, "Ext", entryName+".xml")
+		if info, serr := root.Lstat(rel); serr == nil && info.Mode().IsRegular() {
+			return entryName, true
 		}
-		if info, serr := os.Stat(cand); serr != nil || !info.Mode().IsRegular() {
-			return "", false
-		}
-		return entryName, true
+		return "", false
 	}
 	// Root shape: <Folder>/<Name>.xml
 	if !strings.HasSuffix(entryName, ".xml") {
@@ -101,12 +104,9 @@ func appliedObjectName(dumpRoot, folder string, entry os.DirEntry) (string, bool
 	if objName == "" {
 		return "", false
 	}
-	cand, err := safeJoin(dumpRoot, folder, entryName)
-	if err != nil {
-		return "", false
+	rel := filepath.Join(folder, entryName)
+	if info, serr := root.Lstat(rel); serr == nil && info.Mode().IsRegular() {
+		return objName, true
 	}
-	if info, serr := os.Stat(cand); serr != nil || !info.Mode().IsRegular() {
-		return "", false
-	}
-	return objName, true
+	return "", false
 }

@@ -256,25 +256,39 @@ const (
 )
 
 // detectSubsystemLayout inspects the top-level Subsystems/ directory and reports
-// which on-disk layout it uses. The presence of any direct <Name>.xml file is
-// unambiguous evidence of the Hierarchical layout (Конфигуратор 8.3.10+), so it
-// wins; otherwise a present <N>/Ext/Subsystem.xml selects the Ext layout. An
-// absent Subsystems/ yields (layoutExt, nil) so the walk returns an empty tree;
-// an unreadable Subsystems/ yields the path-free errReadSubsystemsRoot.
+// which on-disk layout it uses. It opens the dump as an os.Root and probes through
+// it, so every path component is confined beneath the dump root and a crafted
+// symlink at any depth is refused rather than followed out of the dump. The
+// presence of any direct <Name>.xml file is unambiguous evidence of the
+// Hierarchical layout (Конфигуратор 8.3.10+), so it wins; otherwise a present
+// <N>/Ext/Subsystem.xml selects the Ext layout. An absent (or unopenable) dump, an
+// absent Subsystems/, or an escaping Subsystems/ symlink all yield (layoutExt, nil)
+// so the walk returns an empty tree; a present but unreadable Subsystems/ yields
+// the path-free errReadSubsystemsRoot.
 func detectSubsystemLayout(dumpDir string) (subsystemLayout, error) {
-	root, err := safeJoin(dumpDir, "Subsystems")
+	root, err := os.OpenRoot(dumpDir)
 	if err != nil {
-		// Subsystems/ escapes the dump (a crafted symlink whose target leaves the
-		// dump): refuse to probe it and report the default layout, so the subsequent
-		// walk (which also refuses it) returns an empty tree. Never stat/read outside.
 		return layoutExt, nil
 	}
-	entries, err := os.ReadDir(root)
+	defer func() { _ = root.Close() }()
+	return detectLayoutInRoot(root)
+}
+
+// detectLayoutInRoot is detectSubsystemLayout's core, operating on an already-open
+// os.Root so ParseAllSubsystemsCtx can share a single root with the walker.
+func detectLayoutInRoot(root *os.Root) (subsystemLayout, error) {
+	entries, err := readDirInRoot(root, "Subsystems")
 	if err != nil {
-		if os.IsNotExist(err) {
-			return layoutExt, nil
+		if errors.Is(err, os.ErrNotExist) {
+			return layoutExt, nil // no Subsystems/: empty tree
 		}
-		return layoutExt, errReadSubsystemsRoot
+		if errors.Is(err, os.ErrPermission) {
+			return layoutExt, errReadSubsystemsRoot // present but unreadable: path-free
+		}
+		// Containment refusal (an escaping Subsystems/ symlink, os.Root "path
+		// escapes") or any other read error: never probe outside; default layout so
+		// the walk returns an empty tree.
+		return layoutExt, nil
 	}
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".xml") {
@@ -285,14 +299,11 @@ func detectSubsystemLayout(dumpDir string) (subsystemLayout, error) {
 		if !e.IsDir() {
 			continue
 		}
-		// Use the containment-checked join so a symlinked child dir cannot make the
-		// probe stat a file outside the dump; os.Lstat (not os.Stat) so a symlinked
+		// os.Root.Lstat confines every component (an escaping intermediate Ext
+		// symlink is refused) and does not follow the final component, so a symlinked
 		// Subsystem.xml is not treated as a valid Ext marker (the walk refuses it too).
-		cand, cerr := safeJoin(dumpDir, "Subsystems", e.Name(), "Ext", "Subsystem.xml")
-		if cerr != nil {
-			continue // this candidate escapes the dump: never stat outside
-		}
-		if st, serr := os.Lstat(cand); serr == nil && st.Mode().IsRegular() {
+		rel := filepath.Join("Subsystems", e.Name(), "Ext", "Subsystem.xml")
+		if st, serr := root.Lstat(rel); serr == nil && st.Mode().IsRegular() {
 			return layoutExt, nil
 		}
 	}
@@ -315,18 +326,28 @@ func ParseAllSubsystems(dumpDir string) ([]Subsystem, error) {
 // walker, honouring ctx cancellation and returning per-subsystem drop diagnostics
 // (warnings) alongside the parsed tree. Hierarchical uses a disk-walk recursion;
 // Ext preserves the nested-children-from-XML behaviour. Every filesystem access is
-// confined to dumpDir via safeJoin (a crafted symlink that escapes the dump is
-// skipped, never followed), recursion is depth-capped, and each dropped subsystem
-// is NAMED in warnings (never silently dropped).
+// confined to the dump via an os.Root (a crafted symlink that escapes the dump at
+// ANY path component is refused by the OS primitive, never followed), recursion is
+// depth-capped, and each dropped subsystem is NAMED in warnings (never silently
+// dropped).
 func ParseAllSubsystemsCtx(ctx context.Context, dumpDir string) ([]Subsystem, []string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	layout, err := detectSubsystemLayout(dumpDir)
+	root, err := os.OpenRoot(dumpDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil, nil // absent dump: empty tree
+		}
+		return nil, nil, errReadSubsystemsRoot // not a directory / unreadable root: path-free
+	}
+	defer func() { _ = root.Close() }()
+
+	layout, err := detectLayoutInRoot(root)
 	if err != nil {
 		return nil, nil, err
 	}
-	w := &subsystemWalker{ctx: ctx, dumpRoot: dumpDir}
+	w := &subsystemWalker{ctx: ctx, root: root}
 	var subs []Subsystem
 	if layout == layoutRoot {
 		subs, err = w.walkHierarchical("Subsystems", "", 0)
@@ -340,11 +361,12 @@ func ParseAllSubsystemsCtx(ctx context.Context, dumpDir string) ([]Subsystem, []
 }
 
 // subsystemWalker carries per-walk state: the cancellation context, the dump root
-// every path is validated against, a parsed-node counter (breadth cap), and the
-// accumulated drop diagnostics (each names the affected subsystem).
+// (an os.Root that confines every path access beneath the dump), a parsed-node
+// counter (breadth cap), and the accumulated drop diagnostics (each names the
+// affected subsystem).
 type subsystemWalker struct {
 	ctx      context.Context
-	dumpRoot string
+	root     *os.Root
 	nodes    int
 	warnings []string
 }
@@ -359,50 +381,74 @@ func (w *subsystemWalker) warn(name, reason string) {
 	w.warnings = append(w.warnings, fmt.Sprintf("подсистема %s: %s", n, reason))
 }
 
-// safe validates a relative-to-dumpRoot path and returns its safe absolute form,
-// or ok=false if it escapes the dump (a crafted symlink or "..").
-func (w *subsystemWalker) safe(rel ...string) (string, bool) {
-	abs, err := safeJoin(w.dumpRoot, rel...)
-	if err != nil {
-		return "", false
-	}
-	return abs, true
+// readDir reads a dump-relative directory confined to the walker's os.Root.
+func (w *subsystemWalker) readDir(rel string) ([]os.DirEntry, error) {
+	return readDirInRoot(w.root, rel)
 }
 
-// openSubsystemFile lstat-guards a subsystem file and opens it only when the final
-// path is a plain regular file. Anything else (FIFO, socket, device, directory, or
-// a symlink) is refused with a NAMED, path-free warning and ok=false. Refusing a
-// non-regular final component BEFORE the open is what stops a planted writer-less
-// FIFO from blocking the walk forever (a DoS that even ctx cancellation could not
-// interrupt), and refusing a symlinked final component keeps a crafted link from
-// redirecting the read out of the dump. A genuinely absent file (ENOENT) is NOT a
-// drop: it returns ok=false WITHOUT a warning, so the caller treats it as a normal
-// non-subsystem entry (e.g. a directory that carries no Ext/Subsystem.xml).
-func (w *subsystemWalker) openSubsystemFile(name, filePath string) (*os.File, bool) {
-	li, lerr := os.Lstat(filePath)
+// readDirInRoot reads a directory confined to root and returns its entries sorted
+// by name (matching os.ReadDir), so the hierarchical walk's on-disk child ordering
+// is deterministic. os.Root confines EVERY path component beneath the root using
+// the OS primitive (openat2 RESOLVE_BENEATH on Linux, equivalents elsewhere), so an
+// escaping symlink at ANY depth is refused with a "path escapes" error rather than
+// followed out of the dump. os.File.ReadDir (unlike os.ReadDir) returns entries in
+// directory order, so they are sorted here.
+func readDirInRoot(root *os.Root, rel string) ([]os.DirEntry, error) {
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	return entries, nil
+}
+
+// openSubsystemFile opens a dump-relative subsystem file for reading, confined to
+// the walker's os.Root, and returns it only when it is a plain regular file.
+// Containment across every path component is enforced by os.Root: an escaping
+// symlink at ANY depth (intermediate directory OR final component) is refused, so
+// no read can be redirected out of the dump. The pre-open lstat additionally
+// rejects a non-regular final component (FIFO, socket, device, directory, or a
+// symlink) with a NAMED, path-free warning: refusing a non-regular final component
+// BEFORE the open is what stops a planted writer-less FIFO from blocking the walk
+// forever (a DoS that even ctx cancellation could not interrupt), and refusing a
+// symlinked final component keeps a crafted link from being followed at all. A
+// genuinely absent file (ENOENT) is NOT a drop: it returns ok=false WITHOUT a
+// warning, so the caller treats it as a normal non-subsystem entry (e.g. a
+// directory that carries no Ext/Subsystem.xml).
+func (w *subsystemWalker) openSubsystemFile(name, rel string) (*os.File, bool) {
+	li, lerr := w.root.Lstat(rel)
 	if lerr != nil {
-		if !os.IsNotExist(lerr) {
-			w.warn(name, "не удалось открыть файл подсистемы")
+		if errors.Is(lerr, os.ErrNotExist) {
+			return nil, false // a genuinely absent file is a normal non-subsystem entry
 		}
+		// Containment refusal (an escaping symlink at any component, os.Root "path
+		// escapes"), permission, or another metadata error: NAME it, never silently
+		// drop (a silent drop would understate the tree without a trace).
+		w.warn(name, "файл подсистемы недоступен и пропущен")
 		return nil, false
 	}
 	if !li.Mode().IsRegular() {
 		w.warn(name, "файл подсистемы не является обычным файлом и пропущен")
 		return nil, false
 	}
-	f, ferr := openSubsystemFileFinal(filePath)
+	f, ferr := w.root.OpenFile(rel, os.O_RDONLY|nonblockOpenFlag, 0)
 	if ferr != nil {
-		if !os.IsNotExist(ferr) {
-			w.warn(name, "не удалось открыть файл подсистемы")
+		if errors.Is(ferr, os.ErrNotExist) {
+			return nil, false // vanished after the lstat: treat as absent
 		}
+		w.warn(name, "не удалось открыть файл подсистемы")
 		return nil, false
 	}
 	// Close the check->use (TOCTOU) window: the descriptor just opened must be the
-	// very file lstat saw as a regular file. If the final component was swapped
-	// between the lstat and the open (e.g. for a symlink now resolving outside the
-	// dump, or a FIFO), os.SameFile is false and the file is refused. On unix
-	// openSubsystemFileFinal also opens with O_NOFOLLOW|O_NONBLOCK so a swapped-in
-	// symlink fails the open outright and a swapped-in FIFO cannot block it.
+	// very regular file the lstat saw. os.Root re-confines every component on this
+	// call, so an escaping symlink swapped in after the lstat is refused; os.SameFile
+	// rejects a final component swapped for a different in-root file; and O_NONBLOCK
+	// (unix) stops a swapped-in writer-less FIFO from blocking the open.
 	fi, serr := f.Stat()
 	if serr != nil || !os.SameFile(li, fi) {
 		_ = f.Close()
@@ -414,22 +460,22 @@ func (w *subsystemWalker) openSubsystemFile(name, filePath string) (*os.File, bo
 
 // walkExt walks Subsystems/<N>/Ext/Subsystem.xml and returns the parsed list
 // sorted alphabetically by subsystem name. A symlinked child dir has
-// IsDir()==false and is skipped; an Ext/Subsystem.xml symlink that escapes the
-// dump is rejected by safeJoin.
+// IsDir()==false and is skipped; an Ext/Subsystem.xml reached through an escaping
+// symlink at ANY component is refused by the os.Root confinement in
+// openSubsystemFile.
 func (w *subsystemWalker) walkExt(relRoot string) ([]Subsystem, error) {
 	if err := w.ctx.Err(); err != nil {
 		return nil, err
 	}
-	root, ok := w.safe(relRoot)
-	if !ok {
-		return nil, nil
-	}
-	entries, err := os.ReadDir(root)
+	entries, err := w.readDir(relRoot)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, errReadSubsystemsRoot // path-free
+		if errors.Is(err, os.ErrPermission) {
+			return nil, errReadSubsystemsRoot // path-free
+		}
+		return nil, nil // containment refusal or other: empty tree, never leak
 	}
 	out := make([]Subsystem, 0, len(entries))
 	for _, e := range entries {
@@ -440,16 +486,12 @@ func (w *subsystemWalker) walkExt(relRoot string) ([]Subsystem, error) {
 			w.warn(e.Name(), "превышено число подсистем в дампе")
 			break
 		}
-		filePath, ok := w.safe(relRoot, e.Name(), "Ext", "Subsystem.xml")
-		if !ok {
-			w.warn(e.Name(), "файл вне дампа пропущен (символическая ссылка)")
-			continue
-		}
+		rel := filepath.Join(relRoot, e.Name(), "Ext", "Subsystem.xml")
 		// A missing Ext/Subsystem.xml (ENOENT) is a normal non-subsystem dir and is
 		// skipped silently by openSubsystemFile; a non-regular (FIFO/socket/device/
-		// symlink) or otherwise unreadable file is NAMED there instead of silently
-		// dropped (a silent drop would understate the tree without a trace).
-		f, ok := w.openSubsystemFile(e.Name(), filePath)
+		// symlink), escaping, or otherwise unreadable file is NAMED there instead of
+		// silently dropped (a silent drop would understate the tree without a trace).
+		f, ok := w.openSubsystemFile(e.Name(), rel)
 		if !ok {
 			continue
 		}
@@ -467,11 +509,12 @@ func (w *subsystemWalker) walkExt(relRoot string) ([]Subsystem, error) {
 }
 
 // walkHierarchical walks Subsystems/<Name>.xml then recursively
-// Subsystems/<Name>/Subsystems/<Child>.xml. relRoot is the path relative to
-// dumpRoot (safeJoin-validated each hop); parentPath threads the canonical
-// "Подсистема.<Name>[.<Child>...]" form. depth caps recursion so a symlink cycle
-// or pathologically deep on-disk nesting terminates. os.ReadDir returns entries
-// sorted by filename.
+// Subsystems/<Name>/Subsystems/<Child>.xml. relRoot is the path relative to the
+// dump root (read through the walker's os.Root, which confines every component so a
+// crafted directory symlink at any depth is refused, not followed); parentPath
+// threads the canonical "Подсистема.<Name>[.<Child>...]" form. depth caps recursion
+// so a symlink cycle (also cut immediately by the os.Root refusal of an escaping
+// recursion directory) or pathologically deep on-disk nesting terminates.
 func (w *subsystemWalker) walkHierarchical(relRoot, parentPath string, depth int) ([]Subsystem, error) {
 	if err := w.ctx.Err(); err != nil {
 		return nil, err
@@ -480,21 +523,20 @@ func (w *subsystemWalker) walkHierarchical(relRoot, parentPath string, depth int
 		w.warn(parentPath, "превышена глубина вложенности подсистем")
 		return nil, nil
 	}
-	root, ok := w.safe(relRoot)
-	if !ok {
-		// relRoot escapes the dump (a crafted directory symlink): skip its subtree.
-		w.warn(parentPath, "каталог вне дампа пропущен (символическая ссылка)")
-		return nil, nil
-	}
-	entries, err := os.ReadDir(root)
+	entries, err := w.readDir(relRoot)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		if depth == 0 {
-			return nil, errReadSubsystemsRoot // path-free, top level only
+			if errors.Is(err, os.ErrPermission) {
+				return nil, errReadSubsystemsRoot // path-free, top level only
+			}
+			return nil, nil // containment refusal or other at top: empty tree
 		}
-		w.warn(parentPath, "не удалось прочитать каталог подсистемы")
+		// A nested recursion directory that is unreadable or escapes the dump (an
+		// intermediate directory symlink refused by os.Root): skip its subtree, NAMED.
+		w.warn(parentPath, "каталог подсистемы недоступен и пропущен")
 		return nil, nil
 	}
 	out := make([]Subsystem, 0, len(entries))
@@ -511,12 +553,8 @@ func (w *subsystemWalker) walkHierarchical(relRoot, parentPath string, depth int
 			w.warn(stem, "превышено число подсистем в дампе")
 			break
 		}
-		filePath, ok := w.safe(relRoot, name)
-		if !ok {
-			w.warn(stem, "файл вне дампа пропущен (символическая ссылка)")
-			continue
-		}
-		f, ok := w.openSubsystemFile(stem, filePath)
+		rel := filepath.Join(relRoot, name)
+		f, ok := w.openSubsystemFile(stem, rel)
 		if !ok {
 			continue
 		}

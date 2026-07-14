@@ -14,64 +14,11 @@ import (
 func timeoutAfter() <-chan time.Time { return time.After(15 * time.Second) }
 
 // ---------------------------------------------------------------------------
-// safeJoin: BOTH .. traversal AND symlink escape must be rejected (guard #2).
-// ---------------------------------------------------------------------------
-
-func TestSafeJoin_RejectsDotDotEscape(t *testing.T) {
-	root := t.TempDir()
-	for _, segs := range [][]string{
-		{"..", "etc", "passwd"},
-		{"Subsystems", "..", "..", "outside"},
-	} {
-		if _, err := safeJoin(root, segs...); err == nil {
-			t.Errorf("safeJoin(%v) = nil error, want a traversal rejection", segs)
-		}
-	}
-}
-
-func TestSafeJoin_AllowsInRootNonexistentPath(t *testing.T) {
-	root := t.TempDir()
-	// A path that does not exist yet is allowed (it is validated, not opened).
-	if _, err := safeJoin(root, "Subsystems", "Продажи.xml"); err != nil {
-		t.Errorf("safeJoin(in-root nonexistent) = %v, want nil", err)
-	}
-}
-
-func TestSafeJoin_RejectsSymlinkEscape(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	secret := filepath.Join(outside, "secret.txt")
-	if err := os.WriteFile(secret, []byte("SECRET"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// root/link -> outside (a directory symlink escaping the dump).
-	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
-	}
-	if _, err := safeJoin(root, "link", "secret.txt"); err == nil {
-		t.Errorf("safeJoin through an escaping symlink = nil error, want rejection")
-	}
-}
-
-func TestSafeJoin_AllowsInRootSymlink(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "real", "x.xml"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// root/link -> root/real (an in-dump symlink stays contained and is allowed).
-	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "link")); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
-	}
-	if _, err := safeJoin(root, "link", "x.xml"); err != nil {
-		t.Errorf("safeJoin through an in-dump symlink = %v, want nil", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Traversal / symlink / cycle in the walk.
+// Traversal / symlink / cycle in the walk. Containment is enforced by os.Root,
+// which confines every path component beneath the dump root (openat2
+// RESOLVE_BENEATH on Linux, equivalents elsewhere): both ".." traversal and a
+// symlink escape at ANY depth are refused by the OS primitive, so the walk can
+// never read out of the dump. These end-to-end tests exercise that guarantee.
 // ---------------------------------------------------------------------------
 
 // A file-symlink under Subsystems/ that resolves OUTSIDE the dump must not be
@@ -130,36 +77,41 @@ func TestWalk_DirSymlinkEscape_NoCrossDump(t *testing.T) {
 	}
 }
 
-// A symlink cycle must terminate (depth cap), not spin / overflow.
+// A symlink cycle must terminate, not spin / overflow. os.Root refuses the escaping
+// recursion-directory symlink outright, so the cycle is cut immediately by
+// containment (the depth cap remains the backstop for deep on-disk nesting, proven
+// by TestWalk_DeepOnDiskNesting_Bounded). The root subsystem still parses and the
+// refused cyclic subtree is NAMED.
 func TestWalk_SymlinkCycle_Terminates(t *testing.T) {
-	old := maxSubsystemTreeDepth
-	maxSubsystemTreeDepth = 5
-	defer func() { maxSubsystemTreeDepth = old }()
-
 	dumpA := t.TempDir()
 	secWrite(t, filepath.Join(dumpA, "Subsystems", "A.xml"), secSubBody("A"))
 	if err := os.MkdirAll(filepath.Join(dumpA, "Subsystems", "A"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// A/Subsystems -> Subsystems (in-dump cycle: safeJoin passes, depth cap stops it).
+	// A/Subsystems -> Subsystems (a cycle); os.Root refuses this escaping symlink so
+	// the recursion into it is cut immediately.
 	if err := os.Symlink(filepath.Join(dumpA, "Subsystems"),
 		filepath.Join(dumpA, "Subsystems", "A", "Subsystems")); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
 
 	done := make(chan struct{})
+	var subs []Subsystem
 	var warnings []string
 	go func() {
-		_, warnings, _ = ParseAllSubsystemsCtx(context.Background(), dumpA)
+		subs, warnings, _ = ParseAllSubsystemsCtx(context.Background(), dumpA)
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-timeoutAfter():
-		t.Fatal("walk did not terminate on a symlink cycle (depth cap missing)")
+		t.Fatal("walk did not terminate on a symlink cycle")
 	}
-	if !warningsContain(warnings, "глубин") {
-		t.Errorf("expected a depth-exceeded warning; warnings=%v", warnings)
+	if !containsStr(flattenNames(subs), "A") {
+		t.Errorf("the root subsystem A should still parse; names=%v", flattenNames(subs))
+	}
+	if !warningsContain(warnings, "A") {
+		t.Errorf("the refused cyclic recursion directory should be NAMED; warnings=%v", warnings)
 	}
 }
 

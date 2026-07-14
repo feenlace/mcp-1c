@@ -2,13 +2,9 @@
 
 package dump
 
-import "os"
-
-// openSubsystemFileFinal is the portable fallback for platforms without unix's
-// O_NOFOLLOW / O_NONBLOCK open flags (e.g. Windows). Containment across the
-// check->use window is still enforced by the caller: the pre-open lstat rejects a
-// non-regular or symlinked final component, and the post-open os.SameFile check
-// rejects a file that was swapped for a different one between the lstat and the open.
-func openSubsystemFileFinal(path string) (*os.File, error) {
-	return os.Open(path)
-}
+// nonblockOpenFlag is 0 on platforms without unix's O_NONBLOCK (e.g. Windows).
+// Containment is enforced by os.Root at the open site; the pre-open lstat rejects a
+// non-regular or symlinked final component and the post-open os.SameFile check
+// rejects a file swapped for a different one in the check->use window. Windows has
+// no mkfifo, so the blocking-FIFO vector O_NONBLOCK guards against does not arise.
+const nonblockOpenFlag = 0

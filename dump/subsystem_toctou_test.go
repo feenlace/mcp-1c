@@ -19,9 +19,9 @@ import (
 // read out of the dump.
 func TestWalk_SymlinkedSubsystemFile_Refused(t *testing.T) {
 	dir := t.TempDir()
-	// A real, valid, IN-dump target with a distinctive marker name. safeJoin's
-	// containment check passes for this target (it is under the dump root), so only
-	// the lstat+IsRegular guard stops the symlink from being followed.
+	// A real, valid, IN-dump target with a distinctive marker name. os.Root would
+	// permit reaching an in-dump target, so only the lstat+IsRegular guard (which
+	// does not follow the final component) stops the symlink from being followed.
 	secWrite(t, filepath.Join(dir, "real", "Target.xml"), secSubBody("SYMLINK_TARGET_MARKER"))
 	// A plain regular sibling so the layout is Hierarchical, the walk has work, and
 	// Subsystems/ exists before the symlink below is planted into it.
@@ -48,11 +48,10 @@ func TestWalk_SymlinkedSubsystemFile_Refused(t *testing.T) {
 }
 
 // MB-2 (concurrent TOCTOU): dangling symlinks Subsystems/L####.xml -> <outside>/secret
-// (target ABSENT at plant time) pass safeJoin's ErrNotExist-tolerant containment
-// check. Before the fix, a concurrent create of <outside>/secret in the check->use
-// window let os.Open follow the link and read the out-of-dump file into the returned
-// tree. The lstat+IsRegular guard now refuses every symlinked final component before
-// the open (and the post-open os.SameFile check closes any residual swap), so the
+// (target ABSENT at plant time), with a concurrent create of <outside>/secret in the
+// check->use window. The lstat+IsRegular guard refuses every symlinked final
+// component before the open, os.Root confines the open so an escaping target cannot
+// be followed, and the post-open os.SameFile check closes any residual swap, so the
 // outside marker must NEVER appear across many iterations.
 func TestWalk_DanglingSymlinkTOCTOU_NeverReadsOutside(t *testing.T) {
 	dir := t.TempDir()
