@@ -48,6 +48,15 @@ var (
 // dropped rather than wrapped. Customer-facing RU: no тире.
 var errReadSubsystemsRoot = errors.New("не удалось прочитать каталог подсистем дампа")
 
+// errNotDirectory marks a dump path that occupies a directory position but is not a
+// directory: a FIFO, socket, device, plain file, or a symlink standing in for the
+// directory. Opening such a position unconditionally is the DoS this guard closes: a
+// writer-less FIFO at a directory position blocks the open forever and, unlike a
+// bounded read, a blocked open() cannot be interrupted by ctx. Every directory read
+// refuses a non-directory BEFORE that blocking open, mirroring the subsystem-file
+// guard, and NAMES the refusal so the drop is never silent.
+var errNotDirectory = errors.New("dump path is not a directory")
+
 // Subsystem is one node of the dump's subsystem forest: its canonical full path,
 // display synonym, direct member composition (Content, canonical RU full names)
 // and any nested child subsystems.
@@ -285,9 +294,11 @@ func detectLayoutInRoot(root *os.Root) (subsystemLayout, error) {
 		if errors.Is(err, os.ErrPermission) {
 			return layoutExt, errReadSubsystemsRoot // present but unreadable: path-free
 		}
-		// Containment refusal (an escaping Subsystems/ symlink, os.Root "path
-		// escapes") or any other read error: never probe outside; default layout so
-		// the walk returns an empty tree.
+		// Containment refusal (an escaping Subsystems/ symlink, os.Root "path escapes"),
+		// a non-directory Subsystems position (errNotDirectory: a FIFO/socket/device/
+		// plain file, refused BEFORE the blocking open by openDirInRoot so detection
+		// never hangs), or any other read error: never probe outside; default layout so
+		// the walk returns an empty tree (the walk re-encounters and NAMES it).
 		return layoutExt, nil
 	}
 	for _, e := range entries {
@@ -327,9 +338,11 @@ func ParseAllSubsystems(dumpDir string) ([]Subsystem, error) {
 // (warnings) alongside the parsed tree. Hierarchical uses a disk-walk recursion;
 // Ext preserves the nested-children-from-XML behaviour. Every filesystem access is
 // confined to the dump via an os.Root (a crafted symlink that escapes the dump at
-// ANY path component is refused by the OS primitive, never followed), recursion is
-// depth-capped, and each dropped subsystem is NAMED in warnings (never silently
-// dropped).
+// ANY path component is refused by the OS primitive, never followed), every directory
+// AND file position is type-checked before it is opened (a writer-less FIFO planted at
+// any position is refused before the blocking open rather than hanging the walk),
+// recursion is depth-capped, and each dropped subsystem or directory is NAMED in
+// warnings (never silently dropped).
 func ParseAllSubsystemsCtx(ctx context.Context, dumpDir string) ([]Subsystem, []string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
@@ -381,6 +394,13 @@ func (w *subsystemWalker) warn(name, reason string) {
 	w.warnings = append(w.warnings, fmt.Sprintf("подсистема %s: %s", n, reason))
 }
 
+// warnSubsystemsRoot NAMES a refused top-level Subsystems catalog: a non-directory at
+// the Subsystems position (a FIFO, socket, device, plain file, or a symlink standing in
+// for it) drops the entire tree, which must never be silent. Path-free, no тире.
+func (w *subsystemWalker) warnSubsystemsRoot() {
+	w.warnings = append(w.warnings, "каталог подсистем дампа имеет неверный тип и пропущен")
+}
+
 // readDir reads a dump-relative directory confined to the walker's os.Root.
 func (w *subsystemWalker) readDir(rel string) ([]os.DirEntry, error) {
 	return readDirInRoot(w.root, rel)
@@ -388,13 +408,16 @@ func (w *subsystemWalker) readDir(rel string) ([]os.DirEntry, error) {
 
 // readDirInRoot reads a directory confined to root and returns its entries sorted
 // by name (matching os.ReadDir), so the hierarchical walk's on-disk child ordering
-// is deterministic. os.Root confines EVERY path component beneath the root using
-// the OS primitive (openat2 RESOLVE_BENEATH on Linux, equivalents elsewhere), so an
-// escaping symlink at ANY depth is refused with a "path escapes" error rather than
+// is deterministic. The directory is opened through openDirInRoot, which refuses any
+// non-directory at that position (a FIFO/socket/device/plain file, or a symlink
+// standing in for the directory) BEFORE the blocking open, so a planted writer-less
+// FIFO at a directory position can never hang the walk. os.Root confines EVERY path
+// component beneath the root using the OS primitive (openat2 RESOLVE_BENEATH on Linux,
+// equivalents elsewhere), so an escaping symlink at ANY depth is refused rather than
 // followed out of the dump. os.File.ReadDir (unlike os.ReadDir) returns entries in
 // directory order, so they are sorted here.
 func readDirInRoot(root *os.Root, rel string) ([]os.DirEntry, error) {
-	f, err := root.Open(rel)
+	f, err := openDirInRoot(root, rel)
 	if err != nil {
 		return nil, err
 	}
@@ -405,6 +428,38 @@ func readDirInRoot(root *os.Root, rel string) ([]os.DirEntry, error) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	return entries, nil
+}
+
+// openDirInRoot opens rel as a directory confined to root, refusing any non-directory
+// at that position. It mirrors openSubsystemFile's guard, for directories: it lstats
+// and requires Mode().IsDir() BEFORE the open, so a writer-less FIFO, socket, device,
+// or a symlink standing in for the directory can never reach the blocking open() that
+// ctx cannot interrupt. It then opens with O_NONBLOCK on unix, so a directory swapped
+// for a FIFO in the check->use window still returns immediately instead of blocking,
+// and fstats the descriptor to require it be the very directory the lstat saw (IsDir
+// plus os.SameFile), which closes that TOCTOU window. Containment across every path
+// component is enforced by os.Root, so an escaping symlink at ANY depth is refused
+// rather than followed. A genuinely absent path returns os.ErrNotExist (callers treat
+// it as a normal empty position); a non-directory returns errNotDirectory (callers
+// NAME it); permission and containment ("path escapes") errors propagate unchanged.
+func openDirInRoot(root *os.Root, rel string) (*os.File, error) {
+	li, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !li.Mode().IsDir() {
+		return nil, errNotDirectory
+	}
+	f, err := root.OpenFile(rel, os.O_RDONLY|nonblockOpenFlag, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil || !fi.IsDir() || !os.SameFile(li, fi) {
+		_ = f.Close()
+		return nil, errNotDirectory
+	}
+	return f, nil
 }
 
 // openSubsystemFile opens a dump-relative subsystem file for reading, confined to
@@ -475,6 +530,10 @@ func (w *subsystemWalker) walkExt(relRoot string) ([]Subsystem, error) {
 		if errors.Is(err, os.ErrPermission) {
 			return nil, errReadSubsystemsRoot // path-free
 		}
+		if errors.Is(err, errNotDirectory) {
+			w.warnSubsystemsRoot() // a non-directory Subsystems position: NAME the drop
+			return nil, nil
+		}
 		return nil, nil // containment refusal or other: empty tree, never leak
 	}
 	out := make([]Subsystem, 0, len(entries))
@@ -532,7 +591,18 @@ func (w *subsystemWalker) walkHierarchical(relRoot, parentPath string, depth int
 			if errors.Is(err, os.ErrPermission) {
 				return nil, errReadSubsystemsRoot // path-free, top level only
 			}
+			if errors.Is(err, errNotDirectory) {
+				w.warnSubsystemsRoot() // a non-directory Subsystems position: NAME the drop
+				return nil, nil
+			}
 			return nil, nil // containment refusal or other at top: empty tree
+		}
+		if errors.Is(err, errNotDirectory) {
+			// A non-directory at the recursion position (a FIFO/socket/device, or a
+			// symlink standing in for the child Subsystems/ directory): refused BEFORE
+			// the blocking open by openDirInRoot; skip its subtree, NAMED by its parent.
+			w.warn(parentPath, "вложенный каталог подсистем имеет неверный тип и пропущен")
+			return nil, nil
 		}
 		// A nested recursion directory that is unreadable or escapes the dump (an
 		// intermediate directory symlink refused by os.Root): skip its subtree, NAMED.
