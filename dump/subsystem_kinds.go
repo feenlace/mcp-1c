@@ -90,6 +90,15 @@ var serviceKindEnToRu = map[string]string{
 	// subsystem Content member. The Russian singular ЖурналДокументов matches the
 	// canonical name recorded in metadata_types.go for the DocumentJournals folder.
 	"DocumentJournal": "ЖурналДокументов",
+	// Constant and Subsystem are not applied orphan kinds (Constant is deliberately
+	// excluded from the applied universe above; a subsystem is a container, not a
+	// member object), yet BOTH appear as valid subsystem Content members, so their
+	// English dump prefix must still canonicalize to the platform full-name Russian
+	// prefix. Константа matches metadata_types.go; Подсистема matches the subsystem
+	// reader's own canonical path prefix. Mapping them here is display-only (the
+	// service-kind table does NOT feed appliedFolderToRu), so orphans is unaffected.
+	"Constant":  "Константа",
+	"Subsystem": "Подсистема",
 }
 
 // serviceKindEnLower is the lowercased index of serviceKindEnToRu for

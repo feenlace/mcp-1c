@@ -291,3 +291,24 @@ func TestParseAllSubsystems_ContentCanonicalizedEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// A subsystem Content referencing Constant.X and Subsystem.Y must canonicalize to
+// Константа.X / Подсистема.Y end to end, so an analyze_subsystems containing /
+// intersections query by the Russian name matches offline instead of false-negating.
+func TestParseAllSubsystems_ConstantAndSubsystemContentCanonicalized(t *testing.T) {
+	dir := t.TempDir()
+	secWrite(t, filepath.Join(dir, "Subsystems", "Учет.xml"),
+		secSubBody("Учет", "Constant.ИспользоватьНДС", "Subsystem.Продажи", "Document.Счет"))
+	subs, err := ParseAllSubsystems(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("want 1 subsystem; got %+v", subs)
+	}
+	for _, want := range []string{"Константа.ИспользоватьНДС", "Подсистема.Продажи", "Документ.Счет"} {
+		if !containsStr(subs[0].Content, want) {
+			t.Errorf("Content missing canonical %q; got %v", want, subs[0].Content)
+		}
+	}
+}

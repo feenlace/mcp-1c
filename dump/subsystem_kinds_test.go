@@ -154,3 +154,40 @@ func TestAppliedKindRu_HasFifteenAndExcludesConstant(t *testing.T) {
 		}
 	}
 }
+
+// Constant and Subsystem are not applied orphan kinds, but both are valid subsystem
+// Content members, so their English dump prefix must canonicalize to the Russian
+// full-name prefix. Without this, a containing / intersections query by the Russian
+// name (Константа.X / Подсистема.Y) false-negatives offline while matching live.
+func TestCanonicalizeContentPath_ConstantAndSubsystem(t *testing.T) {
+	cases := map[string]string{
+		"Constant.ИспользоватьНДС":     "Константа.ИспользоватьНДС",
+		"Subsystem.УправлениеЗапасами": "Подсистема.УправлениеЗапасами",
+	}
+	for raw, want := range cases {
+		if got := canonicalizeContentPath(raw); got != want {
+			t.Errorf("canonicalizeContentPath(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	if ru, ok := ServiceKindNameRu("constant"); !ok || ru != "Константа" {
+		t.Errorf("ServiceKindNameRu(constant) = (%q,%v), want (Константа,true)", ru, ok)
+	}
+	if ru, ok := ServiceKindNameRu("Subsystem"); !ok || ru != "Подсистема" {
+		t.Errorf("ServiceKindNameRu(Subsystem) = (%q,%v), want (Подсистема,true)", ru, ok)
+	}
+}
+
+// Adding Constant / Subsystem to the service-kind canonicalization must NOT leak
+// Constant into the applied-object universe: orphans must still exclude constants,
+// so appliedKindRu stays 15 entries and excludes Константа.
+func TestConstantStaysOutOfAppliedUniverse(t *testing.T) {
+	if appliedKindRu["Константа"] {
+		t.Errorf("Константа must NOT be an applied-universe kind")
+	}
+	if _, ok := appliedKindEnToRu["Constant"]; ok {
+		t.Errorf("Constant must NOT be in appliedKindEnToRu")
+	}
+	if len(appliedKindRu) != 15 {
+		t.Errorf("appliedKindRu = %d entries, want 15", len(appliedKindRu))
+	}
+}
