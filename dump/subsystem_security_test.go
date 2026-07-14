@@ -392,3 +392,37 @@ func TestWalk_HostileContentAndName_Inert(t *testing.T) {
 		t.Fatalf("want 1 subsystem, got %+v", subs)
 	}
 }
+
+// SF-2: layout detection must use the containment-checked join, so a Subsystems/
+// that is a symlink escaping the dump is refused (default layout) instead of being
+// followed to probe out-of-dump existence / metadata. Before the fix detection used
+// filepath.Join + os.ReadDir/os.Stat, which followed the symlink and misreported
+// layoutRoot from the outside directory's contents.
+func TestDetectSubsystemLayout_EscapingSubsystemsSymlink_NoProbe(t *testing.T) {
+	outside := t.TempDir()
+	// The outside dir looks like a Hierarchical Subsystems/ (direct <Name>.xml), so
+	// if detection followed the symlink it would misreport layoutRoot.
+	secWrite(t, filepath.Join(outside, "OutsideSub.xml"), secSubBody("OutsideSub"))
+
+	dir := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, "Subsystems")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	layout, err := detectSubsystemLayout(dir)
+	if err != nil {
+		t.Fatalf("detectSubsystemLayout err = %v, want nil", err)
+	}
+	if layout == layoutRoot {
+		t.Fatalf("detection followed an escaping Subsystems symlink and probed outside (got layoutRoot)")
+	}
+
+	// End to end the walk must also yield an empty tree with no outside content.
+	subs, _, werr := ParseAllSubsystemsCtx(context.Background(), dir)
+	if werr != nil {
+		t.Fatalf("walk err = %v, want nil", werr)
+	}
+	if containsStr(flattenNames(subs), "OutsideSub") {
+		t.Fatalf("out-of-dump subsystem leaked via an escaping Subsystems symlink; names=%v", flattenNames(subs))
+	}
+}

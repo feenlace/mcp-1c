@@ -262,7 +262,13 @@ const (
 // absent Subsystems/ yields (layoutExt, nil) so the walk returns an empty tree;
 // an unreadable Subsystems/ yields the path-free errReadSubsystemsRoot.
 func detectSubsystemLayout(dumpDir string) (subsystemLayout, error) {
-	root := filepath.Join(dumpDir, "Subsystems")
+	root, err := safeJoin(dumpDir, "Subsystems")
+	if err != nil {
+		// Subsystems/ escapes the dump (a crafted symlink whose target leaves the
+		// dump): refuse to probe it and report the default layout, so the subsequent
+		// walk (which also refuses it) returns an empty tree. Never stat/read outside.
+		return layoutExt, nil
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -279,8 +285,14 @@ func detectSubsystemLayout(dumpDir string) (subsystemLayout, error) {
 		if !e.IsDir() {
 			continue
 		}
-		cand := filepath.Join(root, e.Name(), "Ext", "Subsystem.xml")
-		if st, serr := os.Stat(cand); serr == nil && st.Mode().IsRegular() {
+		// Use the containment-checked join so a symlinked child dir cannot make the
+		// probe stat a file outside the dump; os.Lstat (not os.Stat) so a symlinked
+		// Subsystem.xml is not treated as a valid Ext marker (the walk refuses it too).
+		cand, cerr := safeJoin(dumpDir, "Subsystems", e.Name(), "Ext", "Subsystem.xml")
+		if cerr != nil {
+			continue // this candidate escapes the dump: never stat outside
+		}
+		if st, serr := os.Lstat(cand); serr == nil && st.Mode().IsRegular() {
 			return layoutExt, nil
 		}
 	}
