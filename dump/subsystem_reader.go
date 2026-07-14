@@ -357,6 +357,37 @@ func (w *subsystemWalker) safe(rel ...string) (string, bool) {
 	return abs, true
 }
 
+// openSubsystemFile lstat-guards a subsystem file and opens it only when the final
+// path is a plain regular file. Anything else (FIFO, socket, device, directory, or
+// a symlink) is refused with a NAMED, path-free warning and ok=false. Refusing a
+// non-regular final component BEFORE the open is what stops a planted writer-less
+// FIFO from blocking the walk forever (a DoS that even ctx cancellation could not
+// interrupt), and refusing a symlinked final component keeps a crafted link from
+// redirecting the read out of the dump. A genuinely absent file (ENOENT) is NOT a
+// drop: it returns ok=false WITHOUT a warning, so the caller treats it as a normal
+// non-subsystem entry (e.g. a directory that carries no Ext/Subsystem.xml).
+func (w *subsystemWalker) openSubsystemFile(name, filePath string) (*os.File, bool) {
+	li, lerr := os.Lstat(filePath)
+	if lerr != nil {
+		if !os.IsNotExist(lerr) {
+			w.warn(name, "не удалось открыть файл подсистемы")
+		}
+		return nil, false
+	}
+	if !li.Mode().IsRegular() {
+		w.warn(name, "файл подсистемы не является обычным файлом и пропущен")
+		return nil, false
+	}
+	f, ferr := os.Open(filePath)
+	if ferr != nil {
+		if !os.IsNotExist(ferr) {
+			w.warn(name, "не удалось открыть файл подсистемы")
+		}
+		return nil, false
+	}
+	return f, true
+}
+
 // walkExt walks Subsystems/<N>/Ext/Subsystem.xml and returns the parsed list
 // sorted alphabetically by subsystem name. A symlinked child dir has
 // IsDir()==false and is skipped; an Ext/Subsystem.xml symlink that escapes the
@@ -390,16 +421,12 @@ func (w *subsystemWalker) walkExt(relRoot string) ([]Subsystem, error) {
 			w.warn(e.Name(), "файл вне дампа пропущен (символическая ссылка)")
 			continue
 		}
-		f, ferr := os.Open(filePath)
-		if ferr != nil {
-			if os.IsNotExist(ferr) {
-				continue // a missing Ext/Subsystem.xml is a normal non-subsystem dir
-			}
-			// A non-ENOENT open failure (e.g. permission denied) is NOT a normal
-			// "this dir is not a subsystem" case: NAME the affected subsystem so an
-			// unreadable file is visible (a silent drop would understate the tree
-			// without a trace).
-			w.warn(e.Name(), "не удалось открыть файл подсистемы")
+		// A missing Ext/Subsystem.xml (ENOENT) is a normal non-subsystem dir and is
+		// skipped silently by openSubsystemFile; a non-regular (FIFO/socket/device/
+		// symlink) or otherwise unreadable file is NAMED there instead of silently
+		// dropped (a silent drop would understate the tree without a trace).
+		f, ok := w.openSubsystemFile(e.Name(), filePath)
+		if !ok {
 			continue
 		}
 		s, perr := parseSubsystemXML(f)
@@ -465,9 +492,8 @@ func (w *subsystemWalker) walkHierarchical(relRoot, parentPath string, depth int
 			w.warn(stem, "файл вне дампа пропущен (символическая ссылка)")
 			continue
 		}
-		f, ferr := os.Open(filePath)
-		if ferr != nil {
-			w.warn(stem, "не удалось открыть файл подсистемы")
+		f, ok := w.openSubsystemFile(stem, filePath)
+		if !ok {
 			continue
 		}
 		s, perr := parseSubsystemHierarchical(f, parentPath)
