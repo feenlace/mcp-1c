@@ -306,6 +306,224 @@ func setupIntegration(t *testing.T) (*mcp.ClientSession, func()) {
 	return session, cleanup
 }
 
+// connectSession wires an already-built server to an in-memory MCP client session.
+// extraCleanup releases whatever the caller built before the server (mock, dump).
+func connectSession(t *testing.T, srv *mcp.Server, extraCleanup func()) (*mcp.ClientSession, func()) {
+	t.Helper()
+	ctx := context.Background()
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		extraCleanup()
+		t.Fatalf("server connect: %v", err)
+	}
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0"}, nil)
+	session, err := mcpClient.Connect(ctx, ct, nil)
+	if err != nil {
+		extraCleanup()
+		t.Fatalf("client connect: %v", err)
+	}
+	return session, func() { session.Close(); extraCleanup() }
+}
+
+// setupIntegrationNoDump builds a server with NO offline dump, so analyze_subsystems
+// and object_structure(Subsystem) take the live 1C HTTP path (nil offline source).
+// This is the "without a dump, behavior unchanged (nil == live)" scenario.
+func setupIntegrationNoDump(t *testing.T) (*mcp.ClientSession, func()) {
+	t.Helper()
+	mock := httptest.NewServer(mock1CHandler())
+	client := onec.NewClient(mock.URL, "", "")
+	srv := New("test", client, nil)
+	return connectSession(t, srv, mock.Close)
+}
+
+// setupIntegrationSubsystemDump builds a server whose dump has a real Subsystems/
+// tree plus applied object XMLs, so analyze_subsystems and object_structure(Subsystem)
+// answer OFFLINE from the dump. The dump carries a unique marker object
+// (Справочник.МаркерТолькоВДампе) absent from the mock, and deliberately OMITS the
+// mock-only objects (Номенклатура, КурсыВалют, Касса), so an accidental live call is
+// detectable in the output.
+func setupIntegrationSubsystemDump(t *testing.T) (*mcp.ClientSession, func()) {
+	t.Helper()
+	mock := httptest.NewServer(mock1CHandler())
+	client := onec.NewClient(mock.URL, "", "")
+
+	dumpDir := t.TempDir()
+	// Subsystem tree (Hierarchical / Root layout).
+	mkBSL(t, dumpDir, "Subsystems/Продажи.xml", subsystemFileBody("Продажи", "Document.РеализацияТоваров", "Catalog.Контрагенты"))
+	mkBSL(t, dumpDir, "Subsystems/Продажи/Subsystems/Розница.xml", subsystemFileBody("Розница", "Catalog.Склады"))
+	mkBSL(t, dumpDir, "Subsystems/Финансы.xml", subsystemFileBody("Финансы", "Document.РеализацияТоваров"))
+	// Applied object universe (Root layout).
+	mkBSL(t, dumpDir, "Documents/РеализацияТоваров.xml", metaObjectBody("РеализацияТоваров"))
+	mkBSL(t, dumpDir, "Catalogs/Контрагенты.xml", metaObjectBody("Контрагенты"))
+	mkBSL(t, dumpDir, "Catalogs/Склады.xml", metaObjectBody("Склады"))
+	mkBSL(t, dumpDir, "Catalogs/МаркерТолькоВДампе.xml", metaObjectBody("МаркерТолькоВДампе"))
+	// A common module so the dump index has a .bsl module to index.
+	mkBSL(t, dumpDir, "CommonModules/ОбщегоНазначения/Ext/Module.bsl", "Процедура Пример() Экспорт\nКонецПроцедуры\n")
+
+	dumpIndex, err := dump.NewIndex(dumpDir, "", false)
+	if err != nil {
+		mock.Close()
+		t.Fatalf("NewIndex: %v", err)
+	}
+	deadline := time.After(30 * time.Second)
+	for !dumpIndex.Ready() {
+		select {
+		case <-deadline:
+			dumpIndex.Close()
+			mock.Close()
+			t.Fatal("timed out waiting for dump index to become ready")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	srv := New("test", client, dumpIndex)
+	return connectSession(t, srv, func() { dumpIndex.Close(); mock.Close() })
+}
+
+// subsystemFileBody is a Subsystem XML file with a Name and optional Content members.
+func subsystemFileBody(name string, content ...string) string {
+	items := ""
+	for _, c := range content {
+		items += "      <Item>" + c + "</Item>\n"
+	}
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+  <Subsystem>
+    <Properties>
+      <Name>` + name + `</Name>
+      <Content>
+` + items + `      </Content>
+    </Properties>
+  </Subsystem>
+</MetaDataObject>
+`
+}
+
+// metaObjectBody is a minimal applied-object XML file (only existence matters to the
+// universe enumerator, which never parses it).
+func metaObjectBody(name string) string {
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+  <Properties><Name>` + name + `</Name></Properties>
+</MetaDataObject>
+`
+}
+
+// TestIntegration_AnalyzeSubsystems_FromDump proves analyze_subsystems answers
+// entirely from the offline dump (tree / orphans / containing / intersections) and
+// never contacts the live extension when a dump is present.
+func TestIntegration_AnalyzeSubsystems_FromDump(t *testing.T) {
+	session, cleanup := setupIntegrationSubsystemDump(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// orphans: the dump-only marker is applied but in no subsystem, so it appears;
+	// distributed objects do not; mock-only objects prove the live path was NOT used.
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "analyze_subsystems",
+		Arguments: map[string]any{"action": "orphans"},
+	})
+	if err != nil {
+		t.Fatalf("orphans CallTool error: %v", err)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "Справочник.МаркерТолькоВДампе") {
+		t.Errorf("orphans: expected the dump-only marker object, got:\n%s", text)
+	}
+	for _, distributed := range []string{"Справочник.Контрагенты", "Документ.РеализацияТоваров", "Справочник.Склады"} {
+		if strings.Contains(text, distributed) {
+			t.Errorf("orphans: distributed object %q wrongly listed:\n%s", distributed, text)
+		}
+	}
+	for _, mockOnly := range []string{"Номенклатура", "КурсыВалют"} {
+		if strings.Contains(text, mockOnly) {
+			t.Errorf("orphans leaked mock-only %q -> the live path was used, not the dump:\n%s", mockOnly, text)
+		}
+	}
+
+	// containing: РеализацияТоваров is in Продажи and Финансы (two distinct roots).
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "analyze_subsystems",
+		Arguments: map[string]any{"action": "containing", "object": "РеализацияТоваров"},
+	})
+	if err != nil {
+		t.Fatalf("containing CallTool error: %v", err)
+	}
+	text = res.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Документ.РеализацияТоваров", "Продажи", "Финансы"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("containing: expected %q, got:\n%s", want, text)
+		}
+	}
+
+	// intersections cross-branch: only РеализацияТоваров spans distinct roots;
+	// Контрагенты (single root) is excluded.
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "analyze_subsystems",
+		Arguments: map[string]any{"action": "intersections", "cross_branch_only": true},
+	})
+	if err != nil {
+		t.Fatalf("intersections CallTool error: %v", err)
+	}
+	text = res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "Документ.РеализацияТоваров") {
+		t.Errorf("intersections: expected РеализацияТоваров, got:\n%s", text)
+	}
+	if strings.Contains(text, "## Справочник.Контрагенты") {
+		t.Errorf("intersections cross-branch must exclude same-root Контрагенты, got:\n%s", text)
+	}
+}
+
+// TestIntegration_ObjectStructure_Subsystem_FromDump proves object_structure serves
+// object_type=Subsystem from the dump (Состав + nested tree) and not from the mock.
+func TestIntegration_ObjectStructure_Subsystem_FromDump(t *testing.T) {
+	session, cleanup := setupIntegrationSubsystemDump(t)
+	defer cleanup()
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_object_structure",
+		Arguments: map[string]any{"object_type": "Subsystem", "object_name": "Продажи"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"Продажи", "## Состав", "Справочник.Контрагенты", "Документ.РеализацияТоваров", "## Подсистемы", "Розница", "Справочник.Склады"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q in dump-served structure, got:\n%s", want, text)
+		}
+	}
+	for _, mockOnly := range []string{"Касса", "КассовыйОрдер"} {
+		if strings.Contains(text, mockOnly) {
+			t.Errorf("structure leaked mock-only %q -> live path used, not the dump:\n%s", mockOnly, text)
+		}
+	}
+}
+
+// TestIntegration_ObjectStructure_NonSubsystem_StaysLiveWithDump proves that even
+// with a dump present, a NON-Subsystem object_structure request falls through to the
+// live extension (the dump owns only the Subsystem type).
+func TestIntegration_ObjectStructure_NonSubsystem_StaysLiveWithDump(t *testing.T) {
+	session, cleanup := setupIntegrationSubsystemDump(t)
+	defer cleanup()
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_object_structure",
+		Arguments: map[string]any{"object_type": "Document", "object_name": "РеализацияТоваровУслуг"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+	// These come only from the mock's Document structure (the dump has no attribute
+	// reader), so their presence proves the live path served this type.
+	for _, want := range []string{"Контрагент", "СуммаДокумента", "Товары"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("non-Subsystem type must be served live; expected %q, got:\n%s", want, text)
+		}
+	}
+}
+
 func TestIntegration_ListTools(t *testing.T) {
 	session, cleanup := setupIntegration(t)
 	defer cleanup()
@@ -465,8 +683,10 @@ func TestIntegration_ObjectStructure_DefinedType(t *testing.T) {
 	}
 }
 
+// object_structure(Subsystem) via the LIVE path (no dump present): a nil offline
+// source must be byte-identical to the legacy live-only handler.
 func TestIntegration_ObjectStructure_Subsystem(t *testing.T) {
-	session, cleanup := setupIntegration(t)
+	session, cleanup := setupIntegrationNoDump(t)
 	defer cleanup()
 
 	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
@@ -732,8 +952,10 @@ func TestIntegration_EventLog(t *testing.T) {
 	}
 }
 
+// analyze_subsystems via the LIVE path (no dump present): a nil offline source
+// must be byte-identical to the legacy live-only handler.
 func TestIntegration_AnalyzeSubsystems(t *testing.T) {
-	session, cleanup := setupIntegration(t)
+	session, cleanup := setupIntegrationNoDump(t)
 	defer cleanup()
 
 	ctx := context.Background()
