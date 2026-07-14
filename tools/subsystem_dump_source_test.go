@@ -106,7 +106,7 @@ func TestDumpSubsystemForestFunc_EndToEndOrphansContaining(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustContain(t, orphans, "Документ.Возврат")     // orphan (in no subsystem)
+	mustContain(t, orphans, "Документ.Возврат")       // orphan (in no subsystem)
 	mustNotContain(t, orphans, "Документ.Реализация") // distributed
 
 	containing, err := runHandlerText(t, h, "analyze_subsystems", map[string]any{"action": "containing", "object": "Реализация"})

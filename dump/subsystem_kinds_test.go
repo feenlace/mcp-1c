@@ -75,7 +75,7 @@ func TestServiceKindNameRu_AppliedKindsAndUnknownReturnFalse(t *testing.T) {
 
 func TestCanonicalizeContentPath_AppliedKinds(t *testing.T) {
 	cases := map[string]string{
-		"Document.РеализацияТоваров":      "Документ.РеализацияТоваров",
+		"Document.РеализацияТоваров":     "Документ.РеализацияТоваров",
 		"Catalog.Контрагенты":            "Справочник.Контрагенты",
 		"AccumulationRegister.Продажи":   "РегистрНакопления.Продажи",
 		"Enum.СтатусыЗаказов":            "Перечисление.СтатусыЗаказов",
@@ -90,10 +90,10 @@ func TestCanonicalizeContentPath_AppliedKinds(t *testing.T) {
 
 func TestCanonicalizeContentPath_ServiceKinds(t *testing.T) {
 	cases := map[string]string{
-		"CommonModule.ОбщегоНазначения": "ОбщийМодуль.ОбщегоНазначения",
+		"CommonModule.ОбщегоНазначения":  "ОбщийМодуль.ОбщегоНазначения",
 		"CommonCommand.АвтономнаяРабота": "ОбщаяКоманда.АвтономнаяРабота",
-		"Role.Администратор":            "Роль.Администратор",
-		"DocumentNumerator.Основной":    "НумераторДокументов.Основной",
+		"Role.Администратор":             "Роль.Администратор",
+		"DocumentNumerator.Основной":     "НумераторДокументов.Основной",
 	}
 	for raw, want := range cases {
 		if got := canonicalizeContentPath(raw); got != want {
