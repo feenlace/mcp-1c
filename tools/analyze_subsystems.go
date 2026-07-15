@@ -22,7 +22,7 @@ func AnalyzeSubsystemsTool() *mcp.Tool {
 		Title:       "Анализ топологии подсистем",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Анализ распределения объектов конфигурации 1С по подсистемам. " +
-			"action=orphans: применимые объекты (справочники, документы, регистры, отчёты, обработки, планы, бизнес-процессы, задачи, перечисления), не входящие ни в одну подсистему. " +
+			"action=orphans: объекты вне подсистем. Универсум охватывает все виды верхнего уровня, пригодные для состава подсистемы: прикладные (справочники, документы, регистры, отчёты, обработки, планы, бизнес-процессы, задачи, перечисления) и служебные (константы, общие модули, общие формы и команды, роли, определяемые типы, HTTP и web сервисы, регламентные задания, подписки на события и прочие), кроме самого контейнера (подсистемы). " +
 			"action=containing: список подсистем, содержащих указанный объект (параметр object, полное имя вида Документ.РеализацияТоваровУслуг или короткое РеализацияТоваровУслуг). " +
 			"action=intersections: объекты, входящие сразу в несколько подсистем (при cross_branch_only=true остаются только пересечения между разными корневыми подсистемами). " +
 			"Используй для аудита архитектуры: найти неучтённые объекты, понять к каким подсистемам относится объект, выявить дублирование между ветвями.",
@@ -281,10 +281,12 @@ func writeForestWarnings(b *strings.Builder, forest onec.SubsystemForest) {
 		len(forest.Warnings), strings.Join(forest.Warnings, "; "))
 }
 
-// computeOrphans lists applied objects that belong to no subsystem. The universe
-// is forest.AllObjects (applied kinds only, chosen server-side); noise objects
-// (auto-generated attachments) are filtered out via the shared isNoise so they
-// are never flagged. Output uses ASCII list markers, sorted, no тире.
+// computeOrphans lists objects that belong to no subsystem. The universe is
+// forest.AllObjects: the full set of top-level, Состав-eligible metadata kinds the
+// source enumerates (applied kinds PLUS service kinds like common modules, roles,
+// constants and defined types), not applied kinds only. Noise objects (auto-generated
+// attachments) are filtered out via the shared isNoise so they are never flagged.
+// Output uses ASCII list markers, sorted, no тире.
 func computeOrphans(forest onec.SubsystemForest) string {
 	membership := flattenForest(forest)
 
