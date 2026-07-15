@@ -138,15 +138,18 @@ func TestCanonicalizeContentPath_NFCNormalisesSuffix(t *testing.T) {
 	}
 }
 
-// The applied-kind universe set must carry exactly the 15 applied kinds and must
-// NOT include Constant (the live extension does not count constants as applied
-// objects for subsystem membership).
+// appliedKindRu is a MEMBERSHIP-canonicalization table (it recognises whether a
+// qualified name's kind is one of the applied kinds), NOT the orphans universe. It
+// must stay pinned at exactly the 15 applied kinds and must NOT include Константа:
+// broadening the orphans universe to cover Константа and the service kinds was done
+// in the SEPARATE universeFolderToRu table (see subsystem_universe_kinds.go), leaving
+// this dual-purpose canonicalization table unchanged so it does not double-map.
 func TestAppliedKindRu_HasFifteenAndExcludesConstant(t *testing.T) {
 	if len(appliedKindRu) != 15 {
 		t.Errorf("appliedKindRu has %d entries, want 15: %v", len(appliedKindRu), appliedKindRu)
 	}
 	if appliedKindRu["Константа"] {
-		t.Errorf("appliedKindRu must NOT include Константа (Constant is not an applied object)")
+		t.Errorf("appliedKindRu must NOT include Константа (this is the membership table, pinned at 15)")
 	}
 	for _, ru := range []string{"Справочник", "Документ", "Перечисление", "Отчет", "Обработка"} {
 		if !appliedKindRu[ru] {
@@ -177,17 +180,27 @@ func TestCanonicalizeContentPath_ConstantAndSubsystem(t *testing.T) {
 	}
 }
 
-// Adding Constant / Subsystem to the service-kind canonicalization must NOT leak
-// Constant into the applied-object universe: orphans must still exclude constants,
-// so appliedKindRu stays 15 entries and excludes Константа.
-func TestConstantStaysOutOfAppliedUniverse(t *testing.T) {
+// Константа now lives in the ORPHANS UNIVERSE (the owner reversed the earlier
+// deliberate exclusion) but must still be ABSENT from the two membership
+// canonicalization tables (appliedKindRu / appliedKindEnToRu), which stay pinned at
+// 15: the universe broadening was made additively in universeFolderToRu, so the
+// canonicalizer does not double-map Constant. This test pins both sides of that split.
+func TestConstantInUniverseButNotInMembershipTables(t *testing.T) {
+	// Membership tables: unchanged, Constant-free, 15 entries.
 	if appliedKindRu["Константа"] {
-		t.Errorf("Константа must NOT be an applied-universe kind")
+		t.Errorf("Константа must NOT be in appliedKindRu (membership table)")
 	}
 	if _, ok := appliedKindEnToRu["Constant"]; ok {
-		t.Errorf("Constant must NOT be in appliedKindEnToRu")
+		t.Errorf("Constant must NOT be in appliedKindEnToRu (membership table)")
 	}
 	if len(appliedKindRu) != 15 {
 		t.Errorf("appliedKindRu = %d entries, want 15", len(appliedKindRu))
+	}
+	// Orphans universe: Константа IS now enumerable (the reversal).
+	if !universeRuKinds["Константа"] {
+		t.Errorf("Константа MUST be in the orphans universe now (owner reversed the exclusion)")
+	}
+	if _, ok := universeFolderToRu["Constants"]; !ok {
+		t.Errorf("the Constants dump folder must map into the universe")
 	}
 }

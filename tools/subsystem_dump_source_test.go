@@ -116,6 +116,60 @@ func TestDumpSubsystemForestFunc_EndToEndOrphansContaining(t *testing.T) {
 	mustContain(t, containing, "Продажи")
 }
 
+// TDD (broadened universe): orphans must now report an out-of-subsystem SERVICE-kind
+// object (common module, constant, role) exactly like an applied object, because the
+// universe now spans the full Состав-eligible kind set. A service-kind object that IS a
+// subsystem member must still be excluded. This is the end-to-end proof of the fix on
+// the offline (dump) path.
+func TestDumpForest_OrphansIncludeServiceKinds(t *testing.T) {
+	dir := t.TempDir()
+	// One common module IS in a subsystem's Состав (English dump prefix), one is not.
+	dumpWrite(t, dir, subBody("Учет", "CommonModule.ВСоставе"), "Subsystems", "Учет.xml")
+	dumpWrite(t, dir, applObj("ВСоставе"), "CommonModules", "ВСоставе.xml")
+	dumpWrite(t, dir, applObj("ВнеСостава"), "CommonModules", "ВнеСостава.xml")
+	dumpWrite(t, dir, applObj("ОдинокаяКонстанта"), "Constants", "ОдинокаяКонстанта.xml")
+	dumpWrite(t, dir, applObj("Аудитор"), "Roles", "Аудитор.xml")
+	dumpWrite(t, dir, applObj("Товар"), "Catalogs", "Товар.xml")
+
+	h := NewAnalyzeSubsystemsHandlerWithSource(nil, DumpSubsystemForestFunc(dir))
+	orphans, err := runHandlerText(t, h, "analyze_subsystems", map[string]any{"action": "orphans"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Out-of-subsystem service kinds and the applied catalog are orphans now.
+	mustContain(t, orphans,
+		"ОбщийМодуль.ВнеСостава",
+		"Константа.ОдинокаяКонстанта",
+		"Роль.Аудитор",
+		"Справочник.Товар",
+	)
+	// The common module that IS a member must not be an orphan.
+	mustNotContain(t, orphans, "ОбщийМодуль.ВСоставе")
+	// A clean, complete dump must not emit the coverage diagnostic.
+	mustNotContain(t, orphans, "Диагностика")
+}
+
+// TDD (non-silent coverage diagnostic): when a subsystem references a universe kind
+// whose dump folder is ABSENT, the orphans output must carry a diagnostic that NAMES the
+// kind, so a partial dump or a universe folder-name error is visible instead of silently
+// under-reporting that kind's orphans. Customer-facing RU: no тире.
+func TestDumpForest_OrphansCoverageDiagnosticNamesMissingKind(t *testing.T) {
+	dir := t.TempDir()
+	// A subsystem references a common module, but there is NO CommonModules folder.
+	dumpWrite(t, dir, subBody("Учет", "CommonModule.Скрытый"), "Subsystems", "Учет.xml")
+	dumpWrite(t, dir, applObj("Товар"), "Catalogs", "Товар.xml") // a present applied object
+
+	h := NewAnalyzeSubsystemsHandlerWithSource(nil, DumpSubsystemForestFunc(dir))
+	orphans, err := runHandlerText(t, h, "analyze_subsystems", map[string]any{"action": "orphans"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, orphans, "Диагностика", "ОбщийМодуль")
+	if strings.ContainsRune(orphans, '—') || strings.ContainsRune(orphans, '–') {
+		t.Errorf("coverage diagnostic contains a dash (тире):\n%s", orphans)
+	}
+}
+
 // ---- object_structure func: the type-routing (fall-through) contract ----
 
 func TestDumpObjectStructFunc_SubsystemHandled(t *testing.T) {

@@ -32,20 +32,34 @@ func TestEnumerateAppliedObjects_MixedKindsAndShapes(t *testing.T) {
 	}
 }
 
-func TestEnumerateAppliedObjects_ExcludesNonApplied(t *testing.T) {
+// NEW CONTRACT (broadened universe): the orphans universe now covers the full set of
+// top-level, independently-enumerable, Состав-eligible metadata kinds, not just the 15
+// applied kinds. A Константа, ОбщийМодуль, Роль, ОпределяемыйТип (and the other service
+// kinds) that `containing` already recognises is now ALSO in the universe, so `orphans`
+// can report it when it belongs to no subsystem. The ONLY top-level exclusion is the
+// container itself (Подсистема).
+func TestEnumerateAppliedObjects_IncludesServiceKindsExcludesContainer(t *testing.T) {
 	dir := t.TempDir()
-	// Applied (must appear).
+	// Applied (still enumerated).
 	secWrite(t, filepath.Join(dir, "Catalogs", "Валюты.xml"), objBody("Валюты"))
-	// Non-applied (must NOT appear): Constant, CommonModule, Subsystem, Role.
+	// Service / extra kinds that MUST now appear (previously excluded).
 	secWrite(t, filepath.Join(dir, "Constants", "Ставка.xml"), objBody("Ставка"))
-	secWrite(t, filepath.Join(dir, "CommonModules", "Обмен", "Ext", "Обмен.xml"), objBody("Обмен"))
-	secWrite(t, filepath.Join(dir, "Subsystems", "Продажи.xml"), objBody("Продажи"))
+	secWrite(t, filepath.Join(dir, "CommonModules", "Обмен", "Ext", "Обмен.xml"), objBody("Обмен")) // Ext shape
 	secWrite(t, filepath.Join(dir, "Roles", "Администратор.xml"), objBody("Администратор"))
+	secWrite(t, filepath.Join(dir, "DefinedTypes", "ЗначениеДоступа.xml"), objBody("ЗначениеДоступа"))
+	// The container itself MUST NOT appear (a subsystem is not a member object).
+	secWrite(t, filepath.Join(dir, "Subsystems", "Продажи.xml"), objBody("Продажи"))
 
 	got := EnumerateAppliedObjects(dir)
-	want := []string{"Справочник.Валюты"}
+	want := []string{
+		"Константа.Ставка",
+		"ОбщийМодуль.Обмен",
+		"ОпределяемыйТип.ЗначениеДоступа",
+		"Роль.Администратор",
+		"Справочник.Валюты",
+	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("EnumerateAppliedObjects = %v, want %v (non-applied kinds must be excluded)", got, want)
+		t.Errorf("EnumerateAppliedObjects = %v,\n want %v (service kinds included; container Подсистема excluded)", got, want)
 	}
 }
 
