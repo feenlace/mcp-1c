@@ -393,6 +393,53 @@ func TestAnalyzeSubsystemsHandler_Orphans(t *testing.T) {
 	mustNotContain(t, tc.Text, "КонтрагентыПрисоединенныеФайлы")
 }
 
+// TDD (broadened universe, LIVE HTTP path): the live extension now returns service-kind
+// objects in allObjects, and orphans must report the out-of-subsystem ones exactly like
+// applied objects. Proven end to end through the real handler -> onec.Client -> HTTP, so
+// this exercises the same path production uses (not just computeOrphans in isolation).
+func TestAnalyzeSubsystemsHandler_OrphansIncludesServiceKinds_LivePath(t *testing.T) {
+	forest := onec.SubsystemForest{
+		Subsystems: []onec.SubsystemNode{
+			{Name: "Продажи", FullName: "Подсистема.Продажи",
+				Content: []string{"Справочник.Контрагенты", "ОбщийМодуль.УправлениеПечатью"}},
+		},
+		AllObjects: []string{
+			"Справочник.Контрагенты",          // member (applied)
+			"ОбщийМодуль.УправлениеПечатью",   // member (service kind) -> not an orphan
+			"ОбщийМодуль.ОбщегоНазначения",    // orphan (service kind)
+			"Роль.Аудитор",                    // orphan
+			"Константа.ОсновнаяОрганизация",   // orphan
+			"ОпределяемыйТип.ЗначениеДоступа", // orphan
+			"HTTPСервис.MCPService",           // orphan
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/subsystems" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(forest)
+	}))
+	defer srv.Close()
+	client := onec.NewClient(srv.URL, "", "")
+
+	result, err := callAnalyze(t, client, map[string]any{"action": "orphans"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tc := result.Content[0].(*mcp.TextContent)
+	mustContain(t, tc.Text,
+		"ОбщийМодуль.ОбщегоНазначения",
+		"Роль.Аудитор",
+		"Константа.ОсновнаяОрганизация",
+		"ОпределяемыйТип.ЗначениеДоступа",
+		"HTTPСервис.MCPService",
+	)
+	// The service kind that IS a member must not be reported as an orphan.
+	mustNotContain(t, tc.Text, "ОбщийМодуль.УправлениеПечатью")
+}
+
 func TestAnalyzeSubsystemsHandler_Containing(t *testing.T) {
 	client, closeFn := newSubsystemsMock(t)
 	defer closeFn()

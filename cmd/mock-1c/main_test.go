@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/feenlace/mcp-1c/onec"
+	"github.com/feenlace/mcp-1c/tools"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // TestHandleObject_DefinedType exercises the offline DefinedType fixture: the
@@ -265,5 +268,50 @@ func TestHandleObject_Subsystem_Warnings(t *testing.T) {
 	}
 	if !strings.Contains(obj.Warnings[0], "Подсистема Розница") {
 		t.Errorf("unexpected warning: %q", obj.Warnings[0])
+	}
+}
+
+// TestMockSubsystems_OrphansIncludeServiceKinds drives the mock's broadened subsystemForest
+// through the REAL analyze_subsystems handler (live HTTP path) and asserts orphans now
+// reports the out-of-subsystem service kinds (roles, constants, common modules, defined
+// type, HTTP service, scheduled job) while excluding the one that IS a subsystem member
+// (ОбщийМодуль.УправлениеПечатью). This is the Go-level proof that the mock serves the
+// broadened universe and that orphans surfaces service kinds end to end.
+func TestMockSubsystems_OrphansIncludeServiceKinds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/subsystems" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(subsystemForest)
+	}))
+	defer srv.Close()
+
+	client := onec.NewClient(srv.URL, "", "")
+	h := tools.NewAnalyzeSubsystemsHandler(client)
+	raw, _ := json.Marshal(map[string]any{"action": "orphans"})
+	res, err := h(context.Background(), &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{Name: "analyze_subsystems", Arguments: raw},
+	})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	text := res.Content[0].(*mcp.TextContent).Text
+
+	for _, want := range []string{
+		"ОбщийМодуль.ОбщегоНазначения",
+		"Роль.Администратор",
+		"Константа.ОсновнаяОрганизация",
+		"ОпределяемыйТип.ЗначениеДоступа",
+		"HTTPСервис.MCPService",
+		"РегламентноеЗадание.ОбновлениеКурсовВалют",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("mock orphans missing out-of-subsystem service kind %q\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "ОбщийМодуль.УправлениеПечатью") {
+		t.Errorf("ОбщийМодуль.УправлениеПечатью is a member of Продажи and must not be an orphan\n%s", text)
 	}
 }
