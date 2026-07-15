@@ -170,6 +170,52 @@ func TestDumpForest_OrphansCoverageDiagnosticNamesMissingKind(t *testing.T) {
 	}
 }
 
+// TDD (FULL Состав-eligible finalization): the orphans universe now spans EVERY
+// Состав-eligible top-level kind, so an out-of-subsystem Стиль, ЭлементСтиля, КритерийОтбора,
+// ОбщийРеквизит, Нумератор, WSСсылка and Последовательность are each reported; a kind object
+// that IS a member is excluded; and Язык (NOT Состав-eligible) is never emitted even when a
+// Languages/ folder is physically present. End-to-end proof through the orphans handler.
+func TestDumpForest_OrphansFinalizedFullSet(t *testing.T) {
+	dir := t.TempDir()
+	// One style and one common attribute ARE in a subsystem's Состав (English dump prefix).
+	dumpWrite(t, dir, subBody("Оформление", "Style.ВСоставе", "CommonAttribute.ВСоставе"), "Subsystems", "Оформление.xml")
+	dumpWrite(t, dir, applObj("ВСоставе"), "Styles", "ВСоставе.xml")
+	dumpWrite(t, dir, applObj("ВнеСостава"), "Styles", "ВнеСостава.xml")
+	dumpWrite(t, dir, applObj("ВСоставе"), "CommonAttributes", "ВСоставе.xml")
+	dumpWrite(t, dir, applObj("ВнеСоставаРеквизит"), "CommonAttributes", "ВнеСоставаРеквизит.xml")
+	dumpWrite(t, dir, applObj("ЦветАкцента"), "StyleItems", "ЦветАкцента.xml")
+	dumpWrite(t, dir, applObj("ПоКонтрагенту"), "FilterCriteria", "ПоКонтрагенту.xml")
+	dumpWrite(t, dir, applObj("НалоговыеДокументы"), "DocumentNumerators", "НалоговыеДокументы.xml")
+	dumpWrite(t, dir, applObj("WSОбмен"), "WSReferences", "WSОбмен.xml")
+	dumpWrite(t, dir, applObj("ДвижениеТоваров"), "Sequences", "ДвижениеТоваров.xml")
+	// Язык: physically present but NOT Состав-eligible -> must never surface as an orphan.
+	dumpWrite(t, dir, applObj("Русский"), "Languages", "Русский.xml")
+
+	h := NewAnalyzeSubsystemsHandlerWithSource(nil, DumpSubsystemForestFunc(dir))
+	orphans, err := runHandlerText(t, h, "analyze_subsystems", map[string]any{"action": "orphans"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Out-of-subsystem finalized-set objects are orphans now.
+	mustContain(t, orphans,
+		"Стиль.ВнеСостава",
+		"ЭлементСтиля.ЦветАкцента",
+		"КритерийОтбора.ПоКонтрагенту",
+		"ОбщийРеквизит.ВнеСоставаРеквизит",
+		"Нумератор.НалоговыеДокументы",
+		"WSСсылка.WSОбмен",
+		"Последовательность.ДвижениеТоваров",
+	)
+	// Members must not be orphans.
+	mustNotContain(t, orphans, "Стиль.ВСоставе", "ОбщийРеквизит.ВСоставе")
+	// Язык is not Состав-eligible: never emitted, even with a Languages/ folder present.
+	mustNotContain(t, orphans, "Язык.")
+	// The corrected prefix must be used (never the earlier НумераторДокументов candidate).
+	mustNotContain(t, orphans, "НумераторДокументов")
+	// A clean, complete dump (every referenced kind folder present) emits no diagnostic.
+	mustNotContain(t, orphans, "Диагностика")
+}
+
 // ---- object_structure func: the type-routing (fall-through) contract ----
 
 func TestDumpObjectStructFunc_SubsystemHandled(t *testing.T) {

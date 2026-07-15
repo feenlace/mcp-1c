@@ -39,10 +39,13 @@ type universeKind struct {
 	bslCollection string
 }
 
-// universeServiceKinds is the owner-approved set of top-level service / extra kinds
-// included in the orphans universe on top of the applied 15. Константа is included
-// (the owner reversed the earlier deliberate exclusion). Provenance for every row was
-// grounded in source (No-Invention), not memory:
+// universeServiceKinds is the FINALIZED set of top-level service / extra kinds included
+// in the orphans universe on top of the applied 15: every top-level, independently
+// enumerable, Состав-eligible kind the code knows EXCEPT the container (Подсистема) and the
+// non-eligible Язык. Константа is included (the owner reversed the earlier deliberate
+// exclusion). Eligibility for every row is proven by the kind appearing in real
+// vendor-config subsystem <Content>. Provenance for every row was grounded in source
+// (No-Invention), not memory:
 //   - RU prefix: serviceKindEnToRu (the same table membership uses; Constant included).
 //   - Dump folder: the authoritative 1C EN->dir map (metadataTypeDirMap) and real dump
 //     fixtures; XDTOPackages from the in-repo 1C syntax corpus.
@@ -73,6 +76,25 @@ var universeServiceKinds = []universeKind{
 	{"EventSubscription", "EventSubscriptions", "ПодпискиНаСобытия"},
 	{"DocumentJournal", "DocumentJournals", "ЖурналыДокументов"},
 	{"SettingsStorage", "SettingsStorages", "ХранилищаНастроек"},
+	// FINALIZATION to the FULL Состав-eligible set. Every kind below is proven eligible by
+	// its appearance in real vendor-config subsystem <Content> (evidence-confirmed EN
+	// prefix). Dump folder = the EN kind pluralized (the 1C ConfigurationDump convention
+	// every kind above also follows); bslCollection is the live Метаданные[...] property.
+	// The RU singular each row cancels against comes from serviceKindEnToRu (via
+	// universeKindRu), NOT from the bslCollection here. Нумераторы -> Нумератор CORRECTS an
+	// earlier НумераторДокументов candidate.
+	{"Style", "Styles", "Стили"},
+	{"StyleItem", "StyleItems", "ЭлементыСтиля"},
+	{"FilterCriterion", "FilterCriteria", "КритерииОтбора"},
+	{"Sequence", "Sequences", "Последовательности"},
+	{"CommonAttribute", "CommonAttributes", "ОбщиеРеквизиты"},
+	{"DocumentNumerator", "DocumentNumerators", "Нумераторы"},
+	{"WSReference", "WSReferences", "WSСсылки"},
+	{"FunctionalOptionsParameter", "FunctionalOptionsParameters", "ПараметрыФункциональныхОпций"},
+	// ExternalDataSource: enumerated at the top level only. Its subordinate Tables
+	// (ExternalDataSource.<Источник>.Table.<Таблица> in Состав) are NOT independently
+	// top-level objects, so only the source object itself is a universe member.
+	{"ExternalDataSource", "ExternalDataSources", "ВнешниеИсточникиДанных"},
 }
 
 // nonUniverseServiceKinds lists every serviceKindEnToRu key deliberately KEPT OUT of
@@ -80,19 +102,25 @@ var universeServiceKinds = []universeKind{
 // (TestUniverse_ClassifiesEveryServiceKind) can assert EVERY service kind is accounted
 // for -- included in universeServiceKinds or excluded here -- so a future serviceKindEnToRu
 // addition cannot be silently forgotten from the universe (the exact bug class this fix
-// closes). Subsystem is the container itself, never a member object; the remaining kinds
-// are top-level but were NOT in the owner-approved universe set and their Состав
-// eligibility could not be confirmed from local sources, so they are excluded pending an
-// owner decision rather than guessed into the universe.
+// closes).
+//
+// After the FULL-set finalization only two kinds remain excluded, both on documented,
+// evidence-grounded grounds (not "unconfirmed"):
+//   - Subsystem: the container itself; nested subsystems hang off the hierarchy, never
+//     another subsystem's Состав, so it is not a member object.
+//   - Language: documentally not part of a subsystem Состав (документально не входит в
+//     состав подсистемы). It is pure localization with 0 occurrences across all indexed
+//     real vendor configs; enumerating it would emit a false orphan for EVERY language.
+//
+// DOCUMENTED UNCERTAIN OMISSION (left OUT, and deliberately NOT added to serviceKindEnToRu
+// so it is neither enumerated nor mapped): IntegrationService / ИнтеграционныйСервис
+// (8.3.21+). It has n=0 in the indexed public configs and its dump folder, BSL collection
+// and .ПолноеИмя() prefix are all unvalidated, so it stays out pending real-config
+// confirmation. If a future serviceKindEnToRu ever gains it, the classification invariant
+// forces an explicit include/exclude decision rather than a silent gap.
 var nonUniverseServiceKinds = map[string]string{
-	"Subsystem":         "the container itself, not a member object",
-	"WSReference":       "not in the owner-approved universe set; Состав eligibility unconfirmed locally",
-	"Style":             "not in the owner-approved universe set; Состав eligibility unconfirmed locally",
-	"Language":          "not in the owner-approved universe set; Состав eligibility unconfirmed locally",
-	"CommonAttribute":   "not in the owner-approved universe set; Состав eligibility unconfirmed locally",
-	"Sequence":          "not in the owner-approved universe set; Состав eligibility unconfirmed locally",
-	"FilterCriterion":   "not in the owner-approved universe set; Состав eligibility unconfirmed locally",
-	"DocumentNumerator": "not in the owner-approved universe set; Состав eligibility unconfirmed locally",
+	"Subsystem": "the container itself, not a member object",
+	"Language":  "документально не входит в состав подсистемы (pure localization; 0 occurrences in real configs; enumerating it would emit a false orphan per language)",
 }
 
 // universeFolderToRu maps a dump kind-folder name (both the modern plural AND the legacy

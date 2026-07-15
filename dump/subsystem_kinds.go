@@ -53,9 +53,11 @@ func init() {
 // it exists so subsystem Content and analyze_subsystems containing/intersections
 // render service members in Russian instead of leaking the dump's English prefix.
 //
-// DocumentNumerator maps to НумераторДокументов, the form the platform full name
-// emits on a real base (live-verified). The shorter kind singular is deliberately
-// NOT used and this must not regress.
+// DocumentNumerator maps to Нумератор, the 1C metadata class name the platform full
+// name (.ПолноеИмя()) emits for a document numerator ("Нумератор.<Имя>"), which is the
+// singular of its Нумераторы collection just like Документы -> Документ. VM-grounded on
+// 8.3.27; this CORRECTS an earlier НумераторДокументов candidate, the only kind that had
+// broken the collection-singular consistency every other kind holds.
 //
 // The five Common-typed kinds (CommonModule, CommonForm, CommonCommand,
 // CommonTemplate, CommonPicture) are folded into this one table; there is no key
@@ -84,8 +86,17 @@ var serviceKindEnToRu = map[string]string{
 	"SessionParameter":  "ПараметрСеанса",
 	"Sequence":          "Последовательность",
 	"FilterCriterion":   "КритерийОтбора",
-	"DocumentNumerator": "НумераторДокументов",
+	"DocumentNumerator": "Нумератор",
 	"CommandGroup":      "ГруппаКоманд",
+	// Kinds added when the orphans universe was finalized to the FULL Состав-eligible
+	// set (each appears in real vendor-config subsystem <Content>). RU singulars are the
+	// 1C metadata class names; StyleItem and ExternalDataSource match the singular of their
+	// collections (ЭлементыСтиля -> ЭлементСтиля, ВнешниеИсточникиДанных -> ВнешнийИсточникДанных).
+	// ExternalDataSource is enumerated at the TOP level only; its subordinate Tables
+	// (ExternalDataSource.<Источник>.Table.<Таблица>) are not independently top-level.
+	"StyleItem":                  "ЭлементСтиля",
+	"FunctionalOptionsParameter": "ПараметрФункциональнойОпции",
+	"ExternalDataSource":         "ВнешнийИсточникДанных",
 	// Document journals: structural, not an applied orphan kind, but a valid
 	// subsystem Content member. The Russian singular ЖурналДокументов matches the
 	// canonical name recorded in metadata_types.go for the DocumentJournals folder.

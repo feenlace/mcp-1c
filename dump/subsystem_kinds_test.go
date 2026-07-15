@@ -34,19 +34,20 @@ func TestServiceKindNameRu_KnownKinds(t *testing.T) {
 	}
 }
 
-// The corrected value: DocumentNumerator maps to НумераторДокументов (the form the
-// platform full name emits on a real base), NOT the shorter kind singular the
-// syntax corpus records. This was a live-verified fix and must never regress.
+// VM-grounded correction (8.3.27): DocumentNumerator's .ПолноеИмя() prefix is the 1C
+// metadata class name "Нумератор" (the singular of its Нумераторы collection, like every
+// other kind: Документы -> Документ), NOT the earlier "НумераторДокументов" candidate. This
+// pins the corrected value and guards against reintroducing НумераторДокументов.
 func TestServiceKindNameRu_DocumentNumeratorCorrected(t *testing.T) {
 	got, ok := ServiceKindNameRu("DocumentNumerator")
 	if !ok {
 		t.Fatalf("ServiceKindNameRu(DocumentNumerator): ok=false, want a mapping")
 	}
-	if got != "НумераторДокументов" {
-		t.Errorf("ServiceKindNameRu(DocumentNumerator) = %q, want НумераторДокументов", got)
+	if got != "Нумератор" {
+		t.Errorf("ServiceKindNameRu(DocumentNumerator) = %q, want Нумератор", got)
 	}
-	if got == "Нумератор" {
-		t.Errorf("regression: DocumentNumerator maps to the OLD value Нумератор, must be НумераторДокументов")
+	if got == "НумераторДокументов" {
+		t.Errorf("regression: DocumentNumerator maps to the earlier НумераторДокументов candidate, must be the VM-grounded Нумератор")
 	}
 }
 
@@ -93,7 +94,7 @@ func TestCanonicalizeContentPath_ServiceKinds(t *testing.T) {
 		"CommonModule.ОбщегоНазначения":  "ОбщийМодуль.ОбщегоНазначения",
 		"CommonCommand.АвтономнаяРабота": "ОбщаяКоманда.АвтономнаяРабота",
 		"Role.Администратор":             "Роль.Администратор",
-		"DocumentNumerator.Основной":     "НумераторДокументов.Основной",
+		"DocumentNumerator.Основной":     "Нумератор.Основной",
 	}
 	for raw, want := range cases {
 		if got := canonicalizeContentPath(raw); got != want {
