@@ -93,9 +93,16 @@ func buildDumpForest(ctx context.Context, dumpDir string) (onec.SubsystemForest,
 	if err != nil {
 		return onec.SubsystemForest{}, err
 	}
+	// Enumerate the universe with the parsed membership so the coverage diagnostic can
+	// NAME any universe kind a subsystem references but whose dump folder is absent (a
+	// partial dump, or a universe folder-name error) instead of silently under-reporting
+	// that kind's orphans. Coverage warnings merge with the tree-parse warnings into the
+	// single forest.Warnings channel.
+	allObjects, coverage := dump.EnumerateUniverseObjects(dumpDir, subs)
+	warnings = append(warnings, coverage...)
 	return onec.SubsystemForest{
 		Subsystems: convertDumpNodes(subs),
-		AllObjects: dump.EnumerateAppliedObjects(dumpDir),
+		AllObjects: allObjects,
 		Warnings:   warnings,
 	}, nil
 }

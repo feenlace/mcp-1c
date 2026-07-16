@@ -116,6 +116,107 @@ func TestDumpSubsystemForestFunc_EndToEndOrphansContaining(t *testing.T) {
 	mustContain(t, containing, "Продажи")
 }
 
+// TDD (broadened universe): orphans must now report an out-of-subsystem SERVICE-kind
+// object (common module, constant, role) exactly like an applied object, because the
+// universe now spans the full Состав-eligible kind set. A service-kind object that IS a
+// subsystem member must still be excluded. This is the end-to-end proof of the fix on
+// the offline (dump) path.
+func TestDumpForest_OrphansIncludeServiceKinds(t *testing.T) {
+	dir := t.TempDir()
+	// One common module IS in a subsystem's Состав (English dump prefix), one is not.
+	dumpWrite(t, dir, subBody("Учет", "CommonModule.ВСоставе"), "Subsystems", "Учет.xml")
+	dumpWrite(t, dir, applObj("ВСоставе"), "CommonModules", "ВСоставе.xml")
+	dumpWrite(t, dir, applObj("ВнеСостава"), "CommonModules", "ВнеСостава.xml")
+	dumpWrite(t, dir, applObj("ОдинокаяКонстанта"), "Constants", "ОдинокаяКонстанта.xml")
+	dumpWrite(t, dir, applObj("Аудитор"), "Roles", "Аудитор.xml")
+	dumpWrite(t, dir, applObj("Товар"), "Catalogs", "Товар.xml")
+
+	h := NewAnalyzeSubsystemsHandlerWithSource(nil, DumpSubsystemForestFunc(dir))
+	orphans, err := runHandlerText(t, h, "analyze_subsystems", map[string]any{"action": "orphans"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Out-of-subsystem service kinds and the applied catalog are orphans now.
+	mustContain(t, orphans,
+		"ОбщийМодуль.ВнеСостава",
+		"Константа.ОдинокаяКонстанта",
+		"Роль.Аудитор",
+		"Справочник.Товар",
+	)
+	// The common module that IS a member must not be an orphan.
+	mustNotContain(t, orphans, "ОбщийМодуль.ВСоставе")
+	// A clean, complete dump must not emit the coverage diagnostic.
+	mustNotContain(t, orphans, "Диагностика")
+}
+
+// TDD (non-silent coverage diagnostic): when a subsystem references a universe kind
+// whose dump folder is ABSENT, the orphans output must carry a diagnostic that NAMES the
+// kind, so a partial dump or a universe folder-name error is visible instead of silently
+// under-reporting that kind's orphans. Customer-facing RU: no тире.
+func TestDumpForest_OrphansCoverageDiagnosticNamesMissingKind(t *testing.T) {
+	dir := t.TempDir()
+	// A subsystem references a common module, but there is NO CommonModules folder.
+	dumpWrite(t, dir, subBody("Учет", "CommonModule.Скрытый"), "Subsystems", "Учет.xml")
+	dumpWrite(t, dir, applObj("Товар"), "Catalogs", "Товар.xml") // a present applied object
+
+	h := NewAnalyzeSubsystemsHandlerWithSource(nil, DumpSubsystemForestFunc(dir))
+	orphans, err := runHandlerText(t, h, "analyze_subsystems", map[string]any{"action": "orphans"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, orphans, "Диагностика", "ОбщийМодуль")
+	if strings.ContainsRune(orphans, '—') || strings.ContainsRune(orphans, '–') {
+		t.Errorf("coverage diagnostic contains a dash (тире):\n%s", orphans)
+	}
+}
+
+// TDD (FULL Состав-eligible finalization): the orphans universe now spans EVERY
+// Состав-eligible top-level kind, so an out-of-subsystem Стиль, ЭлементСтиля, КритерийОтбора,
+// ОбщийРеквизит, НумераторДокументов, WSСсылка and Последовательность are each reported; a kind object
+// that IS a member is excluded; and Язык (NOT Состав-eligible) is never emitted even when a
+// Languages/ folder is physically present. End-to-end proof through the orphans handler.
+func TestDumpForest_OrphansFinalizedFullSet(t *testing.T) {
+	dir := t.TempDir()
+	// One style and one common attribute ARE in a subsystem's Состав (English dump prefix).
+	dumpWrite(t, dir, subBody("Оформление", "Style.ВСоставе", "CommonAttribute.ВСоставе"), "Subsystems", "Оформление.xml")
+	dumpWrite(t, dir, applObj("ВСоставе"), "Styles", "ВСоставе.xml")
+	dumpWrite(t, dir, applObj("ВнеСостава"), "Styles", "ВнеСостава.xml")
+	dumpWrite(t, dir, applObj("ВСоставе"), "CommonAttributes", "ВСоставе.xml")
+	dumpWrite(t, dir, applObj("ВнеСоставаРеквизит"), "CommonAttributes", "ВнеСоставаРеквизит.xml")
+	dumpWrite(t, dir, applObj("ЦветАкцента"), "StyleItems", "ЦветАкцента.xml")
+	dumpWrite(t, dir, applObj("ПоКонтрагенту"), "FilterCriteria", "ПоКонтрагенту.xml")
+	dumpWrite(t, dir, applObj("НалоговыеДокументы"), "DocumentNumerators", "НалоговыеДокументы.xml")
+	dumpWrite(t, dir, applObj("WSОбмен"), "WSReferences", "WSОбмен.xml")
+	dumpWrite(t, dir, applObj("ДвижениеТоваров"), "Sequences", "ДвижениеТоваров.xml")
+	// Язык: physically present but NOT Состав-eligible -> must never surface as an orphan.
+	dumpWrite(t, dir, applObj("Русский"), "Languages", "Русский.xml")
+
+	h := NewAnalyzeSubsystemsHandlerWithSource(nil, DumpSubsystemForestFunc(dir))
+	orphans, err := runHandlerText(t, h, "analyze_subsystems", map[string]any{"action": "orphans"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Out-of-subsystem finalized-set objects are orphans now.
+	mustContain(t, orphans,
+		"Стиль.ВнеСостава",
+		"ЭлементСтиля.ЦветАкцента",
+		"КритерийОтбора.ПоКонтрагенту",
+		"ОбщийРеквизит.ВнеСоставаРеквизит",
+		"НумераторДокументов.НалоговыеДокументы",
+		"WSСсылка.WSОбмен",
+		"Последовательность.ДвижениеТоваров",
+	)
+	// Members must not be orphans.
+	mustNotContain(t, orphans, "Стиль.ВСоставе", "ОбщийРеквизит.ВСоставе")
+	// Язык is not Состав-eligible: never emitted, even with a Languages/ folder present.
+	mustNotContain(t, orphans, "Язык.")
+	// The corrected prefix must be used: the bare "Нумератор." candidate does not resolve on a
+	// real 8.3.27 base and must never be emitted.
+	mustNotContain(t, orphans, "Нумератор.")
+	// A clean, complete dump (every referenced kind folder present) emits no diagnostic.
+	mustNotContain(t, orphans, "Диагностика")
+}
+
 // ---- object_structure func: the type-routing (fall-through) contract ----
 
 func TestDumpObjectStructFunc_SubsystemHandled(t *testing.T) {

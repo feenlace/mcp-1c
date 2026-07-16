@@ -254,13 +254,17 @@ var (
 	//   - Справочник.Организации, Справочник.Валюты, РегистрСведений.КурсыВалют,
 	//     РегистрНакопления.ТоварыНаСкладах: applied but in no subsystem (orphans)
 	//   - Справочник.НоменклатураПрисоединенныеФайлы: orphaned noise (filtered out)
+	//   - Broadened universe: service kinds in allObjects too. ОбщийМодуль.УправлениеПечатью
+	//     is a member of Продажи (NOT an orphan); the rest (roles, constants, defined
+	//     type, common modules, forms, templates, HTTP service, journal, scheduled job)
+	//     belong to no subsystem and must now surface as orphans.
 	subsystemForest = onec.SubsystemForest{
 		Subsystems: []onec.SubsystemNode{
 			{
 				Name:     "Продажи",
 				FullName: "Подсистема.Продажи",
 				Synonym:  "Продажи",
-				Content:  []string{"Справочник.Контрагенты", "Справочник.Номенклатура", "Документ.РеализацияТоваровУслуг"},
+				Content:  []string{"Справочник.Контрагенты", "Справочник.Номенклатура", "Документ.РеализацияТоваровУслуг", "ОбщийМодуль.УправлениеПечатью"},
 				Subsystems: []onec.SubsystemNode{
 					{
 						Name:     "Розница",
@@ -302,6 +306,22 @@ var (
 			"РегистрСведений.КурсыВалют",
 			"РегистрНакопления.ТоварыНаСкладах",
 			"Справочник.НоменклатураПрисоединенныеФайлы",
+			// Service / extra kinds (broadened universe). Mirrors the metadata map above.
+			// УправлениеПечатью is a member of Продажи (not an orphan); the rest are orphans.
+			"ОбщийМодуль.ОбщегоНазначения",
+			"ОбщийМодуль.ОбщегоНазначенияКлиентСервер",
+			"ОбщийМодуль.УправлениеПечатью",
+			"ОбщаяФорма.ФормаВопроса",
+			"ОбщийМакет.МакетПечати",
+			"Роль.Администратор",
+			"Роль.Бухгалтер",
+			"Роль.ТолькоПросмотр",
+			"Константа.ВалютаРегламентированногоУчета",
+			"Константа.ОсновнаяОрганизация",
+			"ОпределяемыйТип.ЗначениеДоступа",
+			"ЖурналДокументов.ЖурналОпераций",
+			"РегламентноеЗадание.ОбновлениеКурсовВалют",
+			"HTTPСервис.MCPService",
 		},
 	}
 )
