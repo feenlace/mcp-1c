@@ -81,8 +81,9 @@ var universeServiceKinds = []universeKind{
 	// prefix). Dump folder = the EN kind pluralized (the 1C ConfigurationDump convention
 	// every kind above also follows); bslCollection is the live Метаданные[...] property.
 	// The RU singular each row cancels against comes from serviceKindEnToRu (via
-	// universeKindRu), NOT from the bslCollection here. Нумераторы -> Нумератор CORRECTS an
-	// earlier НумераторДокументов candidate.
+	// universeKindRu), NOT from the bslCollection here. For DocumentNumerator that singular is
+	// НумераторДокументов (verified on a real 8.3.27 base; the bare "Нумератор." does not
+	// resolve), while its live collection accessor stays the plural Нумераторы below.
 	{"Style", "Styles", "Стили"},
 	{"StyleItem", "StyleItems", "ЭлементыСтиля"},
 	{"FilterCriterion", "FilterCriteria", "КритерииОтбора"},

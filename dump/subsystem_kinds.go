@@ -53,11 +53,11 @@ func init() {
 // it exists so subsystem Content and analyze_subsystems containing/intersections
 // render service members in Russian instead of leaking the dump's English prefix.
 //
-// DocumentNumerator maps to Нумератор, the 1C metadata class name the platform full
-// name (.ПолноеИмя()) emits for a document numerator ("Нумератор.<Имя>"), which is the
-// singular of its Нумераторы collection just like Документы -> Документ. VM-grounded on
-// 8.3.27; this CORRECTS an earlier НумераторДокументов candidate, the only kind that had
-// broken the collection-singular consistency every other kind holds.
+// DocumentNumerator maps to НумераторДокументов, the singular prefix the platform full
+// name (.ПолноеИмя()) emits for a document numerator ("НумераторДокументов.<Имя>").
+// Verified on a real 8.3.27.2130 base: "НумераторДокументов." resolves; the bare collection
+// singular "Нумератор." does NOT. (An earlier "Нумератор" guess is reverted here; because it
+// does not resolve, orphans would have leaked a prefix membership can never match.)
 //
 // The five Common-typed kinds (CommonModule, CommonForm, CommonCommand,
 // CommonTemplate, CommonPicture) are folded into this one table; there is no key
@@ -86,7 +86,7 @@ var serviceKindEnToRu = map[string]string{
 	"SessionParameter":  "ПараметрСеанса",
 	"Sequence":          "Последовательность",
 	"FilterCriterion":   "КритерийОтбора",
-	"DocumentNumerator": "Нумератор",
+	"DocumentNumerator": "НумераторДокументов",
 	"CommandGroup":      "ГруппаКоманд",
 	// Kinds added when the orphans universe was finalized to the FULL Состав-eligible
 	// set (each appears in real vendor-config subsystem <Content>). RU singulars are the
@@ -95,7 +95,7 @@ var serviceKindEnToRu = map[string]string{
 	// ExternalDataSource is enumerated at the TOP level only; its subordinate Tables
 	// (ExternalDataSource.<Источник>.Table.<Таблица>) are not independently top-level.
 	"StyleItem":                  "ЭлементСтиля",
-	"FunctionalOptionsParameter": "ПараметрФункциональнойОпции",
+	"FunctionalOptionsParameter": "ПараметрФункциональныхОпций",
 	"ExternalDataSource":         "ВнешнийИсточникДанных",
 	// Document journals: structural, not an applied orphan kind, but a valid
 	// subsystem Content member. The Russian singular ЖурналДокументов matches the

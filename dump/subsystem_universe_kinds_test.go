@@ -154,17 +154,17 @@ func TestUniverse_IncludesFinalizedSetAndExcludesContainerAndLanguage(t *testing
 		"ФункциональнаяОпция", "ПодпискаНаСобытие", "ЖурналДокументов", "ХранилищеНастроек",
 		// finalization additions (each Состав-eligible; evidence-confirmed EN prefix)
 		"Стиль", "ЭлементСтиля", "КритерийОтбора", "Последовательность", "ОбщийРеквизит",
-		"Нумератор", "WSСсылка", "ПараметрФункциональнойОпции", "ВнешнийИсточникДанных",
+		"НумераторДокументов", "WSСсылка", "ПараметрФункциональныхОпций", "ВнешнийИсточникДанных",
 	}
 	for _, ru := range target {
 		if !universeRuKinds[ru] {
 			t.Errorf("universe must enumerate the Состав-eligible kind %q", ru)
 		}
 	}
-	// The Нумератор correction must have landed: the earlier НумераторДокументов prefix must
-	// no longer be a universe kind.
-	if universeRuKinds["НумераторДокументов"] {
-		t.Error("universe must NOT enumerate НумераторДокументов (corrected to Нумератор)")
+	// The DocumentNumerator correction must have landed: the bare "Нумератор" prefix (which does
+	// not resolve on a real 8.3.27 base) must no longer be a universe kind.
+	if universeRuKinds["Нумератор"] {
+		t.Error("universe must NOT enumerate Нумератор (corrected to НумераторДокументов)")
 	}
 	// Container: never a member object.
 	if universeRuKinds["Подсистема"] {

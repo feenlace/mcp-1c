@@ -172,7 +172,7 @@ func TestDumpForest_OrphansCoverageDiagnosticNamesMissingKind(t *testing.T) {
 
 // TDD (FULL Состав-eligible finalization): the orphans universe now spans EVERY
 // Состав-eligible top-level kind, so an out-of-subsystem Стиль, ЭлементСтиля, КритерийОтбора,
-// ОбщийРеквизит, Нумератор, WSСсылка and Последовательность are each reported; a kind object
+// ОбщийРеквизит, НумераторДокументов, WSСсылка and Последовательность are each reported; a kind object
 // that IS a member is excluded; and Язык (NOT Состав-eligible) is never emitted even when a
 // Languages/ folder is physically present. End-to-end proof through the orphans handler.
 func TestDumpForest_OrphansFinalizedFullSet(t *testing.T) {
@@ -202,7 +202,7 @@ func TestDumpForest_OrphansFinalizedFullSet(t *testing.T) {
 		"ЭлементСтиля.ЦветАкцента",
 		"КритерийОтбора.ПоКонтрагенту",
 		"ОбщийРеквизит.ВнеСоставаРеквизит",
-		"Нумератор.НалоговыеДокументы",
+		"НумераторДокументов.НалоговыеДокументы",
 		"WSСсылка.WSОбмен",
 		"Последовательность.ДвижениеТоваров",
 	)
@@ -210,8 +210,9 @@ func TestDumpForest_OrphansFinalizedFullSet(t *testing.T) {
 	mustNotContain(t, orphans, "Стиль.ВСоставе", "ОбщийРеквизит.ВСоставе")
 	// Язык is not Состав-eligible: never emitted, even with a Languages/ folder present.
 	mustNotContain(t, orphans, "Язык.")
-	// The corrected prefix must be used (never the earlier НумераторДокументов candidate).
-	mustNotContain(t, orphans, "НумераторДокументов")
+	// The corrected prefix must be used: the bare "Нумератор." candidate does not resolve on a
+	// real 8.3.27 base and must never be emitted.
+	mustNotContain(t, orphans, "Нумератор.")
 	// A clean, complete dump (every referenced kind folder present) emits no diagnostic.
 	mustNotContain(t, orphans, "Диагностика")
 }
