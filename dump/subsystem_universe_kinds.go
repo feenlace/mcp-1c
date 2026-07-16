@@ -83,13 +83,13 @@ var universeServiceKinds = []universeKind{
 	// The RU singular each row cancels against comes from serviceKindEnToRu (via
 	// universeKindRu), NOT from the bslCollection here. For DocumentNumerator that singular is
 	// НумераторДокументов (verified on a real 8.3.27 base; the bare "Нумератор." does not
-	// resolve), while its live collection accessor stays the plural Нумераторы below.
+	// resolve), while its live collection accessor stays the plural НумераторыДокументов below.
 	{"Style", "Styles", "Стили"},
 	{"StyleItem", "StyleItems", "ЭлементыСтиля"},
 	{"FilterCriterion", "FilterCriteria", "КритерииОтбора"},
 	{"Sequence", "Sequences", "Последовательности"},
 	{"CommonAttribute", "CommonAttributes", "ОбщиеРеквизиты"},
-	{"DocumentNumerator", "DocumentNumerators", "Нумераторы"},
+	{"DocumentNumerator", "DocumentNumerators", "НумераторыДокументов"},
 	{"WSReference", "WSReferences", "WSСсылки"},
 	{"FunctionalOptionsParameter", "FunctionalOptionsParameters", "ПараметрыФункциональныхОпций"},
 	// ExternalDataSource: enumerated at the top level only. Its subordinate Tables
