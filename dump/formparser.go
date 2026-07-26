@@ -3,6 +3,7 @@ package dump
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,8 +47,35 @@ type FormHandlerInfo struct {
 // objectTypeToDumpDir is defined in metadata_types.go and maps 1C object type
 // names (as used in the tool input) to dump directory names.
 
+// errFormsDirUnreadable is the path-free RU refusal returned when an object's
+// Forms directory cannot be read through the dump root: a symlink that escapes
+// the dump at any path component (refused by os.Root), a non-directory standing
+// in for a directory position, or a permission error. It replaces a wrapped OS
+// error because that error carries the absolute path it failed on, which must
+// never reach the caller. Customer-facing RU: no тире, no absolute path.
+var errFormsDirUnreadable = errors.New("каталог форм объекта недоступен")
+
+// errFormXMLNotRegular is the path-free RU refusal returned when a form file is
+// not a plain regular file: a symlink, FIFO, socket, device or directory.
+// Customer-facing RU: no тире, no absolute path.
+var errFormXMLNotRegular = errors.New("файл формы имеет неверный тип")
+
 // FindFormFiles locates all Form.xml files for the given object in the dump directory.
 // It returns a map of form name to absolute file path.
+//
+// objectName reaches this function from the get_form_structure tool input, so the
+// lookup is confined twice over. The lexical guard below keeps objectName a single
+// path component (rejecting ".." and both separators, on POSIX and Windows), and
+// the whole walk then runs through an os.Root opened on the dump: the OS primitive
+// (openat2 RESOLVE_BENEATH on Linux, equivalents elsewhere) refuses a symlink that
+// escapes the dump at ANY component, which the lexical guard cannot see. That is
+// the same containment the subsystem readers use, and it closes the vector named in
+// index.go: a malicious dump smuggling an outside host file in as a symlink.
+//
+// A form is reported only when its Form.xml is a plain regular file genuinely
+// inside the dump. Because root.Lstat does not follow the final component, a
+// symlinked Form.xml is neither read NOR listed, so the return value cannot serve
+// as an existence oracle for paths outside the dump.
 func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, error) {
 	dirName, ok := objectTypeToDumpDir[objectType]
 	if !ok {
@@ -60,13 +88,31 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 		return nil, fmt.Errorf("invalid object name %q: contains path traversal characters", objectName)
 	}
 
-	formsDir := filepath.Join(dumpDir, dirName, objectName, "Forms")
-	entries, err := os.ReadDir(formsDir)
+	// A dumpDir that exists but is not a directory (FIFO, socket, device, plain
+	// file) is refused BEFORE os.OpenRoot: on a writer-less FIFO the open blocks
+	// forever and cannot be interrupted. Mirrors ParseAllSubsystemsCtx.
+	if dumpDirIsNonDir(dumpDir) {
+		return nil, errDumpDirNotDirectory
+	}
+
+	root, err := os.OpenRoot(dumpDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil // Absent dump - no forms, not an error.
+		}
+		return nil, errFormsDirUnreadable
+	}
+	defer func() { _ = root.Close() }()
+
+	relForms := filepath.Join(dirName, objectName, "Forms")
+	entries, err := readDirInRoot(root, relForms)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil // No forms directory - not an error.
 		}
-		return nil, fmt.Errorf("reading forms directory: %w", err)
+		// Containment refusal, non-directory position, or unreadable: never
+		// silent, but named without disclosing the path it failed on.
+		return nil, errFormsDirUnreadable
 	}
 
 	result := make(map[string]string)
@@ -74,9 +120,9 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 		if !entry.IsDir() {
 			continue
 		}
-		formXML := filepath.Join(formsDir, entry.Name(), "Ext", "Form.xml")
-		if _, statErr := os.Stat(formXML); statErr == nil {
-			result[entry.Name()] = formXML
+		relXML := filepath.Join(relForms, entry.Name(), "Ext", "Form.xml")
+		if st, statErr := root.Lstat(relXML); statErr == nil && st.Mode().IsRegular() {
+			result[entry.Name()] = filepath.Join(dumpDir, relXML)
 		}
 	}
 
@@ -84,7 +130,27 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 }
 
 // ParseFormXML parses a 1C form XML file and extracts elements, commands, and handlers.
+//
+// CONTRACT: path must already be a dump-contained path, normally a value returned
+// by FindFormFiles, which resolves every component through an os.Root so none of
+// them can escape the dump. ParseFormXML performs no containment of its own: given
+// a path to a regular file anywhere it will read that file. Any caller that lets a
+// user influence the path must obtain it from FindFormFiles rather than building it
+// - the get_form_structure handler, the only caller in this module, does exactly
+// that.
+//
+// The final component must be a plain regular file. That refuses a form file
+// swapped for a symlink in the window between FindFormFiles vetting it and this
+// read, and it refuses a writer-less FIFO whose read would otherwise block forever.
 func ParseFormXML(path string) (*FormInfo, error) {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading form XML: %w", err)
+	}
+	if !st.Mode().IsRegular() {
+		return nil, errFormXMLNotRegular
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading form XML: %w", err)
