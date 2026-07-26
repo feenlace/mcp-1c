@@ -55,7 +55,6 @@
 			</DefaultRoles>
 			<Vendor/>
 			<Version/>
-			<DefaultLanguage>Language.Русский</DefaultLanguage>
 			<BriefInformation/>
 			<DetailedInformation/>
 			<Copyright/>
@@ -63,7 +62,6 @@
 			<ConfigurationInformationAddress/>
 		</Properties>
 		<ChildObjects>
-			<Language>Русский</Language>
 			<Role>MCP_ОсновнаяРоль</Role>
 			<HTTPService>MCPService</HTTPService>
 		</ChildObjects>

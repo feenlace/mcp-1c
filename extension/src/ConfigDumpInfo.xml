@@ -9,7 +9,6 @@
 			<Metadata name="HTTPService.MCPService.URLTemplate.Метаданные.Method.Получить" id="dfc323e9-33e4-49a0-b3f5-7264cb26003d"/>
 		</Metadata>
 		<Metadata name="HTTPService.MCPService.Module" id="93b52b96-1872-4900-931f-30f172dcdeed.0" configVersion="056246347728d0954eeaae6054aff7f6976d910e"/>
-		<Metadata name="Language.Русский" id="74817ceb-8e8a-4e84-bcb4-106440bf08ab" configVersion="0e2d4c934e5b376ba3ffc9c54d134acfa17c9e2d"/>
 		<Metadata name="Role.MCP_ОсновнаяРоль" id="a7181713-3c5f-4b0c-9d2a-ab9998503308" configVersion="5e1be1018ab164bd3a0d59c7538e13b8f30af709"/>
 	</ConfigVersions>
 </ConfigDumpInfo>
