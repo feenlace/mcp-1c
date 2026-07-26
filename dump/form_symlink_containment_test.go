@@ -196,6 +196,18 @@ func TestParseFormXML_RefusesSymlinkedFormFile(t *testing.T) {
 	swapped := filepath.Join(dumpRoot, filepath.FromSlash("Documents/Док/Forms/Ф/Ext/Swapped.xml"))
 	symlinkOrSkip(t, outsideForm, swapped)
 
+	// Assert the fixture is genuinely the shape under test, so this test can
+	// never pass vacuously on a broken fixture (a missing file would make
+	// ParseFormXML fail for the wrong reason and look like a refusal).
+	if st, err := os.Lstat(swapped); err != nil {
+		t.Fatalf("fixture not created: %v", err)
+	} else if st.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("fixture is not a symlink, the guard under test would not be exercised")
+	}
+	if _, err := os.Stat(swapped); err != nil {
+		t.Fatalf("fixture symlink does not resolve, so following it could not have leaked anyway: %v", err)
+	}
+
 	got, perr := ParseFormXML(swapped)
 	if perr == nil {
 		for _, e := range got.Elements {
