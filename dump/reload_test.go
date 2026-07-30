@@ -339,6 +339,87 @@ func TestReload_BuildFailureKeepsOldIndexServing(t *testing.T) {
 	}
 }
 
+// TestReload_BuildPanicKeepsOldIndexServing is the same failure-injection proof
+// for the failure mode an error return cannot cover: the build PANICS.
+//
+// It matters because of where a reload runs. Reload is called from the
+// reload_dump tool handler, and the MCP SDK does not recover panics raised
+// inside a handler, so an unrecovered panic here does not fail one call, it
+// takes the whole server process down and with it every other client session.
+// cmd/mcp-1c/serve.go already wraps the identical BuildGeneration call in a
+// recover for exactly this reason; this test pins the same protection on the
+// reload path.
+//
+// The panic is injected at the build step, the only point where a reload does
+// real work before touching the live index, so a recovered panic must leave the
+// previous index serving exactly as a returned error does.
+func TestReload_BuildPanicKeepsOldIndexServing(t *testing.T) {
+	dir := fixtureDump(t)
+	cacheDir := t.TempDir()
+	idx := openReloadableIndex(t, dir, cacheDir)
+
+	const marker = "МаркерДоПаники"
+	mkBSLFile(t, dir, "CommonModules/ДоПаники/Ext/Module.bsl",
+		"Процедура "+marker+"() Экспорт\nКонецПроцедуры\n")
+	mustReload(t, idx)
+	beforeCount := idx.ModuleCount()
+	smartBefore, regexBefore, exactBefore := countAllModes(t, idx, marker)
+	if smartBefore == 0 || regexBefore == 0 || exactBefore == 0 {
+		t.Fatalf("fixture did not index the marker: smart=%d regex=%d exact=%d",
+			smartBefore, regexBefore, exactBefore)
+	}
+	sigBefore := idx.gensig
+
+	mkBSLFile(t, dir, "CommonModules/ПослеПаники/Ext/Module.bsl",
+		"Процедура ПослеПаники() Экспорт\nКонецПроцедуры\n")
+
+	const panicText = "внедрённая паника сборки поколения"
+	orig := reloadBuildGeneration
+	var called atomic.Bool
+	reloadBuildGeneration = func(dumpDir, cache, gensig string) error {
+		called.Store(true)
+		panic(panicText)
+	}
+	defer func() { reloadBuildGeneration = orig }()
+
+	rep, err := idx.Reload()
+	if !called.Load() {
+		t.Fatal("the injected build never ran, so this test proves nothing")
+	}
+	if err == nil {
+		t.Fatal("Reload reported success despite a panicking build")
+	}
+	if !strings.Contains(err.Error(), panicText) {
+		t.Errorf("the error does not carry what the build panicked with, so the operator "+
+			"cannot tell why the reload failed: %v", err)
+	}
+	if rep.Changed {
+		t.Fatal("a panicking reload reported Changed=true")
+	}
+
+	// The whole point: the previously working index is still the one serving.
+	if got := idx.ModuleCount(); got != beforeCount {
+		t.Fatalf("module count changed after a panicking reload: %d -> %d", beforeCount, got)
+	}
+	if idx.gensig != sigBefore {
+		t.Fatalf("attached generation changed after a panicking reload: %s -> %s", sigBefore, idx.gensig)
+	}
+	smart, regex, exact := countAllModes(t, idx, marker)
+	if smart != smartBefore || regex != regexBefore || exact != exactBefore {
+		t.Fatalf("search results changed after a panicking reload: smart %d->%d regex %d->%d exact %d->%d",
+			smartBefore, smart, regexBefore, regex, exactBefore, exact)
+	}
+
+	// And the index is not wedged: the reload lock was released and a later
+	// reload still succeeds. A recover that leaves reloadMu held would turn one
+	// panic into a permanently un-reloadable server.
+	reloadBuildGeneration = orig
+	if rep := mustReload(t, idx); !rep.Changed || rep.ModulesAfter != beforeCount+1 {
+		t.Fatalf("recovery reload: Changed=%v after=%d, want true and %d",
+			rep.Changed, rep.ModulesAfter, beforeCount+1)
+	}
+}
+
 // TestReload_RefusesToSwapInAnEmptyIndex guards the "never worse than before"
 // rule against the realistic accident: the dump directory momentarily reads as
 // empty (an unmounted share, an interrupted dump) and would otherwise build a

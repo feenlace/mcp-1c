@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -53,14 +54,42 @@ func NewReloadDumpHandler(index *dump.Index) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		rep, err := index.Reload()
 		if err != nil {
-			// The index is untouched on every error path, so say that: the caller
-			// needs to know whether search still works, not only that something
-			// failed.
-			return nil, fmt.Errorf("перезагрузка выгрузки не выполнена: %w. "+
-				"Индекс остался в прежнем состоянии, поиск продолжает работать "+
-				"по той выгрузке, которая была загружена раньше", err)
+			return nil, fmt.Errorf("перезагрузка выгрузки не выполнена: %w.%s",
+				err, searchStateAfterFailedReload(index, err))
 		}
 		return textResult(FormatReloadReport(rep, index.Dir())), nil
+	}
+}
+
+// searchStateAfterFailedReload describes what the caller can still do, decided
+// from the INDEX'S STATE rather than from the fact that a reload failed.
+//
+// The reload itself is untouched-by-construction on every error path, so the
+// tempting single sentence is "nothing changed, search keeps working". That
+// sentence is false the first time a user calls the tool on a freshly started
+// server: the initial build is still running, nothing has ever been loaded, and
+// dump.Index.Search answers every query with "search index is building". A
+// reassurance is worth nothing if it is printed even when it is untrue, and this
+// one was printed on the first natural attempt.
+//
+// Ready() is the predicate the claim is actually about: dump.Index.Search gates
+// on exactly that flag and errors while it is false. The closed index passes
+// that gate yet serves nothing (its shards are shut), and ErrReloadClosed is how
+// the dump package reports the closed flag, so it is excluded here.
+//
+// The serving branch carries the measured module count. A reassurance that
+// names a number cannot quietly stand in for an index that holds nothing.
+func searchStateAfterFailedReload(index *dump.Index, err error) string {
+	switch {
+	case errors.Is(err, dump.ErrReloadClosed):
+		return " Индекс закрыт, поиск по выгрузке не отвечает."
+	case !index.Ready():
+		return " Индекс не тронут, но поиск по выгрузке пока не отвечает: первичная " +
+			"загрузка индекса ещё не завершена или завершилась ошибкой."
+	default:
+		return fmt.Sprintf(" Индекс остался в прежнем состоянии, поиск продолжает работать "+
+			"по той выгрузке, которая была загружена раньше (модулей в индексе: %d).",
+			index.ModuleCount())
 	}
 }
 

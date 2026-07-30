@@ -1031,6 +1031,166 @@ func TestNewFormStructureHandler_PartialNoteDoesNotDenyShownElements(t *testing.
 	}
 }
 
+// truncatedBeforeAnyElementXML is a Form.xml cut off INSIDE the form but before
+// a single element is recorded. The <Form> start tag is complete, so the parser
+// enters the form (NoFormRoot stays false) and then hits the syntax error
+// (ParseIncomplete becomes true) with nothing collected: the dump contributes no
+// element, no command and no handler, and the merge therefore leaves every
+// composition section exactly as the HTTP service returned it.
+func truncatedBeforeAnyElementXML() string {
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.21">
+  <ChildIte`
+}
+
+// formHTTPServerWithStructure serves a 1C form reply that DOES fill all three
+// composition sections, so a body built from it alone is provably HTTP content.
+func formHTTPServerWithStructure(t *testing.T, name, title string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":  name,
+			"title": title,
+			"elements": []any{
+				map[string]any{"name": "ЭлементОтСервиса", "type": "ПолеВвода", "dataPath": "Объект.Контрагент"},
+			},
+			"commands": []any{map[string]any{"name": "КомандаОтСервиса", "action": "Провести"}},
+			"handlers": []any{map[string]any{"event": "OnOpen", "handler": "ОбработчикОтСервиса"}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// partialNoteFileProvenanceClaims are wordings that assert the composition
+// printed above the note is what was read from the dump file. Every one of them
+// is false for a body the dump did not contribute to, which is a body a partial
+// parse routinely produces. The first entry is the wording this note carried
+// when the defect was found; the rest are the variants a note author reaches for
+// next.
+var partialNoteFileProvenanceClaims = []string{
+	"показано только то, что удалось прочитать",
+	"выше показано только прочитанное из файла",
+	"всё, что показано выше, прочитано из файла",
+	"показанное выше взято из выгрузки",
+}
+
+// TestNewFormStructureHandler_PartialNoteDoesNotClaimFileProvenance is the
+// headline honesty case for the partial note, and it uses the body that
+// falsifies a provenance claim: the Form.xml breaks before it records anything,
+// so every element, command and handler on screen came from the 1C HTTP
+// service and nothing came from the partially read file.
+func TestNewFormStructureHandler_PartialNoteDoesNotClaimFileProvenance(t *testing.T) {
+	srv := formHTTPServerWithStructure(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента",
+		truncatedBeforeAnyElementXML())
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("a tolerated malformed Form.xml must not become a hard error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, partialNoteMarker) {
+		t.Fatalf("body must say the form file was read only partially:\n%s", text)
+	}
+	// The premise this test reasons about, asserted rather than assumed: every
+	// composition section on screen is the HTTP service's.
+	for _, want := range []string{"ЭлементОтСервиса", "КомандаОтСервиса", "ОбработчикОтСервиса"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("premise broken: %q from the HTTP service is not in the body:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range truncatedFieldNames {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("premise broken: %q from a dump file is in the body, so it is not pure HTTP:\n%s",
+				unwanted, text)
+		}
+	}
+
+	// Positive control for the scan below: it must be able to see the claim when
+	// handed the wording this note actually shipped with. Hand-typed on purpose,
+	// as a control over the matcher, never as the assertion about the product.
+	const shipped = "поэтому показано только то, что удалось прочитать до этого места"
+	if !containsAny(shipped, partialNoteFileProvenanceClaims) {
+		t.Fatal("the provenance scan does not detect the claim it was handed directly")
+	}
+
+	for _, claim := range partialNoteFileProvenanceClaims {
+		if strings.Contains(text, claim) {
+			t.Errorf("note claims %q, but nothing above it came from the file:\n%s", claim, text)
+		}
+	}
+	// And the positive half: the note has to leave room for what actually
+	// happened, namely that the sections above are the HTTP service's.
+	if !strings.Contains(text, "HTTP-сервис") {
+		t.Errorf("the note never mentions the other source, so a reader takes the "+
+			"composition above for dump content:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_PartialNoteDoesNotClaimHTTPOnlyProvenance is the
+// same wording checked against the OPPOSITE body: a partial parse that did
+// contribute elements. The sibling note (formNoFormRootNote) may state flatly
+// that everything above came from the HTTP service, because a file that never
+// entered a <Form> contributed nothing; copying that sentence into this note
+// would be false here, and this test is what stops the copy.
+func TestNewFormStructureHandler_PartialNoteDoesNotClaimHTTPOnlyProvenance(t *testing.T) {
+	srv := formHTTPServerWithStructure(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	// keep=2 complete fields plus the severed third, measured as 3 elements.
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента",
+		truncatedFormXML(2))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("a tolerated malformed Form.xml must not become a hard error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, partialNoteMarker) {
+		t.Fatalf("body must say the form file was read only partially:\n%s", text)
+	}
+	// Premise: the dump DID contribute the elements it read before the cut.
+	for _, want := range truncatedFieldNames[:3] {
+		if !strings.Contains(text, want) {
+			t.Fatalf("premise broken: element %q read before the cut is not in the body:\n%s", want, text)
+		}
+	}
+
+	// Claims that everything above is HTTP content. Each is false for this body.
+	httpOnlyClaims := []string{
+		"Всё, что показано выше в разделах состава формы, вернул HTTP-сервис 1С",
+		"из выгрузки ничего не взято",
+		"выгрузка не дала ничего",
+	}
+	const control = "Всё, что показано выше в разделах состава формы, вернул HTTP-сервис 1С."
+	if !containsAny(control, httpOnlyClaims) {
+		t.Fatal("the HTTP-only scan does not detect the claim it was handed directly")
+	}
+	for _, claim := range httpOnlyClaims {
+		if strings.Contains(text, claim) {
+			t.Errorf("note claims %q while the body above lists elements read from the dump:\n%s",
+				claim, text)
+		}
+	}
+}
+
+// containsAny reports whether s contains at least one of the substrings. Used to
+// give the phrase scans in this file a positive control.
+func containsAny(s string, substrings []string) bool {
+	for _, sub := range substrings {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestNewFormStructureHandler_WellFormedDumpHasNoPartialNote is the negative
 // control for the partial note specifically. It is deliberately separate from
 // the two broader no-notes controls so that a mutation making the note
@@ -1223,6 +1383,141 @@ func TestNewFormStructureHandler_ParseNotesAreNeverBothPresent(t *testing.T) {
 				t.Errorf("a healthy form must carry no note:\n%s", text)
 			}
 		})
+	}
+}
+
+// emptyFormXML is a Form.xml that is complete, well formed, and declares no
+// contents at all. The parser reads it to a clean end INSIDE a <Form>, so
+// neither silent-outcome flag is set: no partial parse, no missing form root.
+// The dump simply yields a form with nothing in it.
+func emptyFormXML() string {
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.21">
+</Form>`
+}
+
+// namedFormNoStructureMarker is the distinguishing phrase of the note added when
+// form_name DID resolve to a form in the dump but that form contributed no
+// composition. Matched as a phrase rather than through the constant, exactly as
+// the other markers in this file are.
+const namedFormNoStructureMarker = "не дал состава формы"
+
+// TestNewFormStructureHandler_KnownFormNameWithoutStructureIsReported closes the
+// asymmetry: an UNKNOWN form_name is a hard error listing the real names, while
+// a KNOWN form_name whose form yields nothing used to return the HTTP service's
+// answer with no sign that the parameter changed nothing. Both are the same user
+// intent ("answer about THIS form"), and only one of them was answered honestly.
+//
+// It stays a normal result on purpose: only the unknown-name case is fatal.
+func TestNewFormStructureHandler_KnownFormNameWithoutStructureIsReported(t *testing.T) {
+	cases := map[string]string{
+		"form declares nothing":       emptyFormXML(),
+		"file holds no form at all":   "",
+		"file breaks before contents": truncatedBeforeAnyElementXML(),
+	}
+
+	for name, xml := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := formHTTPServerWithStructure(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+			dumpDir := t.TempDir()
+			writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаЭлемента", xml)
+
+			result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаЭлемента")
+			if err != nil {
+				t.Fatalf("a known form_name that yields no structure must not be a hard error: %v", err)
+			}
+			text := resultText(t, result)
+
+			// Premise: the composition on screen is the HTTP service's, chosen by
+			// the service and not by form_name.
+			if !strings.Contains(text, "ЭлементОтСервиса") {
+				t.Fatalf("premise broken: the HTTP element is missing from the body:\n%s", text)
+			}
+
+			if !strings.Contains(text, namedFormNoStructureMarker) {
+				t.Errorf("body never says the form_name gave no structure:\n%s", text)
+			}
+			if !strings.Contains(text, "form_name") {
+				t.Errorf("body never names the parameter that did not take effect:\n%s", text)
+			}
+		})
+	}
+}
+
+// TestNewFormStructureHandler_KnownFormNameWithoutStructureShowsAnotherForm is
+// the sharpest version of the same case: the answer on screen is headed by the
+// form the HTTP service picked, which is NOT the one the caller named. Without
+// the note the response is a confident answer about a form nobody asked about,
+// which is the exact harm the unknown-name hard error exists to prevent.
+func TestNewFormStructureHandler_KnownFormNameWithoutStructureShowsAnotherForm(t *testing.T) {
+	srv := formHTTPServerWithStructure(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаЭлемента", emptyFormXML())
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаЭлемента")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	// Premise: the header names the HTTP form, not the requested one.
+	if !strings.Contains(text, "# Форма: ФормаДокумента") {
+		t.Fatalf("premise broken: the body is not headed by the HTTP-chosen form:\n%s", text)
+	}
+	if !strings.Contains(text, namedFormNoStructureMarker) {
+		t.Fatalf("body never says the form_name gave no structure:\n%s", text)
+	}
+	// And it has to say WHO chose the form that is shown, otherwise the caller
+	// cannot tell that the header belongs to someone else's choice.
+	if !strings.Contains(text, "HTTP-сервис") {
+		t.Errorf("body never says the shown form was chosen by the 1C HTTP service:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_HealthyFormNameHasNoEmptyStructureNote is the
+// negative control: a form_name that resolves to a form with contents is not a
+// degraded path and must carry no note at all.
+func TestNewFormStructureHandler_HealthyFormNameHasNoEmptyStructureNote(t *testing.T) {
+	srv := formHTTPServerWithStructure(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаЭлемента",
+		formXMLWithTitle("Карточка реализации", "ПолеЭлемента"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаЭлемента")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "ПолеЭлемента") {
+		t.Fatalf("premise broken: the dump structure is missing from the body:\n%s", text)
+	}
+	if strings.Contains(text, namedFormNoStructureMarker) {
+		t.Errorf("a form_name that produced a full structure must carry no note:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_NoFormNameKeepsTheEmptyFormSilent pins the scope of
+// the note: it answers for a form_name that did not take effect, so a caller who
+// named no form must not receive it. Without this control the note would also
+// fire for the default alphabetical pick, where no parameter was ignored.
+func TestNewFormStructureHandler_NoFormNameKeepsTheEmptyFormSilent(t *testing.T) {
+	srv := formHTTPServerWithStructure(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаЭлемента", emptyFormXML())
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if strings.Contains(text, namedFormNoStructureMarker) {
+		t.Errorf("no form_name was passed, so no note about form_name may appear:\n%s", text)
 	}
 }
 

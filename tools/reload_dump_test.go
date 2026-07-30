@@ -1,12 +1,16 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/feenlace/mcp-1c/dump"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestReloadDumpTool_Shape(t *testing.T) {
@@ -115,6 +119,106 @@ func TestFormatReloadReport_ReusedGenerationSaysSo(t *testing.T) {
 	if !strings.Contains(out, "уже был в кэше") {
 		t.Errorf("the report does not explain why it was fast:\n%s", out)
 	}
+}
+
+// reloadStillServesMarker is the reassurance the error path used to append to
+// EVERY failure: that the index is untouched and search keeps answering from the
+// dump loaded earlier. Matched as a phrase rather than through the constant, the
+// way the note markers in form_test.go are.
+const reloadStillServesMarker = "поиск продолжает работать"
+
+// TestNewReloadDumpHandler_ColdStartDoesNotPromiseSearchStillWorks is the
+// honesty case. On a server that has just started, the index is still building
+// and nothing has EVER been loaded: dump.Index.Search returns "search index is
+// building" for every query. Telling that caller their search keeps answering
+// "from the dump loaded earlier" is false on the first natural attempt, and it
+// is the first attempt a user makes.
+func TestNewReloadDumpHandler_ColdStartDoesNotPromiseSearchStillWorks(t *testing.T) {
+	// Deliberately NOT closed: Index.Close waits on Done(), which only
+	// FinishServeOpen ever closes, and calling that would end the very state
+	// under test. The placeholder holds no shards and starts no goroutine, so
+	// there is nothing to release.
+	index := dump.NewServePlaceholder(t.TempDir())
+
+	// Premise, asserted rather than assumed: this index serves nothing yet.
+	if index.Ready() {
+		t.Fatal("premise broken: a fresh placeholder reports itself ready")
+	}
+	if _, _, err := index.Search(dump.SearchParams{Query: "что-нибудь"}); err == nil {
+		t.Fatal("premise broken: search answers on an index that never loaded a dump")
+	}
+
+	_, err := callReloadHandler(t, index)
+	if err == nil {
+		t.Fatal("a reload on a not-yet-built index must fail")
+	}
+	if strings.Contains(err.Error(), reloadStillServesMarker) {
+		t.Errorf("the error promises that search still works, but nothing was ever loaded:\n%v", err)
+	}
+	// The caller still has to learn what state they are in, so the absence of
+	// the false claim is not enough on its own.
+	if !strings.Contains(err.Error(), "не отвечает") {
+		t.Errorf("the error never says search is unavailable, so the caller learns nothing "+
+			"about whether search works:\n%v", err)
+	}
+}
+
+// TestNewReloadDumpHandler_WorkingIndexKeepsTheReassurance is the other half:
+// when an index IS serving, a failed reload really does leave it serving, and
+// dropping the reassurance would be its own falsehood. The failure used here is
+// the emptiness guard, a real refusal on a real index rather than an injected
+// one.
+func TestNewReloadDumpHandler_WorkingIndexKeepsTheReassurance(t *testing.T) {
+	dumpDir := t.TempDir()
+	mkBSL(t, dumpDir, "Catalogs/Номенклатура/Ext/ObjectModule.bsl",
+		"Процедура ПередЗаписью(Отказ)\n\t// маркерВыгрузки\nКонецПроцедуры\n")
+
+	index, err := dump.NewIndex(dumpDir, t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	t.Cleanup(func() { index.Close() })
+	waitReady(t, index, 60*time.Second)
+
+	// Premise: this index answers searches before the failed reload.
+	//
+	// SMART mode, and not exact or regex, because the failure injected below has
+	// to remove the .bsl file: exact and regex re-read the file from disk on
+	// every query (see the freeze analysis at the top of dump/reload.go), so
+	// after the removal they would report zero whatever the reload did, and the
+	// assertion could not distinguish a serving index from a broken one. Smart
+	// answers from the generation the index still holds, which is exactly the
+	// state the reassurance is about.
+	if _, total, err := index.Search(dump.SearchParams{Query: "маркерВыгрузки", Mode: dump.SearchModeSmart}); err != nil || total == 0 {
+		t.Fatalf("premise broken: baseline search total=%d err=%v", total, err)
+	}
+
+	// Empty the dump: the reload builds a valid but empty generation and the
+	// emptiness guard refuses to swap it in, leaving the old index serving.
+	if err := os.RemoveAll(filepath.Join(dumpDir, "Catalogs")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = callReloadHandler(t, index)
+	if err == nil {
+		t.Fatal("premise broken: the reload of an emptied dump was expected to fail")
+	}
+	if !strings.Contains(err.Error(), reloadStillServesMarker) {
+		t.Errorf("the index is still serving, so the error must say so:\n%v", err)
+	}
+	// And the claim has to be true: prove the index really did keep serving.
+	if _, total, searchErr := index.Search(dump.SearchParams{Query: "маркерВыгрузки", Mode: dump.SearchModeSmart}); searchErr != nil || total == 0 {
+		t.Errorf("the error claims search still works, but it does not: total=%d err=%v", total, searchErr)
+	}
+}
+
+// callReloadHandler drives the reload_dump handler the way the MCP server does.
+func callReloadHandler(t *testing.T, index *dump.Index) (*mcp.CallToolResult, error) {
+	t.Helper()
+	handler := NewReloadDumpHandler(index)
+	return handler(context.Background(), &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{Name: "reload_dump", Arguments: json.RawMessage(`{}`)},
+	})
 }
 
 // TestFormatReloadReport_NoDashesInRussianText guards the house style: the user

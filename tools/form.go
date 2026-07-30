@@ -94,6 +94,13 @@ type formInput struct {
 //     gets. The two describe different causes with different remedies and are
 //     mutually exclusive at the source (see dump.FormInfo.NoFormRoot), so a
 //     response never carries both.
+//   - A THIRD outcome is neither a failure nor a parse flag: form_name resolved
+//     to a form the dump does have, and that form supplied no elements, no
+//     commands and no handlers. Nothing fails, nothing is logged, and the body
+//     is the 1C service's own choice of form. It carries formNameNoStructureNote,
+//     which can accompany either parse note (they explain the cause, it states
+//     the consequence for form_name) or stand alone when the form is simply
+//     empty in the dump.
 func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input formInput
@@ -122,12 +129,23 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		// parser still reported success (dump.FormInfo.ParseIncomplete). It is
 		// mutually exclusive with dumpStructureMissing by construction, since
 		// that one only ever gets set on the dumpErr != nil branches.
+		//
+		// namedFormWithoutStructure records the third degraded case, the one that
+		// is neither an error nor a parse outcome: form_name DID resolve to a
+		// form in the dump, and that form supplied no elements, no commands and
+		// no handlers. The dump then contributes nothing to the composition, the
+		// answer on screen is the 1C service's own choice of form, and nothing so
+		// far said so. It is measured on the dump's own form BEFORE the merge,
+		// because the merge may copy that form over the response wholesale and
+		// the response afterwards no longer separates the two sources.
 		dumpStructureMissing := false
+		namedFormWithoutStructure := false
 		var dumpRead dumpFormRead
 		if dumpDir != "" {
 			dumpForm, readOutcome, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
 			switch {
 			case dumpErr == nil && dumpForm != nil:
+				namedFormWithoutStructure = input.FormName != "" && !suppliesStructure(dumpForm)
 				mergeDumpIntoForm(&form, dumpForm)
 				dumpRead = readOutcome
 			case errors.Is(dumpErr, errFormNotInDump):
@@ -179,6 +197,13 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		if dumpRead.noFormRoot {
 			text += formNoFormRootNote
 		}
+		// Last, so that when a parse outcome above already explained the cause,
+		// the reading order is cause first and the form_name consequence second.
+		// It also stands alone, for the form that is simply empty in the dump:
+		// that file is read whole, holds a form, and sets neither flag.
+		if namedFormWithoutStructure {
+			text += formNameNoStructureNote
+		}
 		return textResult(text), nil
 	}
 }
@@ -227,6 +252,35 @@ const formNameDumpUnreadableNote = "> Параметр `form_name` при это
 	"ищется в выгрузке, а выгрузка её не дала по причинам выше. Форму выбрал сам HTTP-сервис 1С, " +
 	"и выше возвращена именно она.\n"
 
+// formNameNoStructureNote is appended when --dump is configured, the caller
+// passed form_name, the dump HAS that form, and it supplied no composition at
+// all. Until this note existed the two outcomes of one intent were treated
+// differently: a form_name the object does not have is a hard error listing the
+// real names, while a form_name that resolves to a form yielding nothing was
+// answered with the 1C service's own pick and no sign that the parameter had
+// changed anything. Note this closes a gap in the reporting; the underlying
+// behaviour of showing the service's form is older than the form_name work.
+//
+// It is deliberately NOT a hard error. Only the unknown-name case is fatal,
+// because only there can the response be a confident answer about a form that
+// does not exist under the requested name; here the form does exist and the
+// HTTP half of the answer is still valid.
+//
+// Every clause is limited to what the code guarantees. "Найдена" is guaranteed
+// by formFromDump, which reaches this branch only after formFiles[formName] hit.
+// "Ни одного элемента, ни одной команды и ни одного обработчика не прочитано"
+// describes what THIS run read, not what the file contains, because a partial
+// parse can leave a rich file yielding nothing. "В разделы состава формы выше
+// из выгрузки не попало ничего" is guaranteed by mergeDumpIntoForm: with no dump
+// structure, none of its three collection assignments run. The note claims
+// nothing about the header line, which can still come from the dump when HTTP
+// returned no name.
+const formNameNoStructureNote = "> Параметр `form_name` не дал состава формы: форма с таким именем " +
+	"в выгрузке найдена, но ни одного элемента, ни одной команды и ни одного обработчика из неё " +
+	"не прочитано, и в разделы состава формы выше из выгрузки не попало ничего. Форму для ответа " +
+	"выбирает сам HTTP-сервис 1С, параметр `form_name` на этот выбор не влияет. Проверьте полноту " +
+	"выгрузки конфигурации, указанной в `--dump`.\n"
+
 // formPartialParseNote is appended when the dump DID give us a form but the
 // parser recorded that it stopped on a syntax error before the end of the file
 // (dump.FormInfo.ParseIncomplete). That path returns no error at all: the parse
@@ -236,14 +290,28 @@ const formNameDumpUnreadableNote = "> Параметр `form_name` при это
 // built from a whole file. This note is the only place the caller can learn
 // otherwise.
 //
-// The wording never says the form has no elements, commands or handlers. A
-// partial parse usually keeps whatever it read before the break, so the body
-// above this note routinely DOES list some, and a note denying them would be
-// falsified by the table printed directly above it. "Показано только то, что
-// удалось прочитать" is true whether that is nothing or almost everything.
+// The wording is about the FILE, never about the provenance of what is printed
+// above it, and it makes no claim in either direction about the composition
+// sections. Both denials are reachable:
+//
+//   - "the form has no elements" is falsified whenever the break came after some
+//     were recorded, which is the common partial parse;
+//   - "what you see is what was read from the file" is falsified whenever the
+//     break came BEFORE anything was recorded. The dump then contributes nothing,
+//     mergeDumpIntoForm leaves all three collections as the 1C HTTP service
+//     returned them, and the body under this note is pure HTTP content.
+//
+// So the note states the one fact that holds in every case (the file was read
+// only up to the error, the rest was not read), admits the dump may have
+// contributed little or nothing, and names the HTTP service as a possible source
+// of the sections above without asserting that it is the only one. The sibling
+// formNoFormRootNote can and does say flatly that everything above came from
+// HTTP; this note may not, because a partial parse can and does deliver dump
+// content.
 const formPartialParseNote = "> Файл формы в выгрузке прочитан не полностью: разбор XML остановился " +
-	"на ошибке в файле, поэтому показано только то, что удалось прочитать до этого места, а всё, " +
-	"что записано в файле дальше, в ответ не попало. Состав формы выше может быть неполным. " +
+	"на ошибке в файле, поэтому всё, что записано в файле дальше, прочитано не было. Из выгрузки " +
+	"в ответ могло попасть мало или совсем ничего, а разделы состава формы выше могут содержать " +
+	"данные, которые вернул HTTP-сервис 1С. Состав формы выше может быть неполным. " +
 	"Обычные причины: файл Form.xml обрезан или повреждён. Проверьте полноту выгрузки конфигурации, " +
 	"указанной в `--dump`.\n"
 
@@ -445,9 +513,7 @@ func convertDumpForm(formName string, info *dump.FormInfo) *onec.FormStructure {
 // the dump form, so Name and Title stay as HTTP returned them and the dump only
 // fills in what HTTP left empty.
 func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure) {
-	dumpSuppliedStructure := len(dumpForm.Elements) > 0 ||
-		len(dumpForm.Commands) > 0 ||
-		len(dumpForm.Handlers) > 0
+	dumpSuppliedStructure := suppliesStructure(dumpForm)
 
 	if dumpSuppliedStructure && dumpForm.Name != "" && dumpForm.Name != form.Name {
 		*form = *dumpForm
@@ -469,6 +535,17 @@ func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure) {
 	if len(dumpForm.Handlers) > 0 {
 		form.Handlers = dumpForm.Handlers
 	}
+}
+
+// suppliesStructure reports whether a form carries any composition at all.
+//
+// It is ONE function with two call sites on purpose. mergeDumpIntoForm decides
+// from it whether the dump's form takes over the response, and the handler
+// decides from it whether to tell a form_name caller that the dump contributed
+// nothing. Written twice, the two could drift apart, and the note would then
+// describe a merge that did something else.
+func suppliesStructure(f *onec.FormStructure) bool {
+	return len(f.Elements) > 0 || len(f.Commands) > 0 || len(f.Handlers) > 0
 }
 
 func formatFormStructure(f *onec.FormStructure) string {

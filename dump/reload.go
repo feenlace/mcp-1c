@@ -185,9 +185,31 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	// could not tell a fresh build from a reuse.
 	rep.Rebuilt = !generationReadyDir(genDir)
 
-	if err := reloadBuildGeneration(idx.dir, cacheDir, sigAfter); err != nil {
+	// Recover a build panic into buildErr so it becomes an ordinary failed
+	// reload instead of killing the process. Same shape, and for the same
+	// reason, as the recover around the identical build call in
+	// cmd/mcp-1c/serve.go: a panic raised here is not caught anywhere above,
+	// neither by the MCP SDK's tool dispatch nor by a goroutine of ours, so it
+	// would take down the whole server and every session on it.
+	//
+	// A recovered panic is safe to treat as a plain failure at THIS point
+	// precisely because of where the point is: nothing below the swap has run
+	// yet, so the live index has not been touched and the old generation keeps
+	// serving, exactly as it does when the build returns an error. The deferred
+	// idx.reloadMu.Unlock() would have run either way; recovering additionally
+	// keeps the caller, and the process, alive to use it.
+	var buildErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				buildErr = fmt.Errorf("panic during the reload build of %s: %v", idx.dir, r)
+			}
+		}()
+		buildErr = reloadBuildGeneration(idx.dir, cacheDir, sigAfter)
+	}()
+	if buildErr != nil {
 		rep.Elapsed = time.Since(start)
-		return rep, fmt.Errorf("dump: building the new index generation: %w", err)
+		return rep, fmt.Errorf("dump: building the new index generation: %w", buildErr)
 	}
 	if !generationReadyDir(genDir) {
 		rep.Elapsed = time.Since(start)

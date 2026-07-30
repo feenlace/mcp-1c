@@ -23,14 +23,23 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
+      # This job has no actions/checkout step: it verifies PUBLISHED assets and
+      # needs no source. Without a checkout there is no git remote for gh to
+      # infer the repository from, so a call like `gh release download` would
+      # fail with "failed to run git: fatal: not a git repository". GH_REPO is
+      # gh's own documented way to name the repository ("specify the GitHub
+      # repository in the [HOST/]OWNER/REPO format for commands that otherwise
+      # operate on a local repository"), and setting it at JOB level covers
+      # every step here and every gh call added later, which per-call -R flags
+      # would not.
+      GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag }}
       EXPECTED_BINARIES: "6"
     steps:
       - name: List published assets
         run: |
           set -euo pipefail
-          gh api "repos/${REPO}/releases/tags/${TAG}" --jq '.assets[].name' > assets.txt
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.assets[].name' > assets.txt
           echo "Assets published for ${TAG}:"
           cat assets.txt
 
