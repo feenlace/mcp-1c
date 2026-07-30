@@ -32,13 +32,38 @@ type FormInfo struct {
 	// looks exactly as confident as a complete one.
 	//
 	// SCOPE, deliberately narrow: this records a decoder SYNTAX error, nothing
-	// else. A file that the decoder consumes to a normal end is never flagged,
-	// even when it is useless as a form: an empty file, a file of plain text
-	// and a well formed document whose root is not <Form> all finish on io.EOF
-	// and all yield an empty FormInfo with ParseIncomplete false. Detecting
-	// those needs a different signal (whether the root <Form> was ever
-	// entered), so do not read this field as "the file was a valid form".
+	// else. A file that the decoder consumes to a normal end is never flagged
+	// here, even when it is useless as a form: an empty file, a file of plain
+	// text and a well formed document whose root is not <Form> all finish on
+	// io.EOF and all yield an empty FormInfo. Those are reported by NoFormRoot
+	// below, so do not read this field as "the file was a valid form".
 	ParseIncomplete bool
+
+	// NoFormRoot reports that the decoder consumed the whole document to its
+	// normal end without the parser ever entering a <Form> element, so the file
+	// was read in full and simply does not describe a form. Everything this
+	// parser records (Title, Elements, Commands, Handlers) is only ever read
+	// inside <Form>, so when this is set all four are guaranteed empty, and a
+	// caller may say so without checking them.
+	//
+	// It closes the class ParseIncomplete cannot see: an empty Form.xml, a file
+	// of plain text, whitespace or an XML comment alone, and a well formed
+	// document whose root element is something other than <Form>. Each of those
+	// finishes on a clean io.EOF, and before this field they were as silent as
+	// the truncation case used to be.
+	//
+	// MUTUALLY EXCLUSIVE with ParseIncomplete by construction: this is set only
+	// on the io.EOF branch. After a syntax error the read was ABANDONED, so a
+	// <Form> further into the file would never have been reached and calling the
+	// file formless would be a guess, not a finding. That exclusivity is what
+	// lets each of the two describe its own cause without contradicting the
+	// other, and it is pinned by a test.
+	//
+	// SCOPE: it records that no <Form> element was entered ANYWHERE, not that
+	// the document had no root. A <Form> nested inside some other element is
+	// still entered by the loop below (measured), and such a file is therefore
+	// not flagged.
+	NoFormRoot bool
 }
 
 // FormElementInfo represents a parsed form element.
@@ -219,8 +244,11 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 	// (only form-level <Events> become Handlers; element-level <Events>
 	// are ignored for now to keep the flat list focused on UI structure).
 	depth := 0
-	// formDepth is the depth at which we observed the root <Form> element.
-	// Stays at 0 until we enter it, then becomes 1.
+	// formDepth is the depth at which we observed the <Form> element, and the
+	// sentinel -1 means we have not entered one yet. For the normal dump, where
+	// <Form> is the document root, it becomes 1. It is also the whole basis of
+	// FormInfo.NoFormRoot: if it is still -1 when the document ends, the file
+	// held no form and nothing below was ever recorded.
 	formDepth := -1
 
 	for {
@@ -242,6 +270,19 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 			// here on its next Token() rather than on a clean EOF.
 			if !errors.Is(err, io.EOF) {
 				form.ParseIncomplete = true
+			} else if formDepth == -1 {
+				// Clean end of document and we never entered a <Form>: the file
+				// was read whole and does not describe a form. Reachable for an
+				// empty file, plain text, whitespace or a comment alone, and a
+				// well formed document rooted at something else.
+				//
+				// Deliberately on the io.EOF branch ONLY. After a syntax error
+				// the read was abandoned, so a <Form> beyond the break was never
+				// reached and calling the file formless would be a guess. Keeping
+				// it here is also what makes the two flags mutually exclusive, so
+				// a caller can state each cause without the second answer
+				// contradicting the first.
+				form.NoFormRoot = true
 			}
 			break
 		}

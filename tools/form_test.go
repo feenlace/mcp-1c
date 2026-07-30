@@ -878,7 +878,7 @@ func TestNewFormStructureHandler_GoodDumpNoFormNameHasNoNotes(t *testing.T) {
 	if !strings.Contains(text, "ПолеВыбора") {
 		t.Fatalf("expected the parsed structure in the body:\n%s", text)
 	}
-	for _, unwanted := range []string{dumpNoteMarker, partialNoteMarker, "form_name", "--dump"} {
+	for _, unwanted := range []string{dumpNoteMarker, partialNoteMarker, noFormRootNoteMarker, "form_name", "--dump"} {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("a healthy dump response must not carry %q:\n%s", unwanted, text)
 		}
@@ -905,7 +905,7 @@ func TestNewFormStructureHandler_GoodDumpValidFormNameHasNoNotes(t *testing.T) {
 	if !strings.Contains(text, "ПолеЭлемента") {
 		t.Fatalf("expected the parsed structure in the body:\n%s", text)
 	}
-	for _, unwanted := range []string{dumpNoteMarker, partialNoteMarker, "form_name", "--dump"} {
+	for _, unwanted := range []string{dumpNoteMarker, partialNoteMarker, noFormRootNoteMarker, "form_name", "--dump"} {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("a healthy dump response must not carry %q:\n%s", unwanted, text)
 		}
@@ -1053,6 +1053,176 @@ func TestNewFormStructureHandler_WellFormedDumpHasNoPartialNote(t *testing.T) {
 	}
 	if strings.Contains(text, partialNoteMarker) {
 		t.Errorf("a complete Form.xml must not carry the partial parse note:\n%s", text)
+	}
+}
+
+// noFormRootNoteMarker is the distinguishing phrase of the note added when the
+// dump's Form.xml WAS opened and read to its end but held no form at all.
+// Matched as a phrase rather than through the constant, exactly as the two
+// markers above are, so these tests compile against a build that does not carry
+// the constant yet and fail on behaviour instead of failing to build.
+const noFormRootNoteMarker = "описания формы в нём нет"
+
+// formlessFiles are Form.xml contents that a dump can plausibly contain and that
+// hold no form: the classes the syntax-error flag structurally cannot see,
+// because each one is read to a clean end of document.
+var formlessFiles = map[string]string{
+	"empty file":           "",
+	"plain text":           "выгрузка не удалась",
+	"wrong root element":   `<?xml version="1.0" encoding="UTF-8"?><ExternalDataProcessor><Name>Отчёт</Name></ExternalDataProcessor>`,
+	"xml declaration only": `<?xml version="1.0" encoding="UTF-8"?>`,
+}
+
+// TestNewFormStructureHandler_FormlessFormXMLAddsItsOwnNote is the headline case
+// for the second silent class. The Form.xml exists, is a regular file, opens and
+// reads cleanly, and simply is not a form. The parser reports success, so no
+// error is raised and nothing is logged, and without a note the caller reads a
+// confident answer about a form whose file described nothing.
+func TestNewFormStructureHandler_FormlessFormXMLAddsItsOwnNote(t *testing.T) {
+	for name, content := range formlessFiles {
+		t.Run(name, func(t *testing.T) {
+			srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+			dumpDir := t.TempDir()
+			writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента", content)
+
+			result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+			if err != nil {
+				t.Fatalf("a formless Form.xml must not become a hard error: %v", err)
+			}
+			text := resultText(t, result)
+
+			if !strings.Contains(text, noFormRootNoteMarker) {
+				t.Errorf("body must say the form file held no form:\n%s", text)
+			}
+			// The partial note describes the OTHER cause and prescribes the other
+			// remedy. This file was not truncated, it was read whole, so claiming
+			// the read stopped early would send the user after damage that is not
+			// there. It also literally contradicts this note's own first clause.
+			if strings.Contains(text, partialNoteMarker) {
+				t.Errorf("the file was read in full, so the partial parse note must not "+
+					"appear alongside a note saying exactly that:\n%s", text)
+			}
+			// Nor is this the "dump gave us nothing" case: the dump WAS found, the
+			// form directory WAS listed and the file WAS read.
+			if strings.Contains(text, dumpNoteMarker) {
+				t.Errorf("the dump was read, so the unreadable-dump note must stay away:\n%s", text)
+			}
+			// The HTTP half of the answer is still valid and must survive.
+			if !strings.Contains(text, "ФормаДокумента") {
+				t.Errorf("the valid part of the answer must still be returned:\n%s", text)
+			}
+		})
+	}
+}
+
+// TestNewFormStructureHandler_FormlessNoteDoesNotDenyHTTPSections is the wording
+// guard, the twin of the one on the partial note. When the dump holds no form
+// the response body is whatever the 1C HTTP service returned, and that can be a
+// full structure. A note phrased as "there are no elements" is then falsified by
+// the table printed directly above it, which is the defect this codebase has
+// already hit twice.
+func TestNewFormStructureHandler_FormlessNoteDoesNotDenyHTTPSections(t *testing.T) {
+	// An HTTP service that DOES fill all three sections.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":  "ФормаДокумента",
+			"title": "Реализация товаров и услуг",
+			"elements": []any{
+				map[string]any{"name": "ЭлементОтСервиса", "type": "ПолеВвода", "dataPath": "Объект.Контрагент"},
+			},
+			"commands": []any{map[string]any{"name": "КомандаОтСервиса", "action": "Провести"}},
+			"handlers": []any{map[string]any{"event": "OnOpen", "handler": "ОбработчикОтСервиса"}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента", "")
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, noFormRootNoteMarker) {
+		t.Fatalf("body must say the form file held no form:\n%s", text)
+	}
+	// Everything the HTTP service supplied is still in the body.
+	for _, want := range []string{"ЭлементОтСервиса", "КомандаОтСервиса", "ОбработчикОтСервиса"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("HTTP-supplied %q must still be listed:\n%s", want, text)
+		}
+	}
+	// And the note must not deny them. Each phrase is one a note author could
+	// plausibly reach for, and every one of them would be false here.
+	for _, denial := range []string{
+		"элементы отсутствуют",
+		"нет элементов",
+		"состав формы пуст",
+		"форма не содержит элементов",
+		"элементы не прочитаны",
+		"ничего не прочитано",
+	} {
+		if strings.Contains(text, denial) {
+			t.Errorf("note claims %q while the body above lists elements:\n%s", denial, text)
+		}
+	}
+}
+
+// TestNewFormStructureHandler_ParseNotesAreNeverBothPresent pins the invariant
+// at the level the user actually sees. The two notes make opposite claims about
+// the same read, one that the file was read whole and one that it was not, so a
+// response carrying both is self-contradicting whatever else it gets right. The
+// exclusivity is guaranteed inside the parser; this checks it survives all the
+// way out to the response body, for a file of each kind.
+func TestNewFormStructureHandler_ParseNotesAreNeverBothPresent(t *testing.T) {
+	cases := map[string]struct {
+		xml         string
+		wantPartial bool
+	}{
+		"truncated inside the form is only partial": {truncatedFormXML(1), true},
+		// The case that actually exercises exclusivity here. A file truncated
+		// INSIDE <Form> can never trip the formless flag, because the form was
+		// already entered, so it cannot detect a parser that sets both. This one
+		// is cut off before any <Form> appears, which is precisely the input for
+		// which both conditions are live at once.
+		"truncated before the form is only partial": {
+			`<?xml version="1.0" encoding="UTF-8"?><ExternalDataProcessor><Name`, true,
+		},
+		"empty file is only formless": {"", false},
+		"plain text is only formless": {"это не xml", false},
+		"complete form has neither":   {sampleFormXML(), false},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+			dumpDir := t.TempDir()
+			writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента", tc.xml)
+
+			result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			text := resultText(t, result)
+
+			gotPartial := strings.Contains(text, partialNoteMarker)
+			gotFormless := strings.Contains(text, noFormRootNoteMarker)
+			if gotPartial && gotFormless {
+				t.Fatalf("both parse notes present, they contradict each other:\n%s", text)
+			}
+			if gotPartial != tc.wantPartial {
+				t.Errorf("partial note present = %v, want %v:\n%s", gotPartial, tc.wantPartial, text)
+			}
+			// A complete form is the only case here that must carry no note at
+			// all; the two broken ones must each carry exactly their own.
+			if name == "complete form has neither" && gotFormless {
+				t.Errorf("a healthy form must carry no note:\n%s", text)
+			}
+		})
 	}
 }
 

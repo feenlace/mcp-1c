@@ -31,6 +31,13 @@ func mkBSLFile(t *testing.T, base, relPath, content string) {
 }
 
 // waitReady blocks until idx.Ready() returns true or timeout expires.
+//
+// Ready() promises exactly one thing: the index is SEARCHABLE. It does not
+// promise that anything was written to the cache directory. On the cold-build
+// path buildShards flips ready.Store(true) and only THEN calls saveManifest, so
+// a test that asserts on cache FILES straight after this helper is asserting a
+// postcondition readiness does not carry. Wait for the file itself instead, e.g.
+// with waitManifest below.
 func waitReady(t *testing.T, idx *Index, timeout time.Duration) {
 	t.Helper()
 	deadline := time.After(timeout)
@@ -41,6 +48,55 @@ func waitReady(t *testing.T, idx *Index, timeout time.Duration) {
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+// waitManifest blocks until a manifest exists at cpath and returns it, failing
+// the test loudly if it never appears. A helper that gave up quietly would put
+// the same flake back in a new disguise, so the timeout is a t.Fatalf and never
+// a nil return.
+//
+// WHY IT IS NEEDED: readiness and the manifest are two different events, in that
+// order. buildShards sets idx.ready.Store(true) and only afterwards calls
+// idx.saveManifest(cpath) (dump/index.go, under "Save manifest for future
+// incremental updates"). Both run on the background build goroutine, so between
+// the flip and the atomic rename of manifest.json there is a real window in
+// which the index answers queries and manifest.json does not exist yet. Reading
+// it there returns (nil, nil) from LoadManifest, which cost this package a
+// 7-in-40 flake reported as "reload manifest after rebuild: m=<nil> err=<nil>".
+//
+// PRODUCT CONSEQUENCE, accepted behaviour and NOT a bug to fix: because the save
+// comes after the flip, a process killed inside that window has already served
+// answers and leaves no manifest behind, so the next start is a cold rebuild
+// instead of a warm one. That is the deliberate trade. Ready means searchable,
+// and moving saveManifest ahead of the flip would push a full manifest build (an
+// os.Stat per BSL file, see buildManifest) in front of the first answer on EVERY
+// start, to save a rebuild that only happens if the process dies inside a window
+// of milliseconds. The expectation in the test is what was wrong, not the order
+// of the two statements. Do not "fix" this by moving the save.
+//
+// This waits for EXISTENCE only, deliberately. Waiting for the manifest to also
+// carry some expected content would convert a real regression into a timeout
+// with no diagnosis; the caller keeps its own assertions on what it finds, and
+// they stay exactly as sharp as they were.
+func waitManifest(t *testing.T, cpath string, timeout time.Duration) *Manifest {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		m, err := LoadManifest(cpath)
+		if err != nil {
+			// A read or parse failure is a real defect, not a "not yet": Save
+			// writes to a temp file and renames, so a reader sees either no
+			// manifest or a whole one. Never retried, so it cannot hide here.
+			t.Fatalf("LoadManifest(%s): %v", cpath, err)
+		}
+		if m != nil {
+			return m
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for manifest.json to appear in %s", timeout, cpath)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

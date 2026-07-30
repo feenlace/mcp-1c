@@ -169,10 +169,18 @@ func TestNewIndex_DropsStaleSchemaFlatCache(t *testing.T) {
 		t.Errorf("stale-schema flat cache was reused (marker survived, stat err=%v); expected drop+rebuild", statErr)
 	}
 	// Rebuilt: the new manifest is re-stamped to the current schema.
-	reM, err := LoadManifest(cpath)
-	if err != nil || reM == nil {
-		t.Fatalf("reload manifest after rebuild: m=%v err=%v", reM, err)
-	}
+	//
+	// Waited for by FILE, not by Ready(): the rebuilt manifest is saved after the
+	// readiness flip (see waitManifest), so reading it straight after waitReady
+	// raced the build and failed 7 times in 40 runs with "m=<nil> err=<nil>".
+	//
+	// The wait cannot manufacture a pass. It waits for existence only, and the
+	// tampered baseline-stamped manifest is already gone by this point:
+	// removeFlatCacheContents deletes it synchronously inside NewIndex, keeping
+	// only the g/ subtree. Had the stale cache been REUSED instead of dropped,
+	// that old manifest would still be on disk, waitManifest would return it, and
+	// the schema check below would fail on it exactly as it did before.
+	reM := waitManifest(t, cpath, 30*time.Second)
 	if reM.schemaVersion() != dumpIndexSchemaVersion {
 		t.Errorf("rebuilt manifest schema = %d, want current %d", reM.schemaVersion(), dumpIndexSchemaVersion)
 	}
