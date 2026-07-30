@@ -417,6 +417,35 @@ const (
 	SearchModeExact SearchMode = "exact"
 )
 
+// SearchStats reports how the matches a search hands back relate to the number
+// it counted, so a caller can render an answer that does not contradict itself.
+//
+// It exists because the two numbers are produced by different halves of the
+// search. Total comes from the index, which counts documents; the matches come
+// from the render path, which re-reads each hit's module and refuses to serve
+// content the file no longer holds. A dump rewritten under a live server (the
+// normal middle state of a re-dump followed by reload_dump) makes the second
+// number smaller than the first while nothing about it is an error, and the
+// difference has to travel with the result rather than be inferred from it.
+type SearchStats struct {
+	// Total is the number of matches the index counts for the query. It is what
+	// the search would return if every module behind it could still be read; for
+	// regex and exact search it is the number of matching lines actually read.
+	Total int
+
+	// Unreadable is the number of hits this answer selected and then dropped
+	// because the module's content could no longer be read: the file changed,
+	// moved or vanished after it was indexed, and GetContent refuses to serve a
+	// revision the dump does not hold. It counts hits WITHIN the answer the limit
+	// selected, never the whole corpus: a search that never looked at the rest of
+	// the index cannot know how many of those are readable.
+	//
+	// It is always 0 for regex and exact search, where an unreadable module drops
+	// out of the scan before it can contribute to Total, so those two numbers
+	// cannot disagree in the first place.
+	Unreadable int
+}
+
 // SearchParams holds all parameters for a search query.
 type SearchParams struct {
 	Query    string
@@ -1680,11 +1709,21 @@ func (idx *Index) DeleteDoc(id string) error {
 
 // Search finds matches in indexed BSL modules. Dispatches by mode.
 func (idx *Index) Search(params SearchParams) ([]Match, int, error) {
+	matches, stats, err := idx.SearchWithStats(params)
+	return matches, stats.Total, err
+}
+
+// SearchWithStats is Search with the shortfall between the count and the
+// returned matches attached. Search is kept as the two-value form for callers
+// outside this module; every caller that renders the count for a human or an
+// LLM should use this one, because the count alone cannot be presented honestly
+// when part of the dump has moved out from under the index.
+func (idx *Index) SearchWithStats(params SearchParams) ([]Match, SearchStats, error) {
 	if !idx.ready.Load() {
 		if errPtr := idx.buildErr.Load(); errPtr != nil {
-			return nil, 0, fmt.Errorf("index build failed: %w", *errPtr)
+			return nil, SearchStats{}, fmt.Errorf("index build failed: %w", *errPtr)
 		}
-		return nil, 0, fmt.Errorf("search index is building, please retry")
+		return nil, SearchStats{}, fmt.Errorf("search index is building, please retry")
 	}
 
 	if params.Mode == "" {
@@ -1703,7 +1742,7 @@ func (idx *Index) Search(params SearchParams) ([]Match, int, error) {
 	case SearchModeRegex:
 		re, err := regexp.Compile(params.Query)
 		if err != nil {
-			return nil, 0, fmt.Errorf("invalid regex %q: %w", params.Query, err)
+			return nil, SearchStats{}, fmt.Errorf("invalid regex %q: %w", params.Query, err)
 		}
 		return idx.searchLineByLine(params, func(line, _ string) bool {
 			return re.MatchString(line)
@@ -1714,12 +1753,19 @@ func (idx *Index) Search(params SearchParams) ([]Match, int, error) {
 			return strings.Contains(line, lower)
 		}, lower, true)
 	default:
-		return nil, 0, fmt.Errorf("unknown search mode: %q", params.Mode)
+		return nil, SearchStats{}, fmt.Errorf("unknown search mode: %q", params.Mode)
 	}
 }
 
 // searchSmart performs full-text BM25 search via Bleve.
-func (idx *Index) searchSmart(params SearchParams) ([]Match, int, error) {
+//
+// The hits Bleve returns are re-read through GetContent, which refuses to serve
+// a module whose file has changed or vanished since it was indexed. Every hit
+// refused that way is counted into SearchStats.Unreadable: the refusal is right,
+// but it makes the answer smaller than result.Total, and a count that outruns the
+// answer silently is what turns a moved dump into "N совпадений" over an empty
+// body.
+func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error) {
 	mq := bleve.NewMatchQuery(params.Query)
 	mq.SetField("content")
 	mq.Analyzer = analyzerBSL
@@ -1745,7 +1791,7 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, int, error) {
 	req := bleve.NewSearchRequestOptions(q, params.Limit, 0, false)
 	result, err := idx.alias.Search(req)
 	if err != nil {
-		return nil, 0, fmt.Errorf("bleve search: %w", err)
+		return nil, SearchStats{}, fmt.Errorf("bleve search: %w", err)
 	}
 
 	lower := strings.ToLower(params.Query)
@@ -1764,9 +1810,14 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, int, error) {
 	}
 
 	var matches []Match
+	unreadable := 0
 	for _, hit := range result.Hits {
 		content, ok := idx.GetContent(hit.ID)
 		if !ok {
+			// The index still counts this hit but its module can no longer be
+			// read, so nothing about it can be shown. Dropping it is correct;
+			// dropping it WITHOUT a trace is what lets the count outrun the body.
+			unreadable++
 			continue
 		}
 		lines := strings.Split(content, "\n")
@@ -1835,17 +1886,24 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, int, error) {
 		})
 	}
 
-	return matches, int(result.Total), nil
+	return matches, SearchStats{Total: int(result.Total), Unreadable: unreadable}, nil
 }
 
 // searchLineByLine performs line-by-line search using a matcher function.
 // Used for regex and exact modes. Optionally pre-filters modules via Bleve.
 // When preLower is true, each line is pre-lowered once and the lowered version
 // is passed to the match function (avoids redundant ToLower per line).
-func (idx *Index) searchLineByLine(params SearchParams, match func(line, q string) bool, q string, preLower bool) ([]Match, int, error) {
+//
+// SearchStats.Unreadable stays 0 here, and that is a statement about this scan
+// rather than an omission: a module whose content cannot be read contributes
+// neither matches nor count, because both are produced from the same content in
+// the same pass. There is no shortfall between the two to report. Counting the
+// skipped candidates would invent one and send the caller re-dumping over an
+// answer that is already complete.
+func (idx *Index) searchLineByLine(params SearchParams, match func(line, q string) bool, q string, preLower bool) ([]Match, SearchStats, error) {
 	candidates, err := idx.filterModules(params.Category, params.Module)
 	if err != nil {
-		return nil, 0, err
+		return nil, SearchStats{}, err
 	}
 
 	var matches []Match
@@ -1922,7 +1980,7 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 		}
 	}
 
-	return matches, total, nil
+	return matches, SearchStats{Total: total}, nil
 }
 
 // filterModules returns the subset of module names matching category/module filters.

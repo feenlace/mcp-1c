@@ -84,7 +84,7 @@ func NewSearchCodeHandler(index *dump.Index) mcp.ToolHandler {
 			return nil, fmt.Errorf("unknown mode: %q (allowed: smart, regex, exact)", input.Mode)
 		}
 
-		matches, total, err := index.Search(dump.SearchParams{
+		matches, stats, err := index.SearchWithStats(dump.SearchParams{
 			Query:    input.Query,
 			Category: input.Category,
 			Module:   input.Module,
@@ -95,11 +95,11 @@ func NewSearchCodeHandler(index *dump.Index) mcp.ToolHandler {
 			return nil, fmt.Errorf("search: %w", err)
 		}
 
-		if total == 0 && index.ModuleCount() == 0 {
+		if stats.Total == 0 && index.ModuleCount() == 0 {
 			return textResult("Индекс пуст: в директории --dump не найдено .bsl файлов. Проверьте путь к выгрузке конфигурации."), nil
 		}
 
-		return textResult(FormatSearchResult(matches, total, input.Query, mode, nil)), nil
+		return textResult(FormatSearchResultWithStats(matches, stats, input.Query, mode, nil)), nil
 	}
 }
 
@@ -120,13 +120,51 @@ type MatchDisplayFunc func(moduleName string) MatchDisplay
 // display name with no prefix (community behavior). Callers that need to
 // decorate module names (e.g. marking extension modules) can pass a custom
 // MatchDisplayFunc.
+//
+// It carries no shortfall information, so it renders every answer as one whose
+// count the body can support. Callers that obtain their count from
+// dump.Index.SearchWithStats should call FormatSearchResultWithStats instead;
+// this signature is kept for callers outside this module.
 func FormatSearchResult(matches []dump.Match, total int, query string, mode dump.SearchMode, displayFn MatchDisplayFunc) string {
+	return FormatSearchResultWithStats(matches, dump.SearchStats{Total: total}, query, mode, displayFn)
+}
+
+// FormatSearchResultWithStats formats search matches into markdown text and
+// keeps the answer consistent with its own count.
+//
+// The count and the matches come from different halves of the search: the count
+// from the index, the matches from a render path that re-reads each hit's module
+// and drops the ones whose file has changed or vanished (dump.Index.GetContent).
+// The drop is right, but silently it produces «(386 совпадений)» over
+// «Ничего не найдено». So when a hit was dropped, the header stops presenting the
+// number as a plain result count and names it as the index's, next to what the
+// body actually holds, and the footer says how many are missing and why.
+//
+// The two causes of a short answer are reported separately because their
+// remedies are opposite: a limit that truncated is fixed by a bigger limit, a
+// module that cannot be re-read is fixed by re-running the dump and calling
+// reload_dump. Neither remedy does anything for the other cause.
+func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, query string, mode dump.SearchMode, displayFn MatchDisplayFunc) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%d совпадений)\n\n", query, total)
+	if stats.Unreadable > 0 {
+		fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%d совпадений в индексе, показано %d)\n\n",
+			query, stats.Total, len(matches))
+	} else {
+		fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%d совпадений)\n\n", query, stats.Total)
+	}
 
 	if len(matches) == 0 {
-		b.WriteString("Ничего не найдено.\n")
+		if stats.Unreadable == 0 {
+			b.WriteString("Ничего не найдено.\n")
+			return b.String()
+		}
+		// «Ничего не найдено» answers about the QUERY: it says the code does not
+		// contain what was asked for. Here the code did contain it and the files
+		// are gone, which is a different fact with a different remedy, so the
+		// sentence must not be reused for it.
+		b.WriteString("Ни одного совпадения показать не удалось.\n\n")
+		b.WriteString(searchShortfallNote(stats, 0))
 		return b.String()
 	}
 
@@ -164,9 +202,39 @@ func FormatSearchResult(matches []dump.Match, total int, query string, mode dump
 		b.WriteString("\n```\n\n")
 	}
 
-	if total > len(matches) {
-		fmt.Fprintf(&b, "> Показано %d из %d совпадений. Уточните поиск или увеличьте limit.\n", len(matches), total)
+	if stats.Total > len(matches) {
+		b.WriteString(searchShortfallNote(stats, len(matches)))
 	}
 
+	return b.String()
+}
+
+// searchShortfallNote explains why the body carries fewer matches than the index
+// counted, per cause and with the remedy that belongs to it.
+//
+// shown is the number of matches rendered. stats.Unreadable of the hits the limit
+// selected were dropped as unreadable; whatever the index counts beyond those two
+// never left the index at all and is the ordinary limit truncation.
+func searchShortfallNote(stats dump.SearchStats, shown int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "> Показано %d из %d совпадений.", shown, stats.Total)
+
+	if stats.Unreadable == 0 {
+		// Nothing was dropped, so the only cause is the caller's own limit and the
+		// wording stays exactly what it has always been.
+		b.WriteString(" Уточните поиск или увеличьте limit.\n")
+		return b.String()
+	}
+
+	fmt.Fprintf(&b, " Ещё %d совпадений отобрано, но не показано: их модули не удалось перечитать, "+
+		"файлы изменились или удалены уже после того, как построен индекс. Число в заголовке взято "+
+		"из индекса и эти совпадения всё ещё учитывает. Выполните выгрузку конфигурации заново "+
+		"и вызовите reload_dump.", stats.Unreadable)
+
+	if stats.Total > shown+stats.Unreadable {
+		b.WriteString(" Остальные совпадения в limit не поместились: уточните поиск или увеличьте limit.")
+	}
+
+	b.WriteString("\n")
 	return b.String()
 }

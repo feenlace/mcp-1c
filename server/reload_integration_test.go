@@ -18,7 +18,15 @@ import (
 
 // searchTotalRe pulls the match count out of the search_code answer, which is the
 // only number a client actually sees.
-var searchTotalRe = regexp.MustCompile(`\((\d+) совпадений\)`)
+//
+// The header has two shapes and both are spelled out here rather than matched
+// loosely. When every counted match could be rendered it is the plain
+// «(N совпадений)». When some hits were dropped because their module could no
+// longer be read, the header names the number as the index's and prints what the
+// body actually holds next to it, so that the first line of the answer does not
+// assert a count the body cannot support. That is exactly the state
+// TestIntegration_ReloadDump_DropsADeletedModule puts the server in.
+var searchTotalRe = regexp.MustCompile(`\((\d+) совпадений(?: в индексе, показано \d+)?\)`)
 
 // setupReloadDump wires a server over a dump the test owns and can rewrite, using
 // the generation serve path (build + open read-only) that a real `serve` uses.

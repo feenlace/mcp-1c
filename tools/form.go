@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -138,8 +139,21 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		// far said so. It is measured on the dump's own form BEFORE the merge,
 		// because the merge may copy that form over the response wholesale and
 		// the response afterwards no longer separates the two sources.
+		//
+		// serviceNamedForm records whether the heading of the answer is the 1C
+		// service's own choice of form. It is measured HERE, before the merge,
+		// because mergeDumpIntoForm fills an empty Name from the dump and the two
+		// provenances are indistinguishable afterwards. Every note that says who
+		// chose the form shown has to be built from this, not assumed.
+		//
+		// serviceCallFailed records the failure this branch used to swallow whole:
+		// the dump answered, so the switch below never looks at httpErr again, and
+		// the response came out reading as one 1C had taken part in even when the
+		// connection was refused.
 		dumpStructureMissing := false
 		namedFormWithoutStructure := false
+		serviceNamedForm := form.Name != ""
+		serviceCallFailed := false
 		var dumpRead dumpFormRead
 		if dumpDir != "" {
 			dumpForm, readOutcome, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
@@ -148,6 +162,7 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 				namedFormWithoutStructure = input.FormName != "" && !suppliesStructure(dumpForm)
 				mergeDumpIntoForm(&form, dumpForm)
 				dumpRead = readOutcome
+				serviceCallFailed = httpErr != nil
 			case errors.Is(dumpErr, errFormNotInDump):
 				// The caller named a form this object does not have. Returning
 				// a different form's structure under that request would be a
@@ -176,8 +191,21 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		}
 
 		text := formatFormStructure(&form)
+		// bodyHasComposition is read off the SAME predicate formatFormStructure
+		// renders the three sections from, so a note about what is shown above
+		// cannot drift from what is actually printed. Every note below that says
+		// anything about those sections is built from it rather than assuming a
+		// body exists.
+		bodyHasComposition := suppliesStructure(&form)
+
 		if dumpDir == "" && input.FormName != "" {
 			text += formNameNeedsDumpNote
+		}
+		// First among the dump-branch notes: it is the cause the ones below inherit
+		// their shape from (no 1C composition to attribute, a heading that had to
+		// come from the dump), so the reading order is cause first.
+		if serviceCallFailed {
+			text += formServiceCallFailedNote(httpErr)
 		}
 		if dumpStructureMissing {
 			text += formDumpUnreadableNote
@@ -192,17 +220,17 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		// would additionally SWALLOW one of them if that guarantee ever broke,
 		// and a note going missing is harder to notice than one too many.
 		if dumpRead.partial {
-			text += formPartialParseNote
+			text += formPartialParseNote(bodyHasComposition)
 		}
 		if dumpRead.noFormRoot {
-			text += formNoFormRootNote
+			text += formNoFormRootNote(bodyHasComposition)
 		}
 		// Last, so that when a parse outcome above already explained the cause,
 		// the reading order is cause first and the form_name consequence second.
 		// It also stands alone, for the form that is simply empty in the dump:
 		// that file is read whole, holds a form, and sets neither flag.
 		if namedFormWithoutStructure {
-			text += formNameNoStructureNote
+			text += formNameNoStructureNote(serviceNamedForm)
 		}
 		return textResult(text), nil
 	}
@@ -275,11 +303,82 @@ const formNameDumpUnreadableNote = "> Параметр `form_name` при это
 // structure, none of its three collection assignments run. The note claims
 // nothing about the header line, which can still come from the dump when HTTP
 // returned no name.
-const formNameNoStructureNote = "> Параметр `form_name` не дал состава формы: форма с таким именем " +
-	"в выгрузке найдена, но ни одного элемента, ни одной команды и ни одного обработчика из неё " +
-	"не прочитано, и в разделы состава формы выше из выгрузки не попало ничего. Форму для ответа " +
-	"выбирает сам HTTP-сервис 1С, параметр `form_name` на этот выбор не влияет. Проверьте полноту " +
-	"выгрузки конфигурации, указанной в `--dump`.\n"
+//
+// The clause naming who chose the form is CONDITIONAL, and that is the whole
+// point of the parameter. "Форму для ответа выбирает сам HTTP-сервис 1С" is true
+// only while the service supplied a name of its own; when it did not, the merge
+// filled the heading from the dump form, the dump form is the one form_name
+// selected, and the sentence is refuted by the heading two lines above it.
+// serviceNamedForm is measured before the merge for exactly this reason.
+func formNameNoStructureNote(serviceNamedForm bool) string {
+	note := "> Параметр `form_name` не дал состава формы: форма с таким именем " +
+		"в выгрузке найдена, но ни одного элемента, ни одной команды и ни одного обработчика из неё " +
+		"не прочитано, и в разделы состава формы выше из выгрузки не попало ничего. "
+	if serviceNamedForm {
+		note += "Форму для ответа выбирает сам HTTP-сервис 1С, параметр `form_name` " +
+			"на этот выбор не влияет. "
+	} else {
+		note += "Имя формы в заголовке выше взято из выгрузки именно по этому параметру: " +
+			"своего имени формы HTTP-сервис 1С не вернул. "
+	}
+	return note + "Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
+}
+
+// formServiceCallFailedNote is appended when the dump answered and the call to
+// the 1C HTTP service did NOT. That combination used to be silent: the switch in
+// the handler classifies on dumpErr, so once the dump produced a form it never
+// looked at httpErr again, and a refused connection came out as a normal answer
+// under notes crediting 1C with what was shown.
+//
+// The wording claims nothing about which parts of the body survived. A failure
+// can be a refused connection (nothing decoded at all) or a decode that stopped
+// half way (some fields filled), so the note says data from 1C is missing or
+// incomplete and leaves it there rather than asserting a state it cannot check.
+//
+// The upstream error text is folded to single spaces and capped: it can be a
+// multi-line HTTP body from a foreign server, and an unbounded one would both
+// break the blockquote and paste an arbitrary remote payload into an answer read
+// by an LLM. The same text already reaches the caller verbatim on the branch
+// where BOTH sources fail, so naming it here exposes nothing new.
+func formServiceCallFailedNote(err error) string {
+	return "> Запрос к HTTP-сервису 1С завершился ошибкой, поэтому данных из 1С в ответе выше " +
+		"нет или они неполные, а всё остальное прочитано из выгрузки. Ошибка: " +
+		compactErrorText(err) + ". Проверьте адрес в `--base`, доступность сервиса " +
+		"и учётные данные.\n"
+}
+
+// urlUserInfoRe matches the credentials part of any URL inside a message, so it
+// can be removed before the message is shown.
+//
+// net/http redacts a password when it builds a *url.Error for a request it sent
+// (stripPassword in net/http/client.go), but that is only one of the paths a
+// message can arrive on and it leaves the user name in place. The one that
+// matters here is EARLIER: url.Parse rejects a userinfo it cannot decode and
+// quotes the whole URL it was given, credentials included, before any request is
+// made. A base URL of the form http://user:pass@host therefore reaches this note
+// verbatim unless it is stripped here.
+var urlUserInfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s"@]*@`)
+
+// compactErrorText prepares an upstream error message for a response body: it
+// removes any URL credentials, folds the message to a single line and caps its
+// length, so a note stays one blockquote line and carries nothing secret
+// whatever the upstream returned.
+func compactErrorText(err error) string {
+	if err == nil {
+		return "неизвестна"
+	}
+	text := urlUserInfoRe.ReplaceAllString(err.Error(), "${1}***@")
+	text = strings.Join(strings.Fields(text), " ")
+	const maxErrorRunes = 300
+	runes := []rune(text)
+	if len(runes) > maxErrorRunes {
+		text = string(runes[:maxErrorRunes]) + "..."
+	}
+	if text == "" {
+		return "неизвестна"
+	}
+	return text
+}
 
 // formPartialParseNote is appended when the dump DID give us a form but the
 // parser recorded that it stopped on a syntax error before the end of the file
@@ -308,12 +407,27 @@ const formNameNoStructureNote = "> Параметр `form_name` не дал со
 // formNoFormRootNote can and does say flatly that everything above came from
 // HTTP; this note may not, because a partial parse can and does deliver dump
 // content.
-const formPartialParseNote = "> Файл формы в выгрузке прочитан не полностью: разбор XML остановился " +
-	"на ошибке в файле, поэтому всё, что записано в файле дальше, прочитано не было. Из выгрузки " +
-	"в ответ могло попасть мало или совсем ничего, а разделы состава формы выше могут содержать " +
-	"данные, которые вернул HTTP-сервис 1С. Состав формы выше может быть неполным. " +
-	"Обычные причины: файл Form.xml обрезан или повреждён. Проверьте полноту выгрузки конфигурации, " +
-	"указанной в `--dump`.\n"
+//
+// The middle clause is CONDITIONAL for the same reason its sibling below is: a
+// sentence about what the sections above may contain is a sentence about
+// sections, and a body without any is the case where the note has to say so
+// instead. bodyHasComposition == false is a joint fact, not a guess: the merge
+// only ever fills those three collections from the dump when they are non-empty,
+// so an empty body means neither source supplied composition.
+func formPartialParseNote(bodyHasComposition bool) string {
+	note := "> Файл формы в выгрузке прочитан не полностью: разбор XML остановился " +
+		"на ошибке в файле, поэтому всё, что записано в файле дальше, прочитано не было. "
+	if bodyHasComposition {
+		note += "Из выгрузки в ответ могло попасть мало или совсем ничего, а разделы состава формы " +
+			"выше могут содержать данные, которые вернул HTTP-сервис 1С. Состав формы выше может " +
+			"быть неполным. "
+	} else {
+		note += "Разделов состава формы выше нет ни одного: до места ошибки из файла не прочитано " +
+			"ни элементов, ни команд, ни обработчиков, и HTTP-сервис 1С их тоже не дал. "
+	}
+	return note + "Обычные причины: файл Form.xml обрезан или повреждён. " +
+		"Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
+}
 
 // formNoFormRootNote is appended for the OTHER silent outcome: the Form.xml was
 // opened and read to its very end, and there was no form in it
@@ -340,11 +454,28 @@ const formPartialParseNote = "> Файл формы в выгрузке проч
 // from the dump directory when HTTP returned none (see mergeDumpIntoForm), which
 // is why the claim is limited to the composition sections and not to the whole
 // answer.
-const formNoFormRootNote = "> Файл формы в выгрузке прочитан целиком, но описания формы в нём нет: " +
-	"в файле ни разу не встретился элемент `Form`, поэтому из выгрузки не взяты ни элементы, " +
-	"ни команды, ни обработчики. Всё, что показано выше в разделах состава формы, вернул " +
-	"HTTP-сервис 1С. Обычные причины: файл Form.xml пустой либо содержит не ту разметку. " +
-	"Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
+//
+// The HTTP-provenance sentence is CONDITIONAL on the body actually having those
+// sections, and that condition is the defect this note was found with. With a
+// damaged Form.xml and a 1C service that returned nothing (or was never reached),
+// the body is a heading and nothing else, and the sentence then asserts both that
+// something is shown above and that 1C returned it, neither of which happened.
+// Where the sections DO exist the sentence is exact and stays: the merge fills
+// them from the dump only when the dump supplied them, and a file that never
+// entered a <Form> supplied none, so anything on screen is the service's.
+func formNoFormRootNote(bodyHasComposition bool) string {
+	note := "> Файл формы в выгрузке прочитан целиком, но описания формы в нём нет: " +
+		"в файле ни разу не встретился элемент `Form`, поэтому из выгрузки не взяты ни элементы, " +
+		"ни команды, ни обработчики. "
+	if bodyHasComposition {
+		note += "Всё, что показано выше в разделах состава формы, вернул HTTP-сервис 1С. "
+	} else {
+		note += "Разделов состава формы выше нет ни одного: выгрузка состава не дала, " +
+			"и HTTP-сервис 1С его тоже не вернул. "
+	}
+	return note + "Обычные причины: файл Form.xml пустой либо содержит не ту разметку. " +
+		"Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
+}
 
 // errFormNotInDump marks the one formFromDump failure that belongs to the
 // caller rather than to the dump: they named a form the object does not have.
