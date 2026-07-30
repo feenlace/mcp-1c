@@ -263,7 +263,7 @@ func openReadOnlyFrom(dumpDir, genDir string) (*Index, error) {
 	idx := &Index{
 		dir:           dumpDir,
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		pathToDocID:   make(map[string]string),
 		readOnly:      true,
@@ -321,7 +321,7 @@ func NewServePlaceholder(dumpDir string) *Index {
 	return &Index{
 		dir:           dumpDir,
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		pathToDocID:   make(map[string]string),
 		readOnly:      true,
@@ -822,7 +822,7 @@ func buildGenerationInto(dumpDir, targetDir string) error {
 	idx := &Index{
 		dir:           dumpDir,
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		pathToDocID:   make(map[string]string),
 		ctx:           ctx,

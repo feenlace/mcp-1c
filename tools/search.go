@@ -139,11 +139,26 @@ func FormatSearchResult(matches []dump.Match, total int, query string, mode dump
 			displayName = d.DisplayName
 		}
 
-		if mode == dump.SearchModeSmart && m.Score > 0 {
-			fmt.Fprintf(&b, "### %s%s (строка %d, score: %.3f)\n", prefix, displayName, m.Line, m.Score)
-		} else {
-			fmt.Fprintf(&b, "### %s%s (строка %d)\n", prefix, displayName, m.Line)
+		// Line 0 means the module matched but no line of its current content
+		// could be identified as the hit. Print neither a line number nor a code
+		// block: quoting source that does not contain the query would present it
+		// as the match.
+		lineLabel := fmt.Sprintf("строка %d", m.Line)
+		if m.Line == 0 {
+			lineLabel = "строка не определена"
 		}
+
+		if mode == dump.SearchModeSmart && m.Score > 0 {
+			fmt.Fprintf(&b, "### %s%s (%s, score: %.3f)\n", prefix, displayName, lineLabel, m.Score)
+		} else {
+			fmt.Fprintf(&b, "### %s%s (%s)\n", prefix, displayName, lineLabel)
+		}
+
+		if m.Line == 0 {
+			b.WriteString("Модуль найден полнотекстовым поиском, точная строка в текущем содержимом файла не определена.\n\n")
+			continue
+		}
+
 		b.WriteString("```bsl\n")
 		b.WriteString(m.Context)
 		b.WriteString("\n```\n\n")

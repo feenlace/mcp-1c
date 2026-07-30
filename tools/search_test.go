@@ -114,6 +114,46 @@ func TestFormatSearchResult_ExactMode(t *testing.T) {
 	}
 }
 
+// TestFormatSearchResult_LineNotLocated covers a match the search could not
+// pin to a line (Line == 0). The rendered result must neither claim "строка 0"
+// nor open a code block, because an empty or borrowed block reads as the matched
+// source. Modules that do carry a line keep rendering as before.
+func TestFormatSearchResult_LineNotLocated(t *testing.T) {
+	matches := []dump.Match{
+		{
+			Module: "Справочник.Контрагенты.МодульОбъекта",
+			Line:   0,
+			Score:  0.731,
+		},
+		{
+			Module:  "Документ.РеализацияТоваров.МодульОбъекта",
+			Line:    15,
+			Context: "Функция ПолучитьКонтрагента()\n    Возврат Контрагент;\nКонецФункции",
+			Score:   0.512,
+		},
+	}
+
+	text := FormatSearchResult(matches, 2, "ПолучитьКонтрагента()", dump.SearchModeSmart, nil)
+
+	if strings.Contains(text, "строка 0") {
+		t.Errorf("a match with no located line must not be rendered as 'строка 0', got:\n%s", text)
+	}
+	if !strings.Contains(text, "строка не определена") {
+		t.Errorf("expected the unlocated match to say 'строка не определена', got:\n%s", text)
+	}
+	if !strings.Contains(text, "Справочник.Контрагенты.МодульОбъекта") {
+		t.Errorf("the unlocated match must still be listed, got:\n%s", text)
+	}
+
+	// Exactly one code block: the one belonging to the match that has a line.
+	if got := strings.Count(text, "```bsl"); got != 1 {
+		t.Errorf("expected exactly 1 bsl block (only the located match), got %d:\n%s", got, text)
+	}
+	if !strings.Contains(text, "строка 15") || !strings.Contains(text, "ПолучитьКонтрагента") {
+		t.Errorf("the located match must render unchanged, got:\n%s", text)
+	}
+}
+
 func TestFormatSearchResult_Empty(t *testing.T) {
 	text := FormatSearchResult(nil, 0, "НесуществующаяФункция", dump.SearchModeSmart, nil)
 

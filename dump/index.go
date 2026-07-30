@@ -93,6 +93,48 @@ func readModuleContent(path string) (string, bool) {
 	return stripBOM(string(data)), true
 }
 
+// fileStamp identifies a revision of a file by its modification time (in
+// milliseconds since the epoch) and its size. It is deliberately the same pair
+// Manifest.Diff compares to decide that a .bsl changed on disk (manifest.go), so
+// the in-memory content cache and the incremental indexer agree on what "the
+// file changed" means instead of each carrying its own notion.
+//
+// Two edits that land in the same millisecond AND keep the byte count identical
+// are indistinguishable by this pair; that limit is inherited from the manifest
+// and is not introduced here.
+type fileStamp struct {
+	modTime int64
+	size    int64
+}
+
+// stampOf builds the stamp of an already-stat'ed file.
+func stampOf(info os.FileInfo) fileStamp {
+	return fileStamp{modTime: info.ModTime().UnixMilli(), size: info.Size()}
+}
+
+// statStamp stats path and returns its stamp. ok is false when the file cannot
+// be stat'ed at all (removed, permission denied, a racing rename), so callers
+// fail closed and treat the revision as unknown rather than as unchanged.
+func statStamp(path string) (fileStamp, bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileStamp{}, false
+	}
+	return stampOf(info), true
+}
+
+// cachedModule is one entry of the lazy content cache.
+//
+// fromFile marks an entry that was read from a file under the dump root and can
+// therefore be revalidated against stamp. It is false for documents ingested at
+// runtime through IndexDoc / IndexDocWithMeta: those have no file behind them,
+// so there is nothing to compare against and they are always served as stored.
+type cachedModule struct {
+	content  string
+	stamp    fileStamp
+	fromFile bool
+}
+
 // resolveReal returns the absolute, fully symlink-resolved form of p. It returns
 // ok=false when the path cannot be resolved (missing file, dangling symlink, or a
 // race), so callers fail closed rather than trusting an unresolved path.
@@ -136,8 +178,12 @@ func pathWithinRoot(root, path string) bool {
 
 // Match represents a single search hit in a BSL module.
 type Match struct {
-	Module  string  // Human-readable module path (e.g. "Документ.РеализацияТоваров.МодульОбъекта")
-	Line    int     // 1-based line number of the match
+	Module string // Human-readable module path (e.g. "Документ.РеализацияТоваров.МодульОбъекта")
+	// Line is the 1-based line number of the match, or 0 when the module matched
+	// but no line of its current content could be identified as the hit (smart
+	// mode only; regex and exact always report a real line). Context is empty
+	// whenever Line is 0, because there is no line to quote.
+	Line    int
 	Context string  // Surrounding lines for context
 	Score   float64 // BM25 relevance score (smart mode only)
 }
@@ -300,12 +346,25 @@ func (bslDocument) Type() string { return "module" }
 
 // Index provides full-text search over BSL modules using Bleve.
 type Index struct {
-	dir           string
-	alias         bleve.IndexAlias
-	shards        []bleve.Index
-	overlay       bleve.Index // per-process in-memory bleve overlay for runtime extension ingest when base is read-only; merged into alias for smart search; nil in RW mode (writes go to shards as before)
-	names         []string
-	contentByName map[string]string   // cache: docID -> content (lazy populated)
+	dir     string
+	alias   bleve.IndexAlias
+	shards  []bleve.Index
+	overlay bleve.Index // per-process in-memory bleve overlay for runtime extension ingest when base is read-only; merged into alias for smart search; nil in RW mode (writes go to shards as before)
+	names   []string
+	// contentByName caches module source keyed by docID, populated lazily by
+	// GetContent and eagerly by the incremental updater. Every file-backed entry
+	// carries the mtime+size of the revision it was read from and is discarded on
+	// the next read once either moves, so an edited module is never served from a
+	// copy the dump no longer holds.
+	//
+	// The cache is deliberately UNBOUNDED: no size cap, no TTL, no eviction. A
+	// long-lived process that eventually reads every module ends up holding the
+	// whole corpus. That is the accepted trade-off today, because entries are only
+	// created on demand: a cold build leaves the map empty (see buildShards) and
+	// regex/exact scans stream instead of caching (see contentForScan), so the map
+	// grows only to what was actually requested rather than to dump size. Revisit
+	// if a deployment reports resident memory tracking the corpus.
+	contentByName map[string]cachedModule
 	pathByName    map[string]string   // docID -> absolute file path (always populated)
 	pathToDocID   map[string]string   // relative path (ToSlash) -> module name
 	pathIndex     *PathIndex          // decomposed path index for fast category/module filtering
@@ -334,7 +393,18 @@ func (idx *Index) Done() <-chan struct{} {
 
 // GetContent returns the BSL source code for the given module ID.
 // Returns empty string and false if the module is not found or index is not ready.
-// Content is lazy-loaded from disk on first access and cached for subsequent calls.
+//
+// Content is lazy-loaded from disk on first access and cached. The cached copy is
+// NOT served unconditionally: on every call the backing file is stat'ed and the
+// entry is used only while its modification time and size both still match the
+// revision it was read from — the same pair Manifest.Diff uses to detect a
+// changed .bsl. When either moves, or the file can no longer be stat'ed, the
+// entry counts as a miss and the file is re-read, so a module edited after
+// indexing is never served stale. The invalidation is per read; there is no
+// background watcher.
+//
+// Documents ingested at runtime through IndexDoc / IndexDocWithMeta have no file
+// behind them and are always served exactly as stored.
 func (idx *Index) GetContent(id string) (string, bool) {
 	if !idx.ready.Load() {
 		return "", false
@@ -344,18 +414,26 @@ func (idx *Index) GetContent(id string) (string, bool) {
 	// from a macOS path) resolves against the NFC-keyed maps. No-op on NFC input.
 	id = NFC(id)
 
-	// Fast path: check content cache under read lock.
-	idx.contentMu.RLock()
-	if content, ok := idx.contentByName[id]; ok {
-		idx.contentMu.RUnlock()
-		return content, true
-	}
-	idx.contentMu.RUnlock()
-
-	// Check if we have a path for lazy loading.
 	idx.mu.RLock()
 	path, hasPath := idx.pathByName[id]
 	idx.mu.RUnlock()
+
+	// Fast path: serve the cached copy, but only while it still describes the
+	// file it came from.
+	idx.contentMu.RLock()
+	entry, cached := idx.contentByName[id]
+	idx.contentMu.RUnlock()
+	if cached {
+		if !entry.fromFile || !hasPath {
+			// Runtime-ingested document: nothing on disk to compare against.
+			return entry.content, true
+		}
+		if stamp, ok := statStamp(path); ok && stamp == entry.stamp {
+			return entry.content, true
+		}
+		// The file moved on (or vanished): fall through and re-read it.
+	}
+
 	if !hasPath {
 		return "", false
 	}
@@ -364,27 +442,42 @@ func (idx *Index) GetContent(id string) (string, bool) {
 	// planted by a malicious dump pointing at an outside host file. In-root files
 	// and in-root symlinks resolve within root and are served as before. This is
 	// belt-and-suspenders with loadBSLPaths and the safety net for a path loaded
-	// from a manifest written by a pre-fix binary.
+	// from a manifest written by a pre-fix binary. It runs before every disk read,
+	// including a re-read triggered by revalidation.
 	if !pathWithinRoot(idx.dir, path) {
 		return "", false
 	}
 
+	// Stamp BEFORE reading, never after: if the file is rewritten between the two
+	// syscalls we then cache newer content under an older stamp, and the next call
+	// re-reads. Stamping after the read could pin stale content under the stamp of
+	// a revision we never read, which would hide the change permanently.
+	//
 	// Read (with one retry) WITHOUT holding contentMu, so a transient read
 	// failure's retry pause does not block other readers. A concurrent caller may
 	// read the same file in parallel; that is harmless (identical content) and is
 	// resolved by the double-check below.
+	stamp, stamped := statStamp(path)
 	content, ok := readModuleContent(path)
 	if !ok {
 		return "", false
+	}
+	if !stamped {
+		// Content in hand but its revision is unknown, so it cannot be
+		// revalidated later. Serve it and cache nothing rather than pin a copy
+		// that would never be refreshed.
+		return content, true
 	}
 
 	idx.contentMu.Lock()
 	defer idx.contentMu.Unlock()
 	// Double-check: another goroutine may have populated the cache meanwhile.
-	if existing, ok := idx.contentByName[id]; ok {
-		return existing, true
+	// Keep what it stored when that entry is a runtime document or already the
+	// same revision; replace it only when it is a superseded file revision.
+	if existing, ok := idx.contentByName[id]; ok && (!existing.fromFile || existing.stamp == stamp) {
+		return existing.content, true
 	}
-	idx.contentByName[id] = content
+	idx.contentByName[id] = cachedModule{content: content, stamp: stamp, fromFile: true}
 	return content, true
 }
 
@@ -393,6 +486,7 @@ type loadedModule struct {
 	name    string
 	relPath string // forward-slash normalized relative path
 	content string
+	stamp   fileStamp // revision the content was read from, for cache revalidation
 }
 
 // NewIndex creates a new Index for the given dump directory. The index is built
@@ -403,7 +497,7 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 	idx := &Index{
 		dir:           dir,
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -1103,6 +1197,14 @@ func (idx *Index) loadBSLFiles(dir string) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			// Stamp before reading so the cached entry can never claim a revision
+			// newer than the bytes it holds (see GetContent for why the order
+			// matters). A file that cannot be stat'ed is skipped like an
+			// unreadable one.
+			stamp, stamped := statStamp(path)
+			if !stamped {
+				return
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				return // skip unreadable files
@@ -1113,7 +1215,7 @@ func (idx *Index) loadBSLFiles(dir string) error {
 			}
 			relSlash := filepath.ToSlash(rel)
 			name := bslPathToModuleName(rel)
-			results <- loadedModule{name: name, relPath: relSlash, content: stripBOM(string(data))}
+			results <- loadedModule{name: name, relPath: relSlash, content: stripBOM(string(data)), stamp: stamp}
 		}(p)
 	}
 
@@ -1128,7 +1230,7 @@ func (idx *Index) loadBSLFiles(dir string) error {
 	}
 	for m := range results {
 		idx.names = append(idx.names, m.name)
-		idx.contentByName[m.name] = m.content
+		idx.contentByName[m.name] = cachedModule{content: m.content, stamp: m.stamp, fromFile: true}
 		idx.pathToDocID[m.relPath] = m.name
 		// Also store absolute path for lazy-load compatibility.
 		absPath := filepath.Join(dir, filepath.FromSlash(m.relPath))
@@ -1198,20 +1300,29 @@ func (idx *Index) loadBSLPaths(dir string) error {
 // Regex/exact search scans every candidate module, so caching here would re-grow
 // contentByName to the full corpus size — the very allocation the cold-build fix
 // drops after building (see buildShards). Streaming instead keeps a full scan's
-// memory bounded to one file at a time, reclaimed by the GC. The returned content
-// is identical to the cached value (same stripBOM), so search results are
-// unchanged.
+// memory bounded to one file at a time, reclaimed by the GC. A cached entry is
+// used only while its modification time and size still match the file it was read
+// from (same rule as GetContent), so a scan never matches against a revision the
+// dump no longer holds.
 func (idx *Index) contentForScan(name string) (string, bool) {
-	idx.contentMu.RLock()
-	c, ok := idx.contentByName[name]
-	idx.contentMu.RUnlock()
-	if ok {
-		return c, true
-	}
-
 	idx.mu.RLock()
 	path, hasPath := idx.pathByName[name]
 	idx.mu.RUnlock()
+
+	idx.contentMu.RLock()
+	entry, cached := idx.contentByName[name]
+	idx.contentMu.RUnlock()
+	if cached {
+		if !entry.fromFile || !hasPath {
+			// Runtime-ingested document: nothing on disk to compare against.
+			return entry.content, true
+		}
+		if stamp, ok := statStamp(path); ok && stamp == entry.stamp {
+			return entry.content, true
+		}
+		// Superseded revision: fall through to a fresh read of the file.
+	}
+
 	if !hasPath {
 		return "", false
 	}
@@ -1295,8 +1406,11 @@ func (idx *Index) IndexDoc(id string, content string) error {
 	}
 	idx.mu.Unlock()
 
+	// fromFile stays false: the caller supplied this source, it was not read from
+	// a file under the dump root, so there is no revision to revalidate against
+	// and GetContent must keep serving exactly what was ingested.
 	idx.contentMu.Lock()
-	idx.contentByName[id] = content
+	idx.contentByName[id] = cachedModule{content: content}
 	idx.contentMu.Unlock()
 
 	return nil
@@ -1379,8 +1493,10 @@ func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 	}
 	idx.mu.Unlock()
 
+	// fromFile stays false for the same reason as in IndexDoc: a runtime-ingested
+	// document has no file behind it to revalidate against.
 	idx.contentMu.Lock()
-	idx.contentByName[id] = content
+	idx.contentByName[id] = cachedModule{content: content}
 	idx.contentMu.Unlock()
 
 	return nil
@@ -1567,7 +1683,24 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, int, error) {
 		}
 
 		if lineNum == 0 {
-			lineNum = 1
+			// No line of the current file carries a query token or a synonym of
+			// one, so there is nothing to point at. Report the module without a
+			// line and without quoted source: claiming line 1 and pasting the head
+			// of the file would present code that does not contain the match as if
+			// it did.
+			//
+			// This is a routine outcome on an untouched dump, not only after an
+			// edit: Bleve analyses the query with the BSL analyzer while the loop
+			// above scans for the raw strings.Fields tokens, so a query carrying
+			// punctuation ("ПередЗаписью()") matches the document yet matches no
+			// line verbatim. Dropping the hit would therefore lose genuine results,
+			// which is why it is kept and reported honestly instead.
+			matches = append(matches, Match{
+				Module: hit.ID,
+				Line:   0,
+				Score:  hit.Score,
+			})
+			continue
 		}
 
 		ctx := extractContext(lines, lineNum-1, 2)
@@ -1802,6 +1935,9 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 			slog.Warn("Skipping .bsl whose real path escapes the dump root", "path", relPath)
 			continue
 		}
+		// Stamp before reading, never after, so the pre-warmed entry can never
+		// claim a revision newer than the bytes it holds (see GetContent).
+		stamp, stamped := statStamp(absPath)
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			slog.Warn("Cannot read file", "path", relPath, "error", err)
@@ -1839,7 +1975,13 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 
 		// Pre-warm content cache for recently changed files.
 		idx.contentMu.Lock()
-		idx.contentByName[docID] = content
+		if stamped {
+			idx.contentByName[docID] = cachedModule{content: content, stamp: stamp, fromFile: true}
+		} else {
+			// Revision unknown, so this copy could never be revalidated: drop any
+			// cached entry and let the next read go to disk.
+			delete(idx.contentByName, docID)
+		}
 		idx.contentMu.Unlock()
 	}
 
@@ -1972,6 +2114,9 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 			slog.Warn("Skipping .bsl whose real path escapes the dump root", "path", relPath)
 			continue
 		}
+		// Stamp before reading, never after, so the pre-warmed entry can never
+		// claim a revision newer than the bytes it holds (see GetContent).
+		stamp, stamped := statStamp(absPath)
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			slog.Warn("Cannot read file", "path", relPath, "error", err)
@@ -2009,7 +2154,13 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 
 		// Pre-warm content cache for recently changed files.
 		idx.contentMu.Lock()
-		idx.contentByName[docID] = content
+		if stamped {
+			idx.contentByName[docID] = cachedModule{content: content, stamp: stamp, fromFile: true}
+		} else {
+			// Revision unknown, so this copy could never be revalidated: drop any
+			// cached entry and let the next read go to disk.
+			delete(idx.contentByName, docID)
+		}
 		idx.contentMu.Unlock()
 	}
 

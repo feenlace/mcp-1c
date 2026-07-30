@@ -461,7 +461,7 @@ func TestIndex_SearchWhileBuilding(t *testing.T) {
 	idx := &Index{
 		dir:           t.TempDir(),
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -620,7 +620,7 @@ func TestIndex_IndexDoc_NotReady(t *testing.T) {
 	idx := &Index{
 		dir:           t.TempDir(),
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -640,7 +640,7 @@ func TestIndex_DeleteDoc_NotReady(t *testing.T) {
 	idx := &Index{
 		dir:           t.TempDir(),
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -737,7 +737,7 @@ func TestIndex_GetContent_NotReady(t *testing.T) {
 	idx := &Index{
 		dir:           t.TempDir(),
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -821,7 +821,7 @@ func TestIndex_IndexDocWithMeta_NotReady(t *testing.T) {
 	idx := &Index{
 		dir:           t.TempDir(),
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,

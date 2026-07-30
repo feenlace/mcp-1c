@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func loadTestModules(b *testing.B) ([]string, map[string]string) {
 	idx := &Index{
 		dir:           realDumpDir,
 		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]string),
+		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -44,7 +45,14 @@ func loadTestModules(b *testing.B) ([]string, map[string]string) {
 	}
 	b.Logf("Loaded %d BSL modules from %s", len(idx.names), realDumpDir)
 
-	return idx.names, idx.contentByName
+	// The shard builders take a plain name -> source map; the cache entries'
+	// revalidation stamps are irrelevant to a build benchmark.
+	contents := make(map[string]string, len(idx.contentByName))
+	for name, entry := range idx.contentByName {
+		contents[name] = entry.content
+	}
+
+	return idx.names, contents
 }
 
 // BenchmarkBuildIndex_Batch measures the current NewUsing + manual batch approach.
@@ -188,6 +196,45 @@ func BenchmarkSearch_Regex(b *testing.B) {
 		})
 		if err != nil {
 			b.Fatalf("Search regex: %v", err)
+		}
+	}
+}
+
+// BenchmarkGetContent measures a warm content-cache read. In this repository
+// searchSmart is its only in-tree caller, once per returned hit, so a search
+// capped at Limit hits pays this cost Limit times; GetContent is exported, so
+// embedders may call it directly as well. It is the cost the cache revalidation
+// stat comes out of.
+//
+// Unlike the search benchmarks this one builds its own one-module dump instead
+// of using realDumpDir: GetContent's per-call cost does not depend on corpus
+// size, and a self-contained fixture keeps the number reproducible on a machine
+// that does not have the local benchmark dump.
+func BenchmarkGetContent(b *testing.B) {
+	dir := b.TempDir()
+	writeBSLTB(b, dir, "Catalogs/Номенклатура/Ext/ObjectModule.bsl",
+		strings.Repeat("Процедура ПередЗаписью(Отказ)\n\t// проверка\nКонецПроцедуры\n", 200))
+
+	idx, err := NewIndex(dir, "", true)
+	if err != nil {
+		b.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+	waitReadyTB(b, idx, 2*time.Minute)
+
+	const docID = "Справочник.Номенклатура.МодульОбъекта"
+	// Warm the cache outside the timer: the benchmark measures a cache hit, not
+	// the one-off lazy load.
+	if _, ok := idx.GetContent(docID); !ok {
+		b.Fatalf("GetContent(%q) = not found: the benchmark fixture never loaded", docID)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, ok := idx.GetContent(docID); !ok {
+			b.Fatalf("GetContent(%q) = not found", docID)
 		}
 	}
 }
