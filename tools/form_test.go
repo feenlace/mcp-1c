@@ -878,7 +878,7 @@ func TestNewFormStructureHandler_GoodDumpNoFormNameHasNoNotes(t *testing.T) {
 	if !strings.Contains(text, "ПолеВыбора") {
 		t.Fatalf("expected the parsed structure in the body:\n%s", text)
 	}
-	for _, unwanted := range []string{dumpNoteMarker, "form_name", "--dump"} {
+	for _, unwanted := range []string{dumpNoteMarker, partialNoteMarker, "form_name", "--dump"} {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("a healthy dump response must not carry %q:\n%s", unwanted, text)
 		}
@@ -905,9 +905,189 @@ func TestNewFormStructureHandler_GoodDumpValidFormNameHasNoNotes(t *testing.T) {
 	if !strings.Contains(text, "ПолеЭлемента") {
 		t.Fatalf("expected the parsed structure in the body:\n%s", text)
 	}
-	for _, unwanted := range []string{dumpNoteMarker, "form_name", "--dump"} {
+	for _, unwanted := range []string{dumpNoteMarker, partialNoteMarker, "form_name", "--dump"} {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("a healthy dump response must not carry %q:\n%s", unwanted, text)
 		}
+	}
+}
+
+// partialNoteMarker is the distinguishing phrase of the note added when the
+// dump's Form.xml WAS opened and parsed but the XML decoder stopped on a syntax
+// error before the end of the document. Matched as a phrase rather than through
+// the constant, exactly as dumpNoteMarker is, so these tests compile against a
+// build that does not carry the constant yet and fail on behaviour instead of
+// failing to build.
+const partialNoteMarker = "прочитан не полностью"
+
+// truncatedFormXML builds a Form.xml that is cut off mid tag after `keep`
+// complete <InputField> entries. The parser tolerates this today: the decoder
+// stops on a syntax error, the token loop breaks, and parseFormXMLData still
+// reports success, which is the silent failure these tests pin.
+//
+// The element count the parser actually yields is keep+1, not keep: the field
+// after the last complete one has its own start tag intact and only its
+// <DataPath> child is severed, so appendElement has already recorded it. That
+// was measured against the real parser, not assumed, and the callers below use
+// the measured names.
+func truncatedFormXML(keep int) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.21">
+  <ChildItems>
+`)
+	for i := 1; i <= keep; i++ {
+		name := truncatedFieldNames[i-1]
+		b.WriteString(`    <InputField name="` + name + `" id="` + string(rune('0'+i)) + `">
+      <DataPath>Объект.` + name + `</DataPath>
+    </InputField>
+`)
+	}
+	// The severed tail: a start tag that opened and a child tag cut in half.
+	b.WriteString(`    <InputField name="` + truncatedFieldNames[keep] + `" id="9">
+      <DataPa`)
+	return b.String()
+}
+
+// truncatedFieldNames are the element names truncatedFormXML hands out, in
+// order. Distinct per position so a body assertion cannot pass while describing
+// a different element.
+var truncatedFieldNames = []string{"ПолеПервое", "ПолеВторое", "ПолеТретье", "ПолеЧетвёртое"}
+
+// TestNewFormStructureHandler_TruncatedFormXMLAddsPartialNote is the headline
+// case. The Form.xml is cut off, the parser tolerates it and reports success, so
+// nothing upstream fails and nothing is logged. Without a note in the body the
+// caller reads a confident answer about a form whose file was never fully read.
+func TestNewFormStructureHandler_TruncatedFormXMLAddsPartialNote(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	// keep=0: nothing complete before the cut, so the dump yields one element
+	// whose start tag survived and no commands or handlers at all.
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента",
+		truncatedFormXML(0))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("a tolerated malformed Form.xml must not become a hard error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, partialNoteMarker) {
+		t.Errorf("body must say the form file was read only partially:\n%s", text)
+	}
+	if !strings.Contains(text, "ФормаДокумента") {
+		t.Errorf("the valid part of the answer must still be returned:\n%s", text)
+	}
+	// The unreadable-dump note describes a different failure (the dump gave us
+	// nothing at all). Here the file WAS read, so that note must stay away or
+	// the two contradict each other.
+	if strings.Contains(text, dumpNoteMarker) {
+		t.Errorf("a partially parsed form is not an unreadable dump, both notes present:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_PartialNoteDoesNotDenyShownElements guards the
+// trap that a note is only useful while it agrees with the body above it. A
+// partial parse routinely yields SOME elements, and a note asserting the form
+// has none is then falsified by the table printed right above it.
+func TestNewFormStructureHandler_PartialNoteDoesNotDenyShownElements(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	// keep=2 complete fields plus the severed third, measured as 3 elements.
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента",
+		truncatedFormXML(2))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("a tolerated malformed Form.xml must not become a hard error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, partialNoteMarker) {
+		t.Fatalf("body must say the form file was read only partially:\n%s", text)
+	}
+	// The elements that DID survive the cut have to be in the body: the point of
+	// tolerating the file is that its readable part still answers the question.
+	for _, want := range truncatedFieldNames[:3] {
+		if !strings.Contains(text, want) {
+			t.Errorf("element %q parsed before the cut must still be listed:\n%s", want, want+text)
+		}
+	}
+	// And the note must not deny them. Each phrase below is one a note author
+	// could plausibly reach for, and every one of them would be false here.
+	for _, denial := range []string{
+		"элементы отсутствуют",
+		"нет элементов",
+		"состав формы пуст",
+		"не удалось прочитать ни одного",
+		"элементы не прочитаны",
+		"состав формы не прочитан",
+	} {
+		if strings.Contains(text, denial) {
+			t.Errorf("note claims %q while the body above lists elements:\n%s", denial, text)
+		}
+	}
+}
+
+// TestNewFormStructureHandler_WellFormedDumpHasNoPartialNote is the negative
+// control for the partial note specifically. It is deliberately separate from
+// the two broader no-notes controls so that a mutation making the note
+// unconditional names this test when it fails.
+func TestNewFormStructureHandler_WellFormedDumpHasNoPartialNote(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента",
+		sampleFormXML())
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "Контрагент") {
+		t.Fatalf("expected the parsed structure in the body:\n%s", text)
+	}
+	if strings.Contains(text, partialNoteMarker) {
+		t.Errorf("a complete Form.xml must not carry the partial parse note:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_NoFormsInDumpWordingFitsAbsence checks the note
+// pair the zero-forms case actually produces. The object has no forms in the
+// dump at all AND the caller named one, which routes through the same degraded
+// branch as an unreadable dump. The form_name half of that pair must not
+// describe the situation as a failure to read a form, because there was no form
+// to read: that wording sends the user looking for a corrupt file that does not
+// exist.
+func TestNewFormStructureHandler_NoFormsInDumpWordingFitsAbsence(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	// A readable dump that simply holds no forms for the requested object.
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Catalogs", "Контрагенты", "ФормаСписка",
+		formXMLWithTitle("Контрагенты", "ПолеСписка"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаСписка")
+	if err != nil {
+		t.Fatalf("an object with no forms in the dump must not fail the call: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "form_name") {
+		t.Fatalf("body must say the form_name lookup did not happen:\n%s", text)
+	}
+	// "прочитать её не удалось" asserts a read failure on a form that was never
+	// there. The absence case has to be covered by the wording, not contradicted
+	// by it.
+	if strings.Contains(text, "прочитать её не удалось") {
+		t.Errorf("form_name note blames a failed read of a form that does not exist in the dump:\n%s", text)
+	}
+	// The partial parse note belongs to a file that WAS opened. Nothing was.
+	if strings.Contains(text, partialNoteMarker) {
+		t.Errorf("no form file was opened, so the partial parse note must not appear:\n%s", text)
 	}
 }

@@ -85,6 +85,11 @@ type formInput struct {
 //     to slog.LevelError in cmd/mcp-1c/main.go, and the pipe branch keeps
 //     LevelError too. It surfaces only with --debug (INFO to server.log) or on
 //     a terminal launch (INFO to stderr).
+//   - A Form.xml the parser read only up to a syntax error is NOT one of those
+//     failures: it produces no error and no WARN, because the parse contract
+//     tolerates a broken dump file on purpose rather than downgrade dumps that
+//     currently work. The body carries formPartialParseNote instead, which is
+//     the only signal the caller gets that the answer was built from a fragment.
 func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input formInput
@@ -106,12 +111,21 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		// dumpStructureMissing records the degraded case for the body note
 		// below, because the WARN it also logs is invisible at the default
 		// stdio log level.
+		//
+		// dumpParsedPartially records the OTHER degraded case, the one that
+		// never reaches dumpErr at all: the Form.xml was opened and read, but
+		// the XML decoder stopped on a syntax error part way through and the
+		// parser still reported success (dump.FormInfo.ParseIncomplete). It is
+		// mutually exclusive with dumpStructureMissing by construction, since
+		// that one only ever gets set on the dumpErr != nil branches.
 		dumpStructureMissing := false
+		dumpParsedPartially := false
 		if dumpDir != "" {
-			dumpForm, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
+			dumpForm, partialParse, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
 			switch {
 			case dumpErr == nil && dumpForm != nil:
 				mergeDumpIntoForm(&form, dumpForm)
+				dumpParsedPartially = partialParse
 			case errors.Is(dumpErr, errFormNotInDump):
 				// The caller named a form this object does not have. Returning
 				// a different form's structure under that request would be a
@@ -147,9 +161,12 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 			text += formDumpUnreadableNote
 			if input.FormName != "" {
 				// The name lookup lives inside formFromDump, so a dump that
-				// could not be read never got to honour form_name either.
+				// yielded no form never got to honour form_name either.
 				text += formNameDumpUnreadableNote
 			}
+		}
+		if dumpParsedPartially {
+			text += formPartialParseNote
 		}
 		return textResult(text), nil
 	}
@@ -186,10 +203,38 @@ const formDumpUnreadableNote = "> Состав формы не прочитан 
 
 // formNameDumpUnreadableNote extends the note above for the caller who also
 // passed form_name. The name lookup happens inside formFromDump, so a dump that
-// could not be read never selected a form by name, and the form shown above is
+// yielded no form never selected one by name, and the form shown above is
 // whichever one the HTTP service picked.
-const formNameDumpUnreadableNote = "> Параметр `form_name` при этом не применялся: форма ищется по имени " +
-	"в выгрузке, а прочитать её не удалось. Форму выбрал сам HTTP-сервис 1С, и выше возвращена именно она.\n"
+//
+// The wording states only that the dump did not yield a form under that name,
+// and leaves the reason to the note above, which already lists all three. That
+// is deliberate: exactly one of the three paths reaching this note is a failed
+// read of a form file, and the other two are not. The object having no forms in
+// the dump at all is the common case, and describing it as "the form could not
+// be read" sends the user hunting for a corrupt file that was never there.
+const formNameDumpUnreadableNote = "> Параметр `form_name` при этом не применялся: форма с таким именем " +
+	"ищется в выгрузке, а выгрузка её не дала по причинам выше. Форму выбрал сам HTTP-сервис 1С, " +
+	"и выше возвращена именно она.\n"
+
+// formPartialParseNote is appended when the dump DID give us a form but the
+// parser recorded that it stopped on a syntax error before the end of the file
+// (dump.FormInfo.ParseIncomplete). That path returns no error at all: the parse
+// contract deliberately tolerates a broken Form.xml so dumps that read "well
+// enough" keep working, which also means nothing fails, nothing is logged, and
+// the answer built from the surviving fragment looks exactly as confident as one
+// built from a whole file. This note is the only place the caller can learn
+// otherwise.
+//
+// The wording never says the form has no elements, commands or handlers. A
+// partial parse usually keeps whatever it read before the break, so the body
+// above this note routinely DOES list some, and a note denying them would be
+// falsified by the table printed directly above it. "Показано только то, что
+// удалось прочитать" is true whether that is nothing or almost everything.
+const formPartialParseNote = "> Файл формы в выгрузке прочитан не полностью: разбор XML остановился " +
+	"на ошибке в файле, поэтому показано только то, что удалось прочитать до этого места, а всё, " +
+	"что записано в файле дальше, в ответ не попало. Состав формы выше может быть неполным. " +
+	"Обычные причины: файл Form.xml обрезан или повреждён. Проверьте полноту выгрузки конфигурации, " +
+	"указанной в `--dump`.\n"
 
 // errFormNotInDump marks the one formFromDump failure that belongs to the
 // caller rather than to the dump: they named a form the object does not have.
@@ -214,13 +259,24 @@ func (e *formNotInDumpError) Error() string {
 func (e *formNotInDumpError) Unwrap() error { return errFormNotInDump }
 
 // formFromDump loads form structure from a DumpConfigToFiles XML file.
-func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormStructure, error) {
+//
+// The middle return value reports that the Form.xml was parsed only up to a
+// syntax error rather than to its end. It is a second return value and not a
+// field on onec.FormStructure because that type is the shape of the 1C HTTP
+// service's JSON reply, shared with the HTTP path, and a fact about how a local
+// file was read does not belong on the wire type. It is not folded into the
+// error either: an error here would be classified as a dump failure by the
+// caller's switch and would turn a dump that parses well enough today into a
+// degraded answer, which is exactly the tolerance this change must preserve.
+// The signature is unexported with a single call site, so widening it ripples
+// nowhere.
+func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormStructure, bool, error) {
 	formFiles, err := dump.FindFormFiles(dumpDir, objectType, objectName)
 	if err != nil {
-		return nil, fmt.Errorf("finding form files: %w", err)
+		return nil, false, fmt.Errorf("finding form files: %w", err)
 	}
 	if len(formFiles) == 0 {
-		return nil, fmt.Errorf("no forms found in dump for %s.%s", objectType, objectName)
+		return nil, false, fmt.Errorf("no forms found in dump for %s.%s", objectType, objectName)
 	}
 
 	// Select the requested form or pick the first one.
@@ -229,7 +285,7 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 	if formName != "" {
 		path, ok := formFiles[formName]
 		if !ok {
-			return nil, &formNotInDumpError{requested: formName, available: joinMapKeys(formFiles)}
+			return nil, false, &formNotInDumpError{requested: formName, available: joinMapKeys(formFiles)}
 		}
 		selectedPath = path
 		selectedName = formName
@@ -246,10 +302,10 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 
 	parsed, err := dump.ParseFormXML(selectedPath)
 	if err != nil {
-		return nil, fmt.Errorf("parsing form XML %q: %w", selectedPath, err)
+		return nil, false, fmt.Errorf("parsing form XML %q: %w", selectedPath, err)
 	}
 
-	return convertDumpForm(selectedName, parsed), nil
+	return convertDumpForm(selectedName, parsed), parsed.ParseIncomplete, nil
 }
 
 // convertDumpForm converts dump.FormInfo to onec.FormStructure.

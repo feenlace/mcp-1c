@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,27 @@ type FormInfo struct {
 	Elements []FormElementInfo
 	Commands []FormCommandInfo
 	Handlers []FormHandlerInfo
+
+	// ParseIncomplete reports that the XML decoder stopped on a syntax error
+	// before the end of the document, so the collections above hold only what
+	// was read up to that point and the rest of the file was never seen.
+	//
+	// It is NOT an error flag and does not change the parse contract: a form
+	// that parses "well enough" today keeps returning exactly the same data,
+	// with this field set alongside it. The field exists because that
+	// tolerance is otherwise invisible - parseFormXMLData reports success
+	// either way, so without it no caller can tell a fully read file from one
+	// the decoder abandoned halfway, and the answer built from the remains
+	// looks exactly as confident as a complete one.
+	//
+	// SCOPE, deliberately narrow: this records a decoder SYNTAX error, nothing
+	// else. A file that the decoder consumes to a normal end is never flagged,
+	// even when it is useless as a form: an empty file, a file of plain text
+	// and a well formed document whose root is not <Form> all finish on io.EOF
+	// and all yield an empty FormInfo with ParseIncomplete false. Detecting
+	// those needs a different signal (whether the root <Form> was ever
+	// entered), so do not read this field as "the file was a valid form".
+	ParseIncomplete bool
 }
 
 // FormElementInfo represents a parsed form element.
@@ -204,6 +226,23 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
+			// io.EOF is the decoder's normal end of document and is the only
+			// error that means the file was read in full: xml.Decoder.Token
+			// returns the io.EOF sentinel itself once the input is consumed.
+			// Every other error is a *xml.SyntaxError raised part way through,
+			// so the loop is abandoning a file it has not finished reading.
+			// Truncation reports "unexpected EOF" as a *xml.SyntaxError and NOT
+			// as io.ErrUnexpectedEOF, so an io.EOF test is the correct and
+			// sufficient one here.
+			//
+			// This also catches breakage below the top level. Each nested
+			// reader in this file swallows the decoder error and returns what
+			// it collected, but the decoder latches the syntax error and
+			// returns it again on every later call, so the loop above lands
+			// here on its next Token() rather than on a clean EOF.
+			if !errors.Is(err, io.EOF) {
+				form.ParseIncomplete = true
+			}
 			break
 		}
 
