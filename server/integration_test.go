@@ -540,7 +540,7 @@ func TestIntegration_ListTools(t *testing.T) {
 
 	expected := []string{
 		"get_metadata_tree", "get_object_structure", "execute_query",
-		"search_code", "get_form_structure", "validate_query",
+		"search_code", "reload_dump", "get_form_structure", "validate_query",
 		"get_event_log", "get_configuration_info", "bsl_syntax_help",
 		"analyze_subsystems",
 	}

@@ -464,13 +464,29 @@ type Index struct {
 	lockDir       string              // cache dir whose serve-lock this index holds (empty = none); released in Close
 	readOnly      bool                // true when shards were opened read-only (immutable generation serve); runtime base writes are rejected
 	readerReg     *readerRegistration // live reader-registry handle for the served generation (nil = none); deregistered in Close
-	ready         atomic.Bool
-	mu            sync.RWMutex
-	contentMu     sync.RWMutex // protects lazy content loading
-	buildErr      atomic.Pointer[error]
-	ctx           context.Context
-	cancel        context.CancelFunc
-	done          chan struct{}
+	// cacheDir is the cache location this index was opened with, in NewIndex
+	// semantics (empty = the platform cache dir). Reload needs it to build the
+	// replacement generation under the SAME cache the current one lives in;
+	// re-resolving it from the environment could pick a different directory.
+	cacheDir string
+	// gensig names the immutable generation currently attached, or "" when the
+	// index serves a legacy flat cache or an in-memory build (those have no
+	// generation). Reload compares it against a freshly computed dump signature
+	// to tell "nothing changed on disk" from "a rebuild is needed"; an empty
+	// value therefore always rebuilds. Written under mu by the swap.
+	gensig string
+	// reloadMu serialises Reload against itself and against Close, so two
+	// reloads never race to swap the shards and Close never frees shards a
+	// reload is publishing. It is NOT taken by any read path.
+	reloadMu  sync.Mutex
+	closed    atomic.Bool // set by Close; Reload refuses afterwards
+	ready     atomic.Bool
+	mu        sync.RWMutex
+	contentMu sync.RWMutex // protects lazy content loading
+	buildErr  atomic.Pointer[error]
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
 }
 
 // Ready reports whether the index has finished building and is available for search.
@@ -589,6 +605,7 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	idx := &Index{
 		dir:           dir,
+		cacheDir:      cacheDir,
 		alias:         bleve.NewIndexAlias(),
 		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
@@ -1464,10 +1481,19 @@ func (idx *Index) IndexDoc(id string, content string) error {
 	if !idx.ready.Load() {
 		return fmt.Errorf("index not ready: cannot IndexDoc while building")
 	}
-	if idx.readOnly {
+	// Snapshot the write target under mu: Reload replaces readOnly and the shard
+	// slice together while readers run, so reading them unlocked would race it.
+	// The bleve write below then goes to the snapshotted shard rather than to
+	// whatever the field points at by the time it runs; if a reload retired that
+	// shard meanwhile, bleve returns ErrorIndexClosed (its Index() checks an open
+	// flag under its own lock) and the caller can retry. It never panics, and a
+	// half-written shard is impossible because a retired shard is closed only
+	// after the swap has published its replacement.
+	readOnly, shards := idx.writeTarget()
+	if readOnly {
 		return fmt.Errorf("index opened read-only: cannot IndexDoc (extension overlay not yet available)")
 	}
-	if len(idx.shards) == 0 {
+	if len(shards) == 0 {
 		return fmt.Errorf("index has no shards")
 	}
 
@@ -1479,8 +1505,8 @@ func (idx *Index) IndexDoc(id string, content string) error {
 		Content:  content,
 	}
 
-	si := shardForID(id, len(idx.shards))
-	if err := idx.shards[si].Index(id, doc); err != nil {
+	si := shardForID(id, len(shards))
+	if err := shards[si].Index(id, doc); err != nil {
 		return fmt.Errorf("indexing doc %q in shard %d: %w", id, si, err)
 	}
 
@@ -1550,10 +1576,13 @@ func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 		Content:  content,
 	}
 
-	if idx.readOnly {
+	readOnly, shards := idx.writeTarget() // snapshot under mu; see IndexDoc
+	if readOnly {
 		// Base shards are immutable (read-only generation serve). Live
 		// extensions are per-process, so they go to an in-memory overlay that
 		// is merged into the search alias; the immutable base is never written.
+		// The overlay is NOT touched by a reload, so an ingested extension
+		// survives one.
 		ov, err := idx.ensureOverlay()
 		if err != nil {
 			return err
@@ -1562,11 +1591,11 @@ func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 			return fmt.Errorf("indexing doc %q in overlay: %w", id, err)
 		}
 	} else {
-		if len(idx.shards) == 0 {
+		if len(shards) == 0 {
 			return fmt.Errorf("index has no shards")
 		}
-		si := shardForID(id, len(idx.shards))
-		if err := idx.shards[si].Index(id, doc); err != nil {
+		si := shardForID(id, len(shards))
+		if err := shards[si].Index(id, doc); err != nil {
 			return fmt.Errorf("indexing doc %q in shard %d: %w", id, si, err)
 		}
 	}
@@ -1605,7 +1634,8 @@ func (idx *Index) DeleteDoc(id string) error {
 		return fmt.Errorf("index not ready: cannot DeleteDoc while building")
 	}
 
-	if idx.readOnly {
+	readOnly, shards := idx.writeTarget() // snapshot under mu; see IndexDoc
+	if readOnly {
 		// Extension docs live only in the in-memory overlay (base is immutable,
 		// and DeleteDoc is only ever called with ext.-prefixed IDs). Remove from
 		// the overlay if one exists; if nothing was ever ingested there is
@@ -1619,11 +1649,11 @@ func (idx *Index) DeleteDoc(id string) error {
 			}
 		}
 	} else {
-		if len(idx.shards) == 0 {
+		if len(shards) == 0 {
 			return fmt.Errorf("index has no shards")
 		}
-		si := shardForID(id, len(idx.shards))
-		if err := idx.shards[si].Delete(id); err != nil {
+		si := shardForID(id, len(shards))
+		if err := shards[si].Delete(id); err != nil {
 			return fmt.Errorf("deleting doc %q from shard %d: %w", id, si, err)
 		}
 	}
@@ -1906,13 +1936,18 @@ func (idx *Index) filterModules(category, moduleType string) ([]string, error) {
 		return result, nil
 	}
 
-	// Use PathIndex for fast in-memory filtering (no Bleve query needed).
-	if idx.pathIndex != nil {
-		idx.mu.RLock()
-		result := idx.pathIndex.FilterDocIDs(category, moduleType)
+	// Use PathIndex for fast in-memory filtering (no Bleve query needed). The nil
+	// check must happen UNDER the same lock as the call: Reload replaces the whole
+	// *PathIndex while readers run, so testing the field outside the lock and
+	// dereferencing it inside would be a torn read of a pointer another goroutine
+	// is writing.
+	idx.mu.RLock()
+	if pi := idx.pathIndex; pi != nil {
+		result := pi.FilterDocIDs(category, moduleType)
 		idx.mu.RUnlock()
 		return result, nil
 	}
+	idx.mu.RUnlock()
 
 	// Fallback: linear scan if pathIndex is not yet built (should not happen
 	// since filterModules is only called after Ready() == true).
@@ -2137,10 +2172,17 @@ func (idx *Index) Dir() string {
 
 // GetPathIndex returns the path index for fast category/module filtering.
 // Returns nil if the index is not yet ready.
+//
+// The pointer is read under mu because Reload swaps in a new *PathIndex while
+// readers run. The caller receives the instance current AT THE MOMENT OF THE
+// CALL: a reload that lands afterwards leaves the caller holding the previous
+// (still valid, still self-consistent) path index, not a torn one.
 func (idx *Index) GetPathIndex() *PathIndex {
 	if !idx.ready.Load() {
 		return nil
 	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
 	return idx.pathIndex
 }
 
@@ -2286,9 +2328,17 @@ func (idx *Index) saveManifest(cacheDir string) {
 
 // Close cancels the background context, waits for any in-progress build to
 // finish, and closes all shard indexes.
+//
+// It takes reloadMu, so a Reload in flight completes its swap first and Close
+// then frees the shards the reload published rather than the ones it retired.
+// A reload cannot be interrupted mid-build (BuildGeneration is synchronous, the
+// same limitation prepareServeGeneration documents), so Close can wait for one.
 func (idx *Index) Close() error {
 	idx.cancel()
 	<-idx.done
+	idx.reloadMu.Lock()
+	defer idx.reloadMu.Unlock()
+	idx.closed.Store(true)
 	if idx.readerReg != nil {
 		// Deregister from the generation's readers/ registry so GC can reclaim the
 		// generation once no live reader holds it.

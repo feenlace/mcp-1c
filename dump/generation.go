@@ -262,16 +262,21 @@ func OpenGenerationReadOnly(dir, cacheDir, gensig string) (*Index, error) {
 		return nil, fmt.Errorf("generation %q is not ready (no %s sentinel at %s)",
 			gensig, readySentinelName, genDir)
 	}
-	return openReadOnlyFrom(dir, genDir)
+	return openReadOnlyFrom(dir, cacheDir, genDir)
 }
 
 // openReadOnlyFrom builds an Index serving the already-built shards under genDir
 // in read-only mode. Names/paths are loaded from the generation's manifest in a
 // background goroutine (Ready()/Done() follow the usual contract).
-func openReadOnlyFrom(dumpDir, genDir string) (*Index, error) {
+//
+// cacheDir is recorded on the Index (NewIndex semantics: empty = platform cache
+// dir) so a later Reload builds its replacement generation under the same cache
+// this one was opened from.
+func openReadOnlyFrom(dumpDir, cacheDir, genDir string) (*Index, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	idx := &Index{
 		dir:           dumpDir,
+		cacheDir:      cacheDir,
 		alias:         bleve.NewIndexAlias(),
 		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
@@ -323,9 +328,11 @@ func openReadOnlyFrom(dumpDir, genDir string) (*Index, error) {
 // The returned Index has a live ctx/cancel and an open done channel, so Close()
 // (idx.cancel(); <-idx.done) is well-defined even if the open never succeeds: it
 // blocks until FinishServeOpen closes done. FinishServeOpen MUST be called exactly
-// once on the returned Index. The struct literal is kept byte-identical to
+// once on the returned Index. The struct literal is kept identical to
 // openReadOnlyFrom's so the two paths can never drift in what a placeholder/opened
-// serve Index initializes.
+// serve Index initializes, with ONE deliberate exception: cacheDir is not known
+// here (the caller passes it to FinishServeOpen, which records it there), so a
+// placeholder carries an empty cacheDir until the open finishes.
 func NewServePlaceholder(dumpDir string) *Index {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Index{
@@ -389,6 +396,11 @@ func (idx *Index) FinishServeOpen(cacheDir, gensig string, prepErr error) {
 		return
 	}
 
+	// Record the cache this serve was opened from BEFORE anything can fail, so a
+	// later Reload rebuilds into the same cache the caller chose rather than
+	// re-resolving one from the environment.
+	idx.cacheDir = cacheDir
+
 	cpath, err := cachePath(idx.dir, cacheDir)
 	if err != nil {
 		idx.setBuildErr(fmt.Errorf("serve open: resolve cache path: %w", err))
@@ -450,6 +462,11 @@ func (idx *Index) attachReadOnlyShards(genDir string) error {
 	}
 	idx.readOnly = true
 	idx.shards = shards
+	// Record WHICH generation is attached. Reload compares this against a freshly
+	// computed dump signature to decide whether anything changed on disk, and
+	// replaces it when it swaps a new generation in. A generation directory is
+	// named by its gensig, so the base name IS the signature.
+	idx.gensig = filepath.Base(genDir)
 	idx.alias.Add(shards...)
 	return nil
 }
@@ -663,11 +680,14 @@ func buildDirStale(tmpDir string, cutoff time.Time) bool {
 // nothing to the cache. Drift between dump and generation is impossible by gensig
 // construction, so no diff is needed.
 func (idx *Index) loadNamesReadOnly(genDir string) error {
-	manifest, err := LoadManifest(genDir)
+	names, pathByName, pathToDocID, err := readGenerationNames(idx.dir, genDir)
 	if err != nil {
-		return fmt.Errorf("loading generation manifest: %w", err)
+		return err
 	}
-	if manifest == nil {
+	if pathByName == nil {
+		// A nil map (never an empty one) is readGenerationNames' signal that the
+		// generation carries NO manifest. Fall back to a read-only walk of the dump,
+		// which populates the same three fields in place and writes nothing.
 		return idx.loadBSLPaths(idx.dir)
 	}
 
@@ -676,10 +696,44 @@ func (idx *Index) loadNamesReadOnly(genDir string) error {
 	// reindex path reuses its own idx, which leaves it nil); init it lazily, as
 	// loadBSLPaths does, so this shared helper is safe regardless of caller.
 	if idx.pathToDocID == nil {
-		idx.pathToDocID = make(map[string]string, len(manifest.Files))
+		idx.pathToDocID = make(map[string]string, len(pathToDocID))
 	}
+	idx.names = append(idx.names, names...)
+	for docID, absPath := range pathByName {
+		idx.pathByName[docID] = absPath
+	}
+	for relPath, docID := range pathToDocID {
+		idx.pathToDocID[relPath] = docID
+	}
+	slices.Sort(idx.names)
+	idx.mu.Unlock()
+	return nil
+}
+
+// readGenerationNames reads a generation's manifest and returns the three name /
+// path collections it implies, WITHOUT touching any Index. It is the pure core of
+// loadNamesReadOnly: the read-only open assigns the result into a fresh Index,
+// while Reload builds the replacement state off to the side and only then swaps it
+// in, so a failure here can never leave a live index half-updated.
+//
+// A generation with no manifest (an empty-dump build) returns three nil
+// collections and a nil error; the caller then falls back to a filesystem walk.
+// Returning nil rather than empty maps is what distinguishes "no manifest" from
+// "a manifest listing no files" — the latter yields non-nil empty maps.
+func readGenerationNames(dumpDir, genDir string) (names []string, pathByName, pathToDocID map[string]string, err error) {
+	manifest, err := LoadManifest(genDir)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading generation manifest: %w", err)
+	}
+	if manifest == nil {
+		return nil, nil, nil, nil
+	}
+
+	names = make([]string, 0, len(manifest.Files))
+	pathByName = make(map[string]string, len(manifest.Files))
+	pathToDocID = make(map[string]string, len(manifest.Files))
 	for relPath, entry := range manifest.Files {
-		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
+		absPath := filepath.Join(dumpDir, filepath.FromSlash(relPath))
 		// Defensive NFC at the manifest chokepoint, mirroring bslPathToModuleName and
 		// loadFromManifestAndDiff. A generation is gensig-keyed (the schema version is
 		// folded into the signature), so a binary only ever opens a generation whose
@@ -687,13 +741,12 @@ func (idx *Index) loadNamesReadOnly(genDir string) error {
 		// read-only load correct by construction instead of relying on that argument,
 		// and is an allocation-free no-op on already-NFC keys.
 		docID := NFC(entry.DocID)
-		idx.names = append(idx.names, docID)
-		idx.pathByName[docID] = absPath
-		idx.pathToDocID[relPath] = docID
+		names = append(names, docID)
+		pathByName[docID] = absPath
+		pathToDocID[relPath] = docID
 	}
-	slices.Sort(idx.names)
-	idx.mu.Unlock()
-	return nil
+	slices.Sort(names)
+	return names, pathByName, pathToDocID, nil
 }
 
 // BuildGeneration builds a fresh immutable generation for gensig and adopts it

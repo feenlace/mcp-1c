@@ -34,6 +34,11 @@ func New(version string, onecClient *onec.Client, dumpIndex *dump.Index) *mcp.Se
 	s.AddTool(tools.QueryTool(), tools.NewQueryHandler(onecClient))
 	if dumpIndex != nil {
 		s.AddTool(tools.SearchCodeTool(), tools.NewSearchCodeHandler(dumpIndex))
+		// reload_dump only makes sense where search_code does: it picks the dump
+		// index up from disk again so a re-run of DumpConfigToFiles becomes
+		// visible without restarting the server. Registered next to search_code
+		// so the pair is present or absent together.
+		s.AddTool(tools.ReloadDumpTool(), tools.NewReloadDumpHandler(dumpIndex))
 	}
 
 	// Pass dump directory to form handler so it can enrich the HTTP response
