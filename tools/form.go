@@ -21,7 +21,7 @@ func FormStructureTool() *mcp.Tool {
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, кнопки и обработчики событий. " +
 			"Используй когда нужно понять как выглядит форма документа, справочника или обработки. " +
-			"ВАЖНО: HTTP-endpoint 1С в серверном контексте не отдаёт состав элементов и обработчики формы - для полной структуры запусти сервер с флагом --dump (выгрузка конфигурации в файлы), тогда состав элементов, команды и обработчики берутся из Form.xml. Без --dump возвращаются только имя и заголовок формы.",
+			"ВАЖНО: полный состав формы читается из выгрузки, поэтому для элементов, команд и обработчиков запусти сервер с флагом --dump (выгрузка конфигурации в файлы), тогда они берутся из Form.xml. Без --dump возвращается только то, что отдал HTTP-сервис 1С, и на практике это имя и заголовок формы.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -35,7 +35,7 @@ func FormStructureTool() *mcp.Tool {
 				},
 				"form_name": {
 					"type": "string",
-					"description": "Имя формы (если не указано - возвращается первая форма по алфавиту)"
+					"description": "Имя формы. Учитывается только при запуске сервера с флагом --dump: имя ищется среди форм объекта в выгрузке, и если не указано - берётся первая форма по алфавиту. Без --dump параметр не действует, форму выбирает сам HTTP-сервис 1С."
 				}
 			},
 			"required": ["object_type", "object_name"]
@@ -51,19 +51,32 @@ type formInput struct {
 
 // NewFormStructureHandler returns a ToolHandler that fetches form structure.
 //
-// The 1C HTTP endpoint in the Enterprise/server context cannot enumerate the
-// runtime UI tree (no access to ФормаКлиентскогоПриложения), so it returns
-// only the form name and title - Elements/Commands/Handlers from it are
-// always empty. The full structure is parsed from the local DumpConfigToFiles
-// output (Form.xml) when --dump is configured.
+// What the HTTP endpoint gives us: ФормаGET in the bundled extension
+// (extension/src/HTTPServices/MCPService/Ext/Module.bsl) always fills name and
+// title, and then tries to enumerate Форма.Элементы, Форма.Команды and the
+// form's event properties inside Попытка/Исключение blocks that swallow the
+// failure and leave the arrays empty. Its own comments mark those three as
+// «могут быть недоступны в режиме Предприятия». Whether, and in which
+// contexts, the platform actually populates them is NOT established anywhere in
+// this repository, so treat an empty Elements/Commands/Handlers from HTTP as
+// the case to design for rather than as a proven impossibility. The local
+// DumpConfigToFiles output (Form.xml) is the source we can rely on, and it is
+// used whenever --dump is configured.
 //
 // Behaviour:
 //   - Name/Title come from HTTP if available; dump fills them in otherwise.
 //   - Elements/Commands/Handlers come from dump when --dump is set; otherwise
-//     the response contains only Name+Title (degraded but valid).
+//     the response carries only what HTTP returned (degraded but valid).
+//   - form_name is only ever passed to formFromDump: the HTTP endpoint is
+//     /form/{type}/{name} and has no slot for a form name. Without --dump the
+//     argument cannot take effect, so the response body says so instead of
+//     silently answering about a different form.
 //   - If both HTTP and dump fail we return an error.
-//   - dump-only failures (HTTP OK, dump broken) are logged at WARN so users
-//     can diagnose why enrichment did not happen, but do not fail the call.
+//   - dump-only failures (HTTP OK, dump broken) are logged at WARN and do not
+//     fail the call. That line is NOT visible in the default stdio mode: the
+//     default logger is set to slog.LevelError in cmd/mcp-1c/main.go, and the
+//     pipe branch keeps LevelError too. It surfaces only with --debug (INFO to
+//     server.log) or on a terminal launch (INFO to stderr).
 func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input formInput
@@ -103,9 +116,23 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 			return nil, fmt.Errorf("fetching form structure from 1C: %w", httpErr)
 		}
 
-		return textResult(formatFormStructure(&form)), nil
+		text := formatFormStructure(&form)
+		if dumpDir == "" && input.FormName != "" {
+			text += formNameNeedsDumpNote
+		}
+		return textResult(text), nil
 	}
 }
+
+// formNameNeedsDumpNote is appended to the response body when the caller asked
+// for a specific form but the server runs without --dump. The parameter is
+// dropped on that path (see NewFormStructureHandler), and the WARN log is
+// invisible in the default stdio mode, so the body is the only place the user
+// can learn that the answer is about a form they did not ask for.
+const formNameNeedsDumpNote = "> Параметр `form_name` не применялся: выбор формы по имени работает " +
+	"только при запуске сервера с флагом `--dump`. Без него имя формы в 1С не передаётся, " +
+	"форму выбирает сам HTTP-сервис, и выше возвращена именно она. С `--dump` форма ищется " +
+	"по имени в выгрузке конфигурации, откуда читаются также состав элементов, команды и обработчики.\n"
 
 // formFromDump loads form structure from a DumpConfigToFiles XML file.
 func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormStructure, error) {

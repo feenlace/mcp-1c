@@ -346,6 +346,104 @@ func TestNewFormStructureHandler_DumpOnly(t *testing.T) {
 	}
 }
 
+// TestNewFormStructureHandler_FormNameWithoutDumpIsExplained pins the response
+// BODY, not a log line: form_name only ever reaches formFromDump, so without
+// --dump it is dropped and the caller gets some other form with no hint that
+// their argument was ignored. The existing WARN is not a substitute - the
+// default stdio logger is at ERROR level (cmd/mcp-1c/main.go), so nothing about
+// this reaches the user unless the body says it.
+func TestNewFormStructureHandler_FormNameWithoutDumpIsExplained(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"name":     "ФормаЭлемента",
+			"title":    "Контрагент",
+			"elements": []any{},
+			"commands": []any{},
+			"handlers": []any{},
+		})
+	}))
+	defer mockServer.Close()
+
+	client := onec.NewClient(mockServer.URL, "", "")
+	handler := NewFormStructureHandler(client, "") // no --dump
+
+	args, _ := json.Marshal(map[string]any{
+		"object_type": "Catalog",
+		"object_name": "Контрагенты",
+		"form_name":   "ФормаСписка",
+	})
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{Name: "get_form_structure", Arguments: args},
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tc, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+
+	// The body must name the ignored parameter, the flag that would make it
+	// work, and still carry what was actually returned instead.
+	for _, want := range []string{"form_name", "--dump", "ФормаЭлемента"} {
+		if !strings.Contains(tc.Text, want) {
+			t.Errorf("response body must mention %q, got:\n%s", want, tc.Text)
+		}
+	}
+	// It must stay a normal result, not an error.
+	if result.IsError {
+		t.Errorf("expected a normal result, got IsError=true:\n%s", tc.Text)
+	}
+}
+
+// TestNewFormStructureHandler_NoFormNameNoDumpNote is the other half of the
+// pair: the note is CONDITIONAL. A caller who never passed form_name has
+// nothing to be told, so an unconditional note would be noise in every single
+// no-dump response.
+func TestNewFormStructureHandler_NoFormNameNoDumpNote(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"name":     "ФормаЭлемента",
+			"title":    "Контрагент",
+			"elements": []any{},
+			"commands": []any{},
+			"handlers": []any{},
+		})
+	}))
+	defer mockServer.Close()
+
+	client := onec.NewClient(mockServer.URL, "", "")
+	handler := NewFormStructureHandler(client, "") // no --dump
+
+	args, _ := json.Marshal(map[string]any{
+		"object_type": "Catalog",
+		"object_name": "Контрагенты",
+	})
+	req := &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{Name: "get_form_structure", Arguments: args},
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tc := result.Content[0].(*mcp.TextContent)
+
+	for _, unwanted := range []string{"form_name", "--dump"} {
+		if strings.Contains(tc.Text, unwanted) {
+			t.Errorf("response body must NOT mention %q when form_name was not passed, got:\n%s",
+				unwanted, tc.Text)
+		}
+	}
+	if !strings.Contains(tc.Text, "ФормаЭлемента") {
+		t.Errorf("expected the form itself in the body, got:\n%s", tc.Text)
+	}
+}
+
 // sampleFormXML returns a minimal 1C form XML for testing. The schema
 // matches what DumpConfigToFiles produces (xcf/logform): element names
 // live in the "name" attribute, the UI tree is under <ChildItems>, and
