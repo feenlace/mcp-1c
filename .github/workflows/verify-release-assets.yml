@@ -1,0 +1,64 @@
+name: Verify release assets
+
+# The .cfe extension cannot be built in GitHub Actions (the 1C platform is not
+# available there), so the maintainer uploads it by hand after the Release
+# workflow has finished. This check therefore runs on demand: start it once the
+# manual upload is done. Running it inside the tag-triggered workflow would fail
+# every single time, because at that moment the .cfe does not exist yet.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to verify, for example v1.11.5"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify published assets
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+      EXPECTED_BINARIES: "6"
+    steps:
+      - name: List published assets
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/releases/tags/${TAG}" --jq '.assets[].name' > assets.txt
+          echo "Assets published for ${TAG}:"
+          cat assets.txt
+
+      - name: Require the binaries, checksums.txt and MCP_HTTPService.cfe
+        run: |
+          set -euo pipefail
+          missing=0
+          for required in checksums.txt MCP_HTTPService.cfe; do
+            if ! grep -qxF -- "${required}" assets.txt; then
+              echo "::error::release ${TAG} has no asset ${required}"
+              missing=1
+            fi
+          done
+          binaries=$(grep -c '^mcp-1c-' assets.txt || true)
+          if [ "${binaries}" -ne "${EXPECTED_BINARIES}" ]; then
+            echo "::error::release ${TAG} has ${binaries} mcp-1c-* assets, expected ${EXPECTED_BINARIES}"
+            missing=1
+          fi
+          exit "${missing}"
+
+      - name: Download every asset and verify the checksums
+        run: |
+          set -euo pipefail
+          mkdir -p published
+          gh release download "${TAG}" --dir published
+          cd published
+          if ! grep -qF 'MCP_HTTPService.cfe' checksums.txt; then
+            echo "::error::checksums.txt has no line for MCP_HTTPService.cfe"
+            exit 1
+          fi
+          sha256sum -c checksums.txt

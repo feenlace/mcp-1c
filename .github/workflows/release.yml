@@ -56,11 +56,6 @@ jobs:
           OUTFILE="mcp-1c-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
             -o "dist/${OUTFILE}" ./cmd/mcp-1c/
-      - name: Compute SHA256
-        run: |
-          cd dist
-          sha256sum mcp-1c-* > checksums.txt
-          cat checksums.txt
       - uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -78,9 +73,35 @@ jobs:
           merge-multiple: true
       - name: List artifacts
         run: ls -lh dist/
+      - name: Compute SHA256 over every binary
+        working-directory: dist
+        run: |
+          sha256sum mcp-1c-* > checksums.txt
+          cat checksums.txt
+      - name: Verify release payload before publishing
+        run: |
+          set -euo pipefail
+          expected=6
+          binaries=$(find dist -maxdepth 1 -type f -name 'mcp-1c-*' | wc -l | tr -d '[:space:]')
+          if [ ! -s dist/checksums.txt ]; then
+            echo "::error::dist/checksums.txt is missing or empty"
+            exit 1
+          fi
+          lines=$(wc -l < dist/checksums.txt | tr -d '[:space:]')
+          echo "binaries=${binaries} checksum lines=${lines} expected=${expected}"
+          if [ "${binaries}" -ne "${expected}" ]; then
+            echo "::error::found ${binaries} mcp-1c-* binaries in dist/, expected ${expected}"
+            exit 1
+          fi
+          if [ "${lines}" -ne "${expected}" ]; then
+            echo "::error::dist/checksums.txt has ${lines} lines, expected ${expected}"
+            exit 1
+          fi
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/mcp-1c-*
+          files: |
+            dist/mcp-1c-*
+            dist/checksums.txt
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}

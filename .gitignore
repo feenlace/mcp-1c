@@ -32,3 +32,9 @@ mcp-1c-community-garble-test-*
 extension/*.cfe
 cmd/mcp-1c/extension/
 
+# Release artifacts, создаются шагами RELEASING.md в корне репозитория
+/checksums.txt
+/release-notes.md
+/release-block.md
+/MCP_HTTPService.cfe
+
