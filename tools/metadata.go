@@ -43,10 +43,16 @@ var metadataCategories = []metadataCategory{
 	{"ОбщиеМакеты", "Общие макеты"},
 	{"Роли", "Роли"},
 	{"Подсистемы", "Подсистемы"},
-	{"РегулярныеЗадания", "Регулярные задания"},
-	{"ВебСервисы", "Веб-сервисы"},
+	{"РегламентныеЗадания", "Регламентные задания"},
+	{"WebСервисы", "Веб-сервисы"},
 	{"HTTPСервисы", "HTTP-сервисы"},
 }
+
+// metadataWarningsKey is the /metadata response key the 1C extension uses to report
+// collections it could not read (МетаданныеGET). It is a diagnostics channel, not a
+// metadata category: it is lifted out of the tree before rendering so it can never be
+// mistaken for an unknown category and listed as a filter value.
+const metadataWarningsKey = "warnings"
 
 // MetadataTool returns the MCP tool definition for get_metadata_tree.
 func MetadataTool() *mcp.Tool {
@@ -118,6 +124,12 @@ func NewMetadataHandler(client *onec.Client) mcp.ToolHandler {
 			return nil, fmt.Errorf("fetching metadata from 1C: %w", err)
 		}
 
+		// Lift the diagnostics channel out of the tree BEFORE anything else, so a
+		// degraded (partial) metadata tree is reported as a degradation instead of
+		// silently passing for a complete one, and never renders as a category.
+		warnings := tree[metadataWarningsKey]
+		delete(tree, metadataWarningsKey)
+
 		filterNoise(tree)
 
 		if input.Filter != "" {
@@ -126,20 +138,36 @@ func NewMetadataHandler(client *onec.Client) mcp.ToolHandler {
 				filtered[input.Filter] = items
 			}
 			tree = filtered
-			return textResult(formatMetadataTree(tree)), nil
+			return textResult(formatMetadataTree(tree, warnings)), nil
 		}
 
 		// Without filter — return only category names and counts.
-		return textResult(formatMetadataSummary(tree)), nil
+		return textResult(formatMetadataSummary(tree, warnings)), nil
 	}
+}
+
+// writeMetadataWarnings emits a short RU diagnostics line when the 1C extension
+// reported collections it could not read (МетаданныеGET catches the throw, skips
+// the collection and records its name). Without it a wrong collection literal is
+// invisible: the tree simply comes back short. Mirrors
+// analyze_subsystems.writeForestWarnings. Customer-facing RU: no em/en dash.
+func writeMetadataWarnings(b *strings.Builder, warnings []string) {
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "> Диагностика: дерево метаданных неполное, пропущено коллекций: %d. Причины: %s\n\n",
+		len(warnings), strings.Join(warnings, "; "))
 }
 
 // formatMetadataTree formats the metadata tree as markdown text.
 // Known categories are rendered first in a stable order, then any unknown
-// categories are appended at the end for forward compatibility.
-func formatMetadataTree(tree map[string][]string) string {
+// categories are appended at the end for forward compatibility. warnings carries
+// the collections 1C could not read; it is rendered right under the header so a
+// partial tree cannot be read as a complete one.
+func formatMetadataTree(tree map[string][]string, warnings []string) string {
 	var b strings.Builder
 	b.WriteString("# Метаданные конфигурации 1С\n\n")
+	writeMetadataWarnings(&b, warnings)
 
 	// Track which keys have been rendered.
 	rendered := make(map[string]bool, len(metadataCategories))
@@ -178,9 +206,11 @@ func formatMetadataTree(tree map[string][]string) string {
 }
 
 // formatMetadataSummary returns a compact summary: category names with object counts.
-func formatMetadataSummary(tree map[string][]string) string {
+// warnings carries the collections 1C could not read (see writeMetadataWarnings).
+func formatMetadataSummary(tree map[string][]string, warnings []string) string {
 	var b strings.Builder
 	b.WriteString("# Метаданные конфигурации 1С (сводка)\n\n")
+	writeMetadataWarnings(&b, warnings)
 	b.WriteString("Для получения списка объектов вызови get_metadata_tree с параметром filter.\n\n")
 
 	for _, cat := range metadataCategories {

@@ -50,13 +50,16 @@ type universeKind struct {
 //   - Dump folder: the authoritative 1C EN->dir map (metadataTypeDirMap) and real dump
 //     fixtures; XDTOPackages from the in-repo 1C syntax corpus.
 //   - BSL collection: the 1C "ОбъектМетаданныхКонфигурация" syntax corpus collection
-//     properties, matching the extension's own ИменаКоллекций where present.
+//     properties, matching the extension's own ИменаКоллекций where present. Every
+//     bslCollection below is pinned against a snapshot of those properties by
+//     config_metadata_properties_test.go, so a name Метаданные[...] would reject cannot
+//     be committed.
 //
-// Splits worth noting (do NOT "fix" them): ScheduledJob's dump folder / BSL collection
-// is РегулярныеЗадания (the extension's existing choice) while its .ПолноеИмя() prefix
-// is РегламентноеЗадание; WebService's BSL collection is Cyrillic ВебСервисы while its
-// RU prefix is Latin WebСервис. Both are carried through unchanged so universe and
-// membership stay byte-identical.
+// A kind's RU prefix and its bslCollection are independent strings and may differ: the
+// prefix comes from serviceKindEnToRu (ScheduledJob -> РегламентноеЗадание,
+// WebService -> WebСервис) while the collection is the live plural property name
+// (РегламентныеЗадания, WebСервисы). Only the prefix takes part in the universe /
+// membership set cancellation; bslCollection is the live-path enumeration key.
 var universeServiceKinds = []universeKind{
 	{"Constant", "Constants", "Константы"},
 	{"CommonModule", "CommonModules", "ОбщиеМодули"},
@@ -67,10 +70,10 @@ var universeServiceKinds = []universeKind{
 	{"CommonPicture", "CommonPictures", "ОбщиеКартинки"},
 	{"DefinedType", "DefinedTypes", "ОпределяемыеТипы"},
 	{"HTTPService", "HTTPServices", "HTTPСервисы"},
-	{"WebService", "WebServices", "ВебСервисы"},
+	{"WebService", "WebServices", "WebСервисы"},
 	{"XDTOPackage", "XDTOPackages", "ПакетыXDTO"},
 	{"SessionParameter", "SessionParameters", "ПараметрыСеанса"},
-	{"ScheduledJob", "ScheduledJobs", "РегулярныеЗадания"},
+	{"ScheduledJob", "ScheduledJobs", "РегламентныеЗадания"},
 	{"Role", "Roles", "Роли"},
 	{"FunctionalOption", "FunctionalOptions", "ФункциональныеОпции"},
 	{"EventSubscription", "EventSubscriptions", "ПодпискиНаСобытия"},

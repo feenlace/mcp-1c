@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -27,7 +28,7 @@ func readBSLModule(t *testing.T) string {
 // TestExpectedExtensionVersion_MatchesBSL keeps the Go constant and the BSL
 // module in lockstep on the extension version.
 func TestExpectedExtensionVersion_MatchesBSL(t *testing.T) {
-	const want = "0.4.5"
+	const want = "0.4.6"
 
 	if expectedExtensionVersion != want {
 		t.Errorf("expectedExtensionVersion = %q, want %q", expectedExtensionVersion, want)
@@ -41,6 +42,44 @@ func TestExpectedExtensionVersion_MatchesBSL(t *testing.T) {
 
 	if !strings.Contains(module, `Результат.Вставить("version", "`+want+`");`) {
 		t.Errorf("Module.bsl: missing version literal for %q", want)
+	}
+}
+
+// configurationXMLPath returns the path to the extension's Configuration.xml
+// relative to this test's directory (cmd/mcp-1c).
+func configurationXMLPath() string {
+	return filepath.Join("..", "..", "extension", "src", "Configuration.xml")
+}
+
+// versionElementRe matches the extension's <Version> property in Configuration.xml,
+// in both the filled form and the self-closing empty form 1C writes when the field
+// was never set.
+var versionElementRe = regexp.MustCompile(`<Version\s*/>|<Version>([^<]*)</Version>`)
+
+// TestExtensionVersion_MatchesConfigurationXML pins the FIFTH copy of the extension
+// version: the <Version> property of the extension itself. It is the only copy 1C
+// shows in "Конфигурация / Расширения", so leaving it empty (as it was until 0.4.6)
+// means the installed extension reports no version at all in the designer while
+// /version reports one. The other three copies are pinned by the test above.
+func TestExtensionVersion_MatchesConfigurationXML(t *testing.T) {
+	raw, err := os.ReadFile(configurationXMLPath())
+	if err != nil {
+		t.Fatalf("read Configuration.xml: %v", err)
+	}
+
+	matches := versionElementRe.FindAllStringSubmatch(string(raw), -1)
+	if len(matches) != 1 {
+		t.Fatalf("Configuration.xml: found %d <Version> elements, want exactly 1", len(matches))
+	}
+
+	got := matches[0][1]
+	if got == "" {
+		t.Fatalf("Configuration.xml: <Version> is empty; it must carry the extension version %q",
+			expectedExtensionVersion)
+	}
+	if got != expectedExtensionVersion {
+		t.Errorf("Configuration.xml <Version> = %q, want %q (same as expectedExtensionVersion)",
+			got, expectedExtensionVersion)
 	}
 }
 
