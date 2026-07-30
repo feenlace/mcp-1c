@@ -69,4 +69,25 @@ func init() {
 	// against the metadata type table). Kept on its own line so it can be
 	// dropped trivially if a future dump shape ever proves otherwise.
 	dumpDirNames["DocumentJournals"] = "ЖурналДокументов"
+
+	// Five service kinds with the same missing-prefix root cause. Each was
+	// enumerated on a real demo Бухгалтерия dump (13243 .bsl) as a top-level
+	// directory holding modules while having no dumpDirNames entry, so the
+	// indexer emitted raw-English-prefix keys such as
+	// "SettingsStorages.НастройкиНовостей.МодульМенеджера".
+	//
+	// Every Russian singular below is taken verbatim from serviceKindEnToRu in
+	// subsystem_kinds.go, keyed by the English SINGULAR (the dump directory is
+	// plural). They are added here rather than to metadataTypes because that
+	// slice also feeds objectTypeToDumpDir, the tool-input type -> form-directory
+	// map used by formparser; these kinds are not form-bearing tool inputs and
+	// must not silently appear there.
+	//
+	// One line each, so any single kind can be dropped if a future dump shape
+	// ever contradicts it.
+	dumpDirNames["HTTPServices"] = "HTTPСервис"            // 5 modules measured
+	dumpDirNames["WebServices"] = "WebСервис"              // 16 modules measured
+	dumpDirNames["SettingsStorages"] = "ХранилищеНастроек" // 22 modules measured
+	dumpDirNames["FilterCriteria"] = "КритерийОтбора"      // 3 modules measured
+	dumpDirNames["Sequences"] = "Последовательность"       // 5 modules measured
 }

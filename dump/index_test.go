@@ -1151,6 +1151,31 @@ func TestBslPathToModuleName_Extensions(t *testing.T) {
 		{"ext form module real shape (Ext/Form/Module.bsl)",
 			"Расширения/Доработки3D/DataProcessors/АРМ_ПробитиеЧековССайта/Forms/Форма/Ext/Form/Module.bsl",
 			"ext.Доработки3D.Обработка.АРМ_ПробитиеЧековССайта.Форма.Форма.МодульФормы"},
+		// Extension HTTP service: the plain-Module rule must fire on the
+		// stripped remainder too, so the suffix is Модуль and not МодульФормы.
+		{"ext http service module",
+			"Расширения/Доработки3D/HTTPServices/Сервис/Ext/Module.bsl",
+			"ext.Доработки3D.HTTPСервис.Сервис.Модуль"},
+		// Extension web service: same shape as the HTTP service.
+		{"ext web service module",
+			"Расширения/Доработки3D/WebServices/Обмен/Ext/Module.bsl",
+			"ext.Доработки3D.WebСервис.Обмен.Модуль"},
+		// Extension settings storage / filter criterion / sequence: prefix only.
+		{"ext settings storage manager module",
+			"Расширения/Доработки3D/SettingsStorages/Настройки/Ext/ManagerModule.bsl",
+			"ext.Доработки3D.ХранилищеНастроек.Настройки.МодульМенеджера"},
+		{"ext filter criterion manager module",
+			"Расширения/Доработки3D/FilterCriteria/ПоКонтрагенту/Ext/ManagerModule.bsl",
+			"ext.Доработки3D.КритерийОтбора.ПоКонтрагенту.МодульМенеджера"},
+		{"ext sequence record set module",
+			"Расширения/Доработки3D/Sequences/ДокументыОрганизаций/Ext/RecordSetModule.bsl",
+			"ext.Доработки3D.Последовательность.ДокументыОрганизаций.МодульНабораЗаписей"},
+		// The extension's OWN configuration modules: an extension root mirrors
+		// the configuration root and carries the same Ext directory. The trailing
+		// "Модуль" is the module type, exactly as for a base-config one.
+		{"ext session module",
+			"Расширения/Доработки3D/Ext/SessionModule.bsl",
+			"ext.Доработки3D.Конфигурация.МодульСеанса.Модуль"},
 		// Control: a base-config path with a literal first segment "Расширения"
 		// is impossible (it is a reserved dump dir), but a too-short path under
 		// it must not panic and falls back to base parsing.
@@ -1233,6 +1258,148 @@ func TestBslPathToModuleName_CommonFormsCommandsJournals(t *testing.T) {
 	}
 }
 
+// TestBslPathToModuleName_ServiceKindsAndConfigModules locks the keys for the
+// five service object kinds that were MISSING from dumpDirNames (HTTPServices,
+// WebServices, SettingsStorages, FilterCriteria, Sequences) and for the
+// configuration's own modules under the root "Ext" directory.
+//
+// All six shapes were enumerated on a real demo Бухгалтерия dump (13243 .bsl):
+// HTTPServices 5, WebServices 16, SettingsStorages 22, FilterCriteria 3,
+// Sequences 5, and exactly four files directly under Ext.
+//
+// Two distinct defects are pinned here:
+//
+//  1. The missing dumpDirNames entry made baseConfigModuleName fall back to the
+//     raw English directory name (prefix = category), e.g.
+//     "FilterCriteria.ДокументыПоКонтрагенту.МодульМенеджера".
+//  2. For HTTPServices/WebServices the object's own module file is named
+//     Module.bsl, which moduleNameSuffixes maps to "МодульФормы". These kinds
+//     have no forms at all, so the suffix was wrong as well. The
+//     Module.bsl -> "Модуль" rule, previously pinned to CommonModules alone, now
+//     covers them.
+//
+// Russian names come from serviceKindEnToRu in subsystem_kinds.go, keyed by the
+// English SINGULAR (the dump directory is plural): HTTPService -> HTTPСервис,
+// WebService -> WebСервис, SettingsStorage -> ХранилищеНастроек,
+// FilterCriterion -> КритерийОтбора, Sequence -> Последовательность.
+func TestBslPathToModuleName_ServiceKindsAndConfigModules(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		// --- HTTP / Web services: prefix AND suffix were both wrong. ---
+		{"base http service module",
+			"HTTPServices/ЭДО/Ext/Module.bsl",
+			"HTTPСервис.ЭДО.Модуль"},
+		{"base web service module",
+			"WebServices/Exchange/Ext/Module.bsl",
+			"WebСервис.Exchange.Модуль"},
+
+		// --- Prefix-only defects. ---
+		{"base settings storage manager module",
+			"SettingsStorages/НастройкиНовостей/Ext/ManagerModule.bsl",
+			"ХранилищеНастроек.НастройкиНовостей.МодульМенеджера"},
+		{"base settings storage form module",
+			"SettingsStorages/НастройкиНовостей/Forms/Настройка/Ext/Form/Module.bsl",
+			"ХранилищеНастроек.НастройкиНовостей.Форма.Настройка.МодульФормы"},
+		{"base filter criterion manager module",
+			"FilterCriteria/ДокументыПоКонтрагенту/Ext/ManagerModule.bsl",
+			"КритерийОтбора.ДокументыПоКонтрагенту.МодульМенеджера"},
+		{"base sequence record set module",
+			"Sequences/ДокументыОрганизаций/Ext/RecordSetModule.bsl",
+			"Последовательность.ДокументыОрганизаций.МодульНабораЗаписей"},
+
+		// --- Configuration's own modules: "Ext" is NOT an object kind. ---
+		// Exactly these four files live directly under the dump root "Ext".
+		// The key keeps the generic three-slot <Вид>.<Имя>.<ТипМодуля> shape:
+		// the owner is the configuration itself, the module's own Russian name
+		// stands in the object-name slot, and the type is "Модуль" — the same
+		// type a common module gets for its own Module.bsl. Before the fix the
+		// file name landed in the object-name slot, so the key embedded a literal
+		// ".bsl" mid-key and repeated the name:
+		// "Ext.SessionModule.bsl.SessionModule".
+		{"config managed application module",
+			"Ext/ManagedApplicationModule.bsl",
+			"Конфигурация.МодульУправляемогоПриложения.Модуль"},
+		{"config session module",
+			"Ext/SessionModule.bsl",
+			"Конфигурация.МодульСеанса.Модуль"},
+		{"config external connection module",
+			"Ext/ExternalConnectionModule.bsl",
+			"Конфигурация.МодульВнешнегоСоединения.Модуль"},
+		{"config ordinary application module",
+			"Ext/OrdinaryApplicationModule.bsl",
+			"Конфигурация.МодульОбычногоПриложения.Модуль"},
+
+		// --- Same six shapes inside an extension subtree. ---
+		{"ext http service module",
+			"Расширения/МоёРасш/HTTPServices/Сервис/Ext/Module.bsl",
+			"ext.МоёРасш.HTTPСервис.Сервис.Модуль"},
+		{"ext web service module",
+			"Расширения/МоёРасш/WebServices/Обмен/Ext/Module.bsl",
+			"ext.МоёРасш.WebСервис.Обмен.Модуль"},
+		{"ext settings storage manager module",
+			"Расширения/TestExt/SettingsStorages/Настройки/Ext/ManagerModule.bsl",
+			"ext.TestExt.ХранилищеНастроек.Настройки.МодульМенеджера"},
+		{"ext filter criterion manager module",
+			"Расширения/TestExt/FilterCriteria/КритерийОтбора1/Ext/ManagerModule.bsl",
+			"ext.TestExt.КритерийОтбора.КритерийОтбора1.МодульМенеджера"},
+		{"ext sequence record set module",
+			"Расширения/TestExt/Sequences/Последовательность1/Ext/RecordSetModule.bsl",
+			"ext.TestExt.Последовательность.Последовательность1.МодульНабораЗаписей"},
+		// An extension root mirrors the configuration root, Ext directory
+		// included: the source tree of the bundled polling extension carries
+		// exactly Ext/ManagedApplicationModule.bsl next to its Configuration.xml.
+		{"ext managed application module",
+			"Расширения/MCP_Polling/Ext/ManagedApplicationModule.bsl",
+			"ext.MCP_Polling.Конфигурация.МодульУправляемогоПриложения.Модуль"},
+
+		// --- The Forms guard on the Module.bsl -> Модуль rule. ---
+		// Synthetic shapes: they pin the RULE, not an observed on-disk layout.
+		// A path passing through a plural "Forms" segment is a FORM module and
+		// must keep "МодульФормы" even for a kind covered by the plain-Module
+		// rule. This is the intent of the pre-existing !slices.Contains(parts,
+		// "Forms") guard, preserved when the rule stopped being CommonModules-only.
+		{"common module under Forms keeps form suffix",
+			"CommonModules/ОбщийМодуль1/Forms/Ф1/Ext/Module.bsl",
+			"ОбщийМодуль.ОбщийМодуль1.Форма.Ф1.МодульФормы"},
+		{"http service under Forms keeps form suffix",
+			"HTTPServices/ЭДО/Forms/Ф1/Ext/Module.bsl",
+			"HTTPСервис.ЭДО.Форма.Ф1.МодульФормы"},
+
+		// --- Regression controls: untouched by either change. ---
+		{"base common module unaffected",
+			"CommonModules/ОбщегоНазначения/Ext/Module.bsl",
+			"ОбщийМодуль.ОбщегоНазначения.Модуль"},
+		{"base catalog object module unaffected",
+			"Catalogs/Номенклатура/Ext/ObjectModule.bsl",
+			"Справочник.Номенклатура.МодульОбъекта"},
+		{"base document form module unaffected",
+			"Documents/Док/Forms/ФормаДок/Ext/Module.bsl",
+			"Документ.Док.Форма.ФормаДок.МодульФормы"},
+		// An unknown category still falls back to the raw English name. The fix
+		// narrows that fallback, it does not remove it.
+		{"unknown category still falls back",
+			"Styles/Основной/Ext/Module.bsl",
+			"Styles.Основной.МодульФормы"},
+		// Only the four known configuration modules get the Конфигурация key.
+		// Anything else directly under the root Ext keeps the old fallback, so
+		// an unexpected file is visibly odd instead of silently mislabelled.
+		{"unknown file under root Ext falls back",
+			"Ext/Неизвестный.bsl",
+			"Ext.Неизвестный.bsl.Неизвестный"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bslPathToModuleName(tt.path)
+			if got != tt.want {
+				t.Errorf("bslPathToModuleName(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBslPathToModuleName_ExtensionsNoCollision proves two distinct extension
 // objects no longer collapse to the same key. The pre-fix logic keyed both as
 // "Расширения.<ext>.<suffix>", so an ext CommonModule and an ext DataProcessor
@@ -1249,6 +1416,36 @@ func TestBslPathToModuleName_ExtensionsNoCollision(t *testing.T) {
 	}
 	if b != "ext.TestExt.Обработка.DP1.МодульОбъекта" {
 		t.Errorf("ext DataProcessor key = %q, want ext.TestExt.Обработка.DP1.МодульОбъекта", b)
+	}
+
+	// Same property for the kinds added later. An HTTP service and a web service
+	// of the SAME extension bearing the SAME object name are distinct objects in
+	// 1C; while both directories were missing from dumpDirNames they produced
+	// distinct-but-English keys, and both file names are Module.bsl, so the
+	// prefix is the only thing keeping them apart. Pin that it does.
+	h := bslPathToModuleName("Расширения/TestExt/HTTPServices/Обмен/Ext/Module.bsl")
+	w := bslPathToModuleName("Расширения/TestExt/WebServices/Обмен/Ext/Module.bsl")
+	if h == w {
+		t.Fatalf("ext HTTP service and web service collide on key %q", h)
+	}
+	if h != "ext.TestExt.HTTPСервис.Обмен.Модуль" {
+		t.Errorf("ext HTTPService key = %q, want ext.TestExt.HTTPСервис.Обмен.Модуль", h)
+	}
+	if w != "ext.TestExt.WebСервис.Обмен.Модуль" {
+		t.Errorf("ext WebService key = %q, want ext.TestExt.WebСервис.Обмен.Модуль", w)
+	}
+
+	// The configuration modules of two different extensions must not collide
+	// either: the "ext.<ext>." prefix is what separates them, since the
+	// Конфигурация key names the module itself and is identical in every
+	// extension.
+	c1 := bslPathToModuleName("Расширения/TestExt/Ext/SessionModule.bsl")
+	c2 := bslPathToModuleName("Расширения/OtherExt/Ext/SessionModule.bsl")
+	if c1 == c2 {
+		t.Fatalf("session modules of two extensions collide on key %q", c1)
+	}
+	if c1 != "ext.TestExt.Конфигурация.МодульСеанса.Модуль" {
+		t.Errorf("ext session module key = %q, want ext.TestExt.Конфигурация.МодульСеанса.Модуль", c1)
 	}
 }
 

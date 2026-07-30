@@ -119,7 +119,17 @@ const (
 	// such name. The bump forces a fresh NFC-keyed build: a v1 generation now derives
 	// a different gensig (rebuilt on serve, never adopted), and a v1 legacy-flat cache
 	// is dropped by the schema gate in NewIndex (flatCacheSchemaStale) and cold-rebuilt.
-	dumpIndexSchemaVersion = 2
+	//
+	// v3: the docID derivation (bslPathToModuleName) changed for six top-level dump
+	// directories. Five service kinds (HTTPServices, WebServices, SettingsStorages,
+	// FilterCriteria, Sequences) had no dumpDirNames entry, so their keys carried the
+	// raw English directory name as the prefix; HTTPServices/WebServices additionally
+	// got the form-module suffix for their own Module.bsl. The root "Ext" directory,
+	// which holds the configuration's own four modules, produced keys with a literal
+	// ".bsl" mid-key and the name repeated. Without this bump a warm generation or
+	// flat cache built by a v2 binary keeps its old gensig, is adopted as current, and
+	// serves the old keys — the whole fix would be inert for every existing user.
+	dumpIndexSchemaVersion = 3
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and

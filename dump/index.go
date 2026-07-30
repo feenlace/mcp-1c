@@ -223,6 +223,65 @@ var subdirSegmentNames = map[string]string{
 	"Commands": "Команда",
 }
 
+// plainModuleDirs lists the dump directories whose object stores its OWN module
+// in a file literally named Module.bsl. moduleNameSuffixes maps "Module.bsl" to
+// "МодульФормы" because that is what the name means for every kind that has
+// forms; for these kinds the same file name is the object module and the suffix
+// must be "Модуль" instead.
+//
+// CommonModules was the original and, for a while, the only member. HTTPServices
+// and WebServices behave identically: the handler code of an HTTP or web service
+// lives in <Kind>/<name>/Ext/Module.bsl. Membership here only ever narrows a
+// suffix from "МодульФормы" to "Модуль"; the prefix is unaffected.
+var plainModuleDirs = map[string]bool{
+	"CommonModules": true,
+	"HTTPServices":  true,
+	"WebServices":   true,
+}
+
+// configModuleDirName is the top-level dump directory that holds the modules of
+// the CONFIGURATION itself. Unlike every other top-level directory it is not a
+// metadata kind: its .bsl files sit directly inside it, with no <objectName>
+// level in between, so it must never get a dumpDirNames entry.
+const configModuleDirName = "Ext"
+
+// configModulePrefix is the key prefix for those modules. It stands in the slot
+// a metadata kind occupies for every other module, because the owner of these
+// four files is the configuration as a whole.
+const configModulePrefix = "Конфигурация"
+
+// configModuleSuffix is the module type of those modules, the third and last
+// segment of their key. Both consumers that split a docID (parseModuleName and
+// PathIndex.AddEntry) fill the module-type slot only from three segments up, so
+// a shorter key would leave that slot empty and no module-type filter could ever
+// select these four. Inside an extension the "ext.<ext>." prefix pushes the same
+// key past that threshold, so a shorter shape would also make one logical module
+// answer filters differently depending on where it lives.
+//
+// "Модуль" is not new vocabulary invented for this slot: moduleNameSuffixes and
+// the plainModuleDirs rule above already give exactly this type to an object's
+// own Module.bsl (ОбщийМодуль.ОбщегоНазначения.Модуль), and it is already one of
+// the values documented for the "module" filter in tools/search.go.
+const configModuleSuffix = "Модуль"
+
+// configModuleNames maps the file names found directly under configModuleDirName
+// to the Russian names of the configuration modules they hold. On a real dump
+// that directory contains exactly these four files and nothing else.
+//
+// The Russian names are the property names of the platform type
+// ОбъектМетаданныхКонфигурация, recorded in
+// testdata/config_metadata_properties.txt (lines 49-52). The English-to-Russian
+// pairing is by literal component correspondence, which is unambiguous here:
+// each English name shares exactly one Russian counterpart (session -> Сеанс,
+// managed application -> УправляемоеПриложение, external connection ->
+// ВнешнееСоединение, ordinary application -> ОбычноеПриложение).
+var configModuleNames = map[string]string{
+	"ManagedApplicationModule.bsl":  "МодульУправляемогоПриложения",
+	"SessionModule.bsl":             "МодульСеанса",
+	"ExternalConnectionModule.bsl":  "МодульВнешнегоСоединения",
+	"OrdinaryApplicationModule.bsl": "МодульОбычногоПриложения",
+}
+
 // extensionDirName is the top-level dump directory that holds configuration
 // extensions ("Расширения"). Inside it each extension owns a subtree that
 // mirrors the base-config layout: Расширения/<ext>/<Kind>/<name>/Ext/<File>.bsl.
@@ -280,6 +339,36 @@ func bslPathToModuleName(relPath string) string {
 //
 // parts must have at least two segments; callers guarantee this.
 func baseConfigModuleName(parts []string) string {
+	// The configuration's own modules live directly under the root "Ext"
+	// directory, so the path carries no object name and the generic mapping
+	// misreads it: the file name lands in the object-name slot and the key ends
+	// up carrying a literal ".bsl" in the middle with the name repeated as the
+	// suffix ("Ext.SessionModule.bsl.SessionModule").
+	//
+	// The key keeps the generic three-slot <prefix>.<objectName>.<suffix> shape
+	// and every slot means something: the owner is the configuration itself
+	// (configModulePrefix), the module's own Russian name stands where an object
+	// name stands, and the type is configModuleSuffix — the same "Модуль" an
+	// object's own Module.bsl gets. Three segments is also the threshold below
+	// which parseModuleName and PathIndex.AddEntry stop filling the module-type
+	// slot, so a shorter key would be unreachable by any module-type filter, and
+	// would behave differently inside an extension, where the "ext.<ext>." prefix
+	// pushes the same key past that threshold on its own.
+	//
+	// The branch is deliberately narrow: exactly two segments AND a file name the
+	// platform defines. Anything else directly under the root "Ext" keeps the old
+	// fallback, so an unexpected file stays visibly odd instead of being silently
+	// relabelled as a configuration module.
+	//
+	// bslPathToModuleName strips "Расширения/<ext>/" before calling this, so the
+	// same branch covers an extension's own configuration modules: an extension
+	// root mirrors the configuration root, Ext directory included.
+	if len(parts) == 2 && parts[0] == configModuleDirName {
+		if ru, ok := configModuleNames[parts[1]]; ok {
+			return configModulePrefix + "." + ru + "." + configModuleSuffix
+		}
+	}
+
 	// First part is the category directory.
 	category := parts[0]
 	prefix, ok := dumpDirNames[category]
@@ -296,8 +385,12 @@ func baseConfigModuleName(parts []string) string {
 		suffix = strings.TrimSuffix(fileName, ".bsl")
 	}
 
-	// Fix: CommonModules use "Модуль", not "МодульФормы" for Module.bsl.
-	if category == "CommonModules" && fileName == "Module.bsl" {
+	// Fix: the kinds in plainModuleDirs use "Модуль", not "МодульФормы", for
+	// Module.bsl — that file is their object module, not a form module. The
+	// Forms guard is the original one and keeps its intent: a path passing
+	// through a plural "Forms" segment IS a form module and must stay
+	// "МодульФормы" regardless of the kind.
+	if plainModuleDirs[category] && fileName == "Module.bsl" {
 		if !slices.Contains(parts, "Forms") {
 			suffix = "Модуль"
 		}
