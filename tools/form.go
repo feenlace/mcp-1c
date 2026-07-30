@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -35,7 +36,7 @@ func FormStructureTool() *mcp.Tool {
 				},
 				"form_name": {
 					"type": "string",
-					"description": "Имя формы. Учитывается только при запуске сервера с флагом --dump: имя ищется среди форм объекта в выгрузке, и если не указано - берётся первая форма по алфавиту. Без --dump параметр не действует, форму выбирает сам HTTP-сервис 1С."
+					"description": "Имя формы. Учитывается только при запуске сервера с флагом --dump: имя ищется среди форм объекта в выгрузке, и если не указано - берётся первая форма по алфавиту. Если формы с таким именем у объекта нет, возвращается ошибка со списком доступных форм. Без --dump параметр не действует, форму выбирает сам HTTP-сервис 1С."
 				}
 			},
 			"required": ["object_type", "object_name"]
@@ -64,19 +65,26 @@ type formInput struct {
 // used whenever --dump is configured.
 //
 // Behaviour:
-//   - Name/Title come from HTTP if available; dump fills them in otherwise.
+//   - Name/Title come from HTTP when the dump supplied no structure; when it
+//     did, both come from the dump, because the two sources do not necessarily
+//     describe the same form of the object (see mergeDumpIntoForm).
 //   - Elements/Commands/Handlers come from dump when --dump is set; otherwise
 //     the response carries only what HTTP returned (degraded but valid).
 //   - form_name is only ever passed to formFromDump: the HTTP endpoint is
 //     /form/{type}/{name} and has no slot for a form name. Without --dump the
 //     argument cannot take effect, so the response body says so instead of
 //     silently answering about a different form.
+//   - With --dump, a form_name the object does not have is a hard error that
+//     lists the real form names. Every other dump failure degrades, but this
+//     one cannot: the alternative is a confident answer about a form nobody
+//     asked about.
 //   - If both HTTP and dump fail we return an error.
-//   - dump-only failures (HTTP OK, dump broken) are logged at WARN and do not
-//     fail the call. That line is NOT visible in the default stdio mode: the
-//     default logger is set to slog.LevelError in cmd/mcp-1c/main.go, and the
-//     pipe branch keeps LevelError too. It surfaces only with --debug (INFO to
-//     server.log) or on a terminal launch (INFO to stderr).
+//   - The remaining dump-only failures (HTTP OK, dump unreadable) are logged at
+//     WARN, do not fail the call, and add a note to the response body. The WARN
+//     alone is NOT visible in the default stdio mode: the default logger is set
+//     to slog.LevelError in cmd/mcp-1c/main.go, and the pipe branch keeps
+//     LevelError too. It surfaces only with --debug (INFO to server.log) or on
+//     a terminal launch (INFO to stderr).
 func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input formInput
@@ -92,13 +100,27 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		endpoint := fmt.Sprintf("/form/%s/%s", input.ObjectType, input.ObjectName)
 		httpErr := client.Get(ctx, endpoint, &form)
 
-		// If --dump is wired up, parse the matching Form.xml for the full
-		// structure (Elements/Commands/Handlers - HTTP cannot provide them).
+		// If --dump is wired up, parse the matching Form.xml: that file is
+		// where this code reads Elements/Commands/Handlers from.
+		//
+		// dumpStructureMissing records the degraded case for the body note
+		// below, because the WARN it also logs is invisible at the default
+		// stdio log level.
+		dumpStructureMissing := false
 		if dumpDir != "" {
 			dumpForm, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
 			switch {
 			case dumpErr == nil && dumpForm != nil:
 				mergeDumpIntoForm(&form, dumpForm)
+			case errors.Is(dumpErr, errFormNotInDump):
+				// The caller named a form this object does not have. Returning
+				// a different form's structure under that request would be a
+				// confident wrong answer, so this single dump failure is fatal
+				// even though HTTP succeeded. Classified with errors.Is, never
+				// by matching the message. Checked before the httpErr case: the
+				// dump is a local file tree, so its form list stays valid and
+				// actionable even when the 1C service is unreachable.
+				return nil, dumpErr
 			case httpErr != nil:
 				// Both sources failed - return a combined error so the user
 				// can see why we have nothing to show.
@@ -111,6 +133,7 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 					"object_name", input.ObjectName,
 					"form_name", input.FormName,
 					"error", dumpErr)
+				dumpStructureMissing = true
 			}
 		} else if httpErr != nil {
 			return nil, fmt.Errorf("fetching form structure from 1C: %w", httpErr)
@@ -119,6 +142,14 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		text := formatFormStructure(&form)
 		if dumpDir == "" && input.FormName != "" {
 			text += formNameNeedsDumpNote
+		}
+		if dumpStructureMissing {
+			text += formDumpUnreadableNote
+			if input.FormName != "" {
+				// The name lookup lives inside formFromDump, so a dump that
+				// could not be read never got to honour form_name either.
+				text += formNameDumpUnreadableNote
+			}
 		}
 		return textResult(text), nil
 	}
@@ -133,6 +164,54 @@ const formNameNeedsDumpNote = "> Параметр `form_name` не примен�
 	"только при запуске сервера с флагом `--dump`. Без него имя формы в 1С не передаётся, " +
 	"форму выбирает сам HTTP-сервис, и выше возвращена именно она. С `--dump` форма ищется " +
 	"по имени в выгрузке конфигурации, откуда читаются также состав элементов, команды и обработчики.\n"
+
+// formDumpUnreadableNote is appended when --dump is configured and the 1C
+// service answered, but the dump could not supply the form structure: the
+// object has no forms in the dump, its forms directory is unreadable or is not
+// a directory, or the form file itself could not be read. The response stays a
+// normal result because the HTTP part of it is valid, but without this note the
+// caller sees a name and a title and takes that for the whole form. The WARN
+// logged alongside cannot do the job: the default stdio logger runs at
+// slog.LevelError (cmd/mcp-1c/main.go).
+//
+// The wording deliberately does not claim that the elements, commands and
+// handlers sections are missing. Whether the HTTP endpoint fills them is not
+// established anywhere in this repository (see NewFormStructureHandler), and a
+// note asserting they are absent is falsified the moment the body above it
+// lists them.
+const formDumpUnreadableNote = "> Состав формы не прочитан из выгрузки: выше только то, что вернул " +
+	"HTTP-сервис 1С, поэтому элементы, команды и обработчики могут быть неполными или отсутствовать. " +
+	"Возможные причины: форм этого объекта нет в выгрузке, каталог форм недоступен или файл Form.xml " +
+	"не удалось прочитать. Проверьте путь, указанный в `--dump`, и полноту выгрузки конфигурации.\n"
+
+// formNameDumpUnreadableNote extends the note above for the caller who also
+// passed form_name. The name lookup happens inside formFromDump, so a dump that
+// could not be read never selected a form by name, and the form shown above is
+// whichever one the HTTP service picked.
+const formNameDumpUnreadableNote = "> Параметр `form_name` при этом не применялся: форма ищется по имени " +
+	"в выгрузке, а прочитать её не удалось. Форму выбрал сам HTTP-сервис 1С, и выше возвращена именно она.\n"
+
+// errFormNotInDump marks the one formFromDump failure that belongs to the
+// caller rather than to the dump: they named a form the object does not have.
+// It is matched with errors.Is so that the remaining failures (no forms at all,
+// unreadable forms directory, containment refusal, unreadable Form.xml) keep
+// their non-fatal handling without the classification depending on message text.
+var errFormNotInDump = errors.New("requested form is not present in the dump")
+
+// formNotInDumpError reports a form_name that does not match any of the
+// object's forms in the dump, and carries the real names so the caller can fix
+// the request in one step. It unwraps to errFormNotInDump, which keeps the
+// classification separate from the message the user reads.
+type formNotInDumpError struct {
+	requested string
+	available string
+}
+
+func (e *formNotInDumpError) Error() string {
+	return fmt.Sprintf("form %q not found in dump (available: %s)", e.requested, e.available)
+}
+
+func (e *formNotInDumpError) Unwrap() error { return errFormNotInDump }
 
 // formFromDump loads form structure from a DumpConfigToFiles XML file.
 func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormStructure, error) {
@@ -150,7 +229,7 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 	if formName != "" {
 		path, ok := formFiles[formName]
 		if !ok {
-			return nil, fmt.Errorf("form %q not found in dump (available: %s)", formName, joinMapKeys(formFiles))
+			return nil, &formNotInDumpError{requested: formName, available: joinMapKeys(formFiles)}
 		}
 		selectedPath = path
 		selectedName = formName
@@ -222,18 +301,49 @@ func convertDumpForm(formName string, info *dump.FormInfo) *onec.FormStructure {
 
 // mergeDumpIntoForm merges dump data into the HTTP response.
 //
-// The HTTP endpoint in Enterprise mode never returns Elements/Commands/
-// Handlers (BSL has no server-side API for those collections), so the dump
-// is the authoritative source for them. Name and Title are kept from HTTP
-// when present (HTTP uses the configured Synonym), with dump as fallback.
+// The two sources do not necessarily describe the same form. The HTTP endpoint
+// answers about the form its BSL handler resolved (ПолучитьОсновнуюФорму in
+// extension/src/HTTPServices/MCPService/Ext/Module.bsl), while formFromDump
+// answers about the form named in form_name or, when none was given, the first
+// one alphabetically. So whenever the dump supplied the structure, the identity
+// is taken from the dump too: a header naming one form above another form's
+// elements is not a partial answer, it is a wrong one.
+//
+// Everything else travels with the Name. The Title describes the HTTP-named
+// form, and so do its Commands and Handlers, so once the body belongs to a
+// different form the whole HTTP payload is replaced rather than reprinted over
+// foreign contents. Replacing means replacing outright, empty collections
+// included: a form that declares no commands has no commands, and backfilling
+// that section from the other form is how a response ends up headed by one form
+// while listing another's. If the dump form carries no Title of its own the
+// response then shows no title line at all, which is the intended trade: a
+// missing title leaves the answer incomplete, a borrowed one makes it false.
+//
+// When the two names agree, both sources describe the same form, so HTTP data
+// is not foreign and the older per-collection merge applies: a non-empty dump
+// collection wins, because Form.xml holds the form's declared contents in full
+// while the HTTP handler builds each of the three inside a Попытка block that
+// leaves the array empty on failure.
+//
+// When the dump supplied no structure at all, nothing in the body belongs to
+// the dump form, so Name and Title stay as HTTP returned them and the dump only
+// fills in what HTTP left empty.
 func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure) {
+	dumpSuppliedStructure := len(dumpForm.Elements) > 0 ||
+		len(dumpForm.Commands) > 0 ||
+		len(dumpForm.Handlers) > 0
+
+	if dumpSuppliedStructure && dumpForm.Name != "" && dumpForm.Name != form.Name {
+		*form = *dumpForm
+		return
+	}
+
 	if form.Name == "" {
 		form.Name = dumpForm.Name
 	}
 	if form.Title == "" {
 		form.Title = dumpForm.Title
 	}
-	// Elements/Commands/Handlers: dump wins because HTTP never populates them.
 	if len(dumpForm.Elements) > 0 {
 		form.Elements = dumpForm.Elements
 	}

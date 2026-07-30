@@ -506,3 +506,408 @@ func sampleFormXML() string {
   </Commands>
 </Form>`
 }
+
+// formXMLWithTitle builds a minimal dump Form.xml carrying exactly one input
+// field and an optional form-level <Title>. Every form in a test dump gets a
+// distinguishable element name and title, so a response cannot pass an
+// assertion while actually describing a different form.
+func formXMLWithTitle(title, elementName string) string {
+	titleBlock := ""
+	if title != "" {
+		titleBlock = `
+  <Title>
+    <v8:item>
+      <v8:lang>ru</v8:lang>
+      <v8:content>` + title + `</v8:content>
+    </v8:item>
+  </Title>`
+	}
+	return `<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform"
+      xmlns:v8="http://v8.1c.ru/8.1/data/core"
+      version="2.21">` + titleBlock + `
+  <ChildItems>
+    <InputField name="` + elementName + `" id="1">
+      <DataPath>Объект.` + elementName + `</DataPath>
+    </InputField>
+  </ChildItems>
+</Form>`
+}
+
+// writeDumpForm materialises one form inside a DumpConfigToFiles-shaped tree:
+// <dump>/<objectDir>/<objectName>/Forms/<formName>/Ext/Form.xml.
+func writeDumpForm(t *testing.T, dumpDir, objectDir, objectName, formName, xml string) {
+	t.Helper()
+	dir := filepath.Join(dumpDir, objectDir, objectName, "Forms", formName, "Ext")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Form.xml"), []byte(xml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// formHTTPServer serves a 1C-shaped form response with the given name and
+// title and no Elements/Commands/Handlers, which is what the bundled extension
+// returns whenever its Попытка blocks come back empty.
+func formHTTPServer(t *testing.T, name, title string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":     name,
+			"title":    title,
+			"elements": []any{},
+			"commands": []any{},
+			"handlers": []any{},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// callFormHandler runs get_form_structure against the given base URL and dump
+// directory. formName is omitted from the arguments entirely when empty, so the
+// "argument absent" and "argument empty" cases stay distinguishable.
+func callFormHandler(t *testing.T, baseURL, dumpDir, objectType, objectName, formName string) (*mcp.CallToolResult, error) {
+	t.Helper()
+	args := map[string]any{"object_type": objectType, "object_name": objectName}
+	if formName != "" {
+		args["form_name"] = formName
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewFormStructureHandler(onec.NewClient(baseURL, "", ""), dumpDir)
+	return handler(context.Background(), &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{Name: "get_form_structure", Arguments: raw},
+	})
+}
+
+// resultText extracts the single text block of a tool result.
+func resultText(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	if result == nil || len(result.Content) == 0 {
+		t.Fatal("expected non-empty result content")
+	}
+	tc, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	return tc.Text
+}
+
+// dumpNoteMarker is the distinguishing phrase of the note added when --dump is
+// configured but the dump could not supply the structure. Tests match the
+// phrase rather than the constant so they compile, and fail, against a build
+// that does not have the constant yet.
+const dumpNoteMarker = "Состав формы не прочитан из выгрузки"
+
+// TestNewFormStructureHandler_UnknownFormNameIsHardError pins the one dump
+// failure that must NOT degrade: the caller named a form the object does not
+// have. Returning some other form's structure under that request is a confident
+// wrong answer, and the WARN that used to be the only trace is invisible at the
+// default stdio log level (slog.LevelError in cmd/mcp-1c/main.go).
+func TestNewFormStructureHandler_UnknownFormNameIsHardError(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаВыбора",
+		formXMLWithTitle("Выбор реализации", "ПолеВыбора"))
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаЭлемента",
+		formXMLWithTitle("Реализация", "ПолеЭлемента"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаСписка")
+	if err == nil {
+		t.Fatalf("expected an error for a form that is not in the dump, got result:\n%s",
+			resultText(t, result))
+	}
+	for _, want := range []string{"ФормаСписка", "ФормаВыбора", "ФормаЭлемента"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error must name the requested form and list the available ones, missing %q: %v",
+				want, err)
+		}
+	}
+}
+
+// TestNewFormStructureHandler_ExistingFormNameSelectsThatForm is the other half
+// of the pair: a form_name that DOES resolve must succeed, and both the header
+// and the body must describe that form and no other.
+func TestNewFormStructureHandler_ExistingFormNameSelectsThatForm(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаВыбора",
+		formXMLWithTitle("Выбор реализации", "ПолеВыбора"))
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаЭлемента",
+		formXMLWithTitle("Карточка реализации", "ПолеЭлемента"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаЭлемента")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	for _, want := range []string{"# Форма: ФормаЭлемента", "Карточка реализации", "ПолеЭлемента"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("response must describe the requested form, missing %q:\n%s", want, text)
+		}
+	}
+	// Nothing belonging to another form may appear: not the alphabetically
+	// first form's element, not the HTTP-named form, not its title.
+	for _, unwanted := range []string{"ПолеВыбора", "ФормаДокумента", "Реализация товаров и услуг"} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("response must not carry %q from another form:\n%s", unwanted, text)
+		}
+	}
+}
+
+// TestNewFormStructureHandler_DumpFormNameReplacesHTTPName covers the default
+// path with no form_name at all. formFromDump picks the alphabetically first
+// form while the HTTP endpoint answers about the object's main form, so keeping
+// the HTTP name would label one form's structure with another form's identity.
+// The title travels with the name: the HTTP Title describes the HTTP-named
+// form and must not be shown above a different form's elements.
+func TestNewFormStructureHandler_DumpFormNameReplacesHTTPName(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаВыбора",
+		formXMLWithTitle("Выбор реализации", "ПолеВыбора"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	for _, want := range []string{"# Форма: ФормаВыбора", "Выбор реализации", "ПолеВыбора"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("response must describe the form the dump parsed, missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{"ФормаДокумента", "Реализация товаров и услуг"} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("response must not carry %q from the HTTP-named form:\n%s", unwanted, text)
+		}
+	}
+}
+
+// TestNewFormStructureHandler_DumpFormDoesNotInheritForeignSections pins the
+// rest of the body once the identity has moved to the dump form. Merging each
+// collection on its own leaves the sections the dump form does not declare
+// filled in from the HTTP form, so a response headed by one form still lists
+// another form's commands and handlers. A form that declares no commands has
+// no commands: an empty dump collection is an answer, not a gap to backfill.
+func TestNewFormStructureHandler_DumpFormDoesNotInheritForeignSections(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":     "ФормаДокумента",
+			"title":    "Реализация товаров и услуг",
+			"elements": []any{},
+			"commands": []map[string]any{{"name": "ПровестиИЗакрыть", "action": "ПровестиИЗакрыть"}},
+			"handlers": []map[string]any{{"event": "ПриОткрытии", "handler": "ПриОткрытии"}},
+		})
+	}))
+	defer srv.Close()
+
+	// The dump form declares one element and nothing else.
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаВыбора",
+		formXMLWithTitle("Выбор реализации", "ПолеВыбора"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "# Форма: ФормаВыбора") {
+		t.Fatalf("response must name the form the dump parsed:\n%s", text)
+	}
+	for _, unwanted := range []string{
+		"ПровестиИЗакрыть", "## Команды формы",
+		"ПриОткрытии", "## Обработчики событий",
+	} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("response headed by ФормаВыбора must not carry %q from ФормаДокумента:\n%s",
+				unwanted, text)
+		}
+	}
+	if !strings.Contains(text, "ПолеВыбора") {
+		t.Errorf("the dump form's own contents must survive:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_DumpFormWithoutTitleDropsHTTPTitle fixes the
+// decision for the case the previous test cannot reach: the dump form has no
+// <Title> of its own. An absent title makes the response incomplete; the HTTP
+// title would make it wrong, because it belongs to a different form. So the
+// title is omitted rather than inherited.
+func TestNewFormStructureHandler_DumpFormWithoutTitleDropsHTTPTitle(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаВыбора",
+		formXMLWithTitle("", "ПолеВыбора"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "# Форма: ФормаВыбора") {
+		t.Errorf("response must name the form the dump parsed:\n%s", text)
+	}
+	// "Заголовок" on its own is also the elements table's column header, so the
+	// assertion has to name the title LINE that formatFormStructure emits.
+	if strings.Contains(text, "**Заголовок:**") {
+		t.Errorf("a form with no title of its own must show no title line at all:\n%s", text)
+	}
+	if strings.Contains(text, "Реализация товаров и услуг") {
+		t.Errorf("the HTTP title belongs to another form and must not be reused:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_UnreadableFormsDirAddsBodyNote drives the dump
+// failure that is NOT the caller's fault: the object's Forms position is not a
+// directory, so FindFormFiles refuses it. HTTP still answered, so this stays a
+// normal result, but the body has to say the structure is missing. The WARN
+// alone cannot: the default stdio logger is at ERROR level.
+func TestNewFormStructureHandler_UnreadableFormsDirAddsBodyNote(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	objectDir := filepath.Join(dumpDir, "Documents", "РеализацияТоваровУслуг")
+	if err := os.MkdirAll(objectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A plain file standing where the Forms directory belongs.
+	if err := os.WriteFile(filepath.Join(objectDir, "Forms"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("a dump failure other than form-not-found must not fail the call: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, dumpNoteMarker) {
+		t.Errorf("body must say the structure could not be read from the dump:\n%s", text)
+	}
+	if !strings.Contains(text, "ФормаДокумента") {
+		t.Errorf("the valid HTTP data must still be returned:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_NoFormsInDumpAddsBodyNote covers the other
+// non-fatal branch of formFromDump: the dump simply has no forms for this
+// object. Same contract as the unreadable case.
+func TestNewFormStructureHandler_NoFormsInDumpAddsBodyNote(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	// A dump that exists and is readable but holds forms for a different object.
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Catalogs", "Контрагенты", "ФормаСписка",
+		formXMLWithTitle("Контрагенты", "ПолеСписка"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("an object with no forms in the dump must not fail the call: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, dumpNoteMarker) {
+		t.Errorf("body must say the structure could not be read from the dump:\n%s", text)
+	}
+	if !strings.Contains(text, "ФормаДокумента") {
+		t.Errorf("the valid HTTP data must still be returned:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_UnreadableDumpNamesTheIgnoredFormName is the
+// form_name half of the degraded path. When the dump cannot be read at all, the
+// name lookup never happens, so the form shown is whichever one the HTTP
+// service chose. The body has to admit that, exactly as the no-dump note does.
+func TestNewFormStructureHandler_UnreadableDumpNamesTheIgnoredFormName(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	objectDir := filepath.Join(dumpDir, "Documents", "РеализацияТоваровУслуг")
+	if err := os.MkdirAll(objectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(objectDir, "Forms"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаСписка")
+	if err != nil {
+		t.Fatalf("a dump failure other than form-not-found must not fail the call: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, dumpNoteMarker) {
+		t.Errorf("body must say the structure could not be read from the dump:\n%s", text)
+	}
+	if !strings.Contains(text, "form_name") {
+		t.Errorf("body must say the form_name lookup did not happen:\n%s", text)
+	}
+}
+
+// TestNewFormStructureHandler_GoodDumpNoFormNameHasNoNotes is a negative
+// control. A note that appears on the healthy path is noise, and a test
+// asserting a note in the general case is a test that cannot fail.
+func TestNewFormStructureHandler_GoodDumpNoFormNameHasNoNotes(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаВыбора", "Выбор реализации")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаВыбора",
+		formXMLWithTitle("Выбор реализации", "ПолеВыбора"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "ПолеВыбора") {
+		t.Fatalf("expected the parsed structure in the body:\n%s", text)
+	}
+	for _, unwanted := range []string{dumpNoteMarker, "form_name", "--dump"} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("a healthy dump response must not carry %q:\n%s", unwanted, text)
+		}
+	}
+}
+
+// TestNewFormStructureHandler_GoodDumpValidFormNameHasNoNotes is the second
+// negative control: a form_name that resolves is not a degraded path either.
+func TestNewFormStructureHandler_GoodDumpValidFormNameHasNoNotes(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаДокумента", "Реализация товаров и услуг")
+
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаВыбора",
+		formXMLWithTitle("Выбор реализации", "ПолеВыбора"))
+	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаЭлемента",
+		formXMLWithTitle("Карточка реализации", "ПолеЭлемента"))
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаЭлемента")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+
+	if !strings.Contains(text, "ПолеЭлемента") {
+		t.Fatalf("expected the parsed structure in the body:\n%s", text)
+	}
+	for _, unwanted := range []string{dumpNoteMarker, "form_name", "--dump"} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("a healthy dump response must not carry %q:\n%s", unwanted, text)
+		}
+	}
+}
