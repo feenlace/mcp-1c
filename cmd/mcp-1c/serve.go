@@ -53,7 +53,7 @@ func openServeIndexLocal(ctx context.Context, dumpDir, cacheDir string, reindex 
 	placeholder := dump.NewServePlaceholder(dumpDir)
 	go func() {
 		var (
-			gensig  string
+			gen     *dump.ServeGeneration
 			prepErr error
 		)
 		// Recover a build panic into prepErr so it becomes a recorded BuildError the
@@ -69,14 +69,16 @@ func openServeIndexLocal(ctx context.Context, dumpDir, cacheDir string, reindex 
 				prepErr = ctx.Err()
 				return
 			}
-			gensig, prepErr = prepareServeGeneration(ctx, dumpDir, cacheDir, reindex)
+			gen, prepErr = dump.PrepareServeGeneration(ctx, dumpDir, cacheDir, reindex)
 		}()
 
-		// Finish the open IN PLACE on the placeholder. FinishServeOpen opens the READY
-		// generation named by gensig READ-ONLY and closes Done() exactly once on every
-		// path (success, prepErr, ctx-cancel, recovered panic), so waiters — Close() in
-		// particular — never block.
-		placeholder.FinishServeOpen(cacheDir, gensig, prepErr)
+		// Finish the open IN PLACE on the placeholder. FinishServeOpen opens the
+		// generation gen names READ-ONLY and closes Done() exactly once on every path
+		// (success, prepErr, ctx-cancel, recovered panic), so waiters — Close() in
+		// particular — never block. It also TAKES OVER gen's reader claim on every
+		// one of those paths, either into the index it opened or by releasing it, so
+		// there is nothing left for this goroutine to clean up.
+		placeholder.FinishServeOpen(cacheDir, gen, prepErr)
 		if prepErr != nil {
 			slog.Error("serve index: background prepare failed; search_code / code_read "+
 				"report a build error for this dump until restart",
@@ -84,86 +86,14 @@ func openServeIndexLocal(ctx context.Context, dumpDir, cacheDir string, reindex 
 			return
 		}
 
-		// FinishServeOpen registered this process as a live reader of the generation, so
-		// reaping older unheld generations now preserves the register-then-GC ordering.
+		// The generation has been claimed since before it entered the shared arena, so
+		// reaping older unheld generations now cannot touch the one being served.
 		// Best-effort: a GC error must never disturb serving.
-		if removed, gcErr := dump.GCGenerations(dumpDir, cacheDir, gensig); gcErr != nil {
+		if removed, gcErr := dump.GCGenerations(dumpDir, cacheDir, gen.Gensig()); gcErr != nil {
 			slog.Warn("serve index: old-generation GC failed", "dump", dumpDir, "error", gcErr)
 		} else if len(removed) > 0 {
 			slog.Info("serve index: reaped old generations", "dump", dumpDir, "removed", removed)
 		}
 	}()
 	return placeholder, nil
-}
-
-// prepareServeGeneration ensures a READY immutable generation for the current dump
-// signature exists and returns its gensig (which FinishServeOpen then opens
-// read-only). It mirrors the paid serve path minus the build-leader election: every
-// process is a builder, safe because BuildGeneration is concurrency-safe (unique
-// temp dir, first-to-rename wins).
-//
-// Order: compute GenSig -> reap abandoned .building-* temp dirs (best-effort) -> if a
-// READY generation already exists (and no --reindex) use it -> else adopt an existing
-// legacy flat cache by rename (no rebuild), or when nothing is adoptable — or
-// --reindex forces it — build a fresh generation. ctx is honoured between steps so
-// shutdown aborts before starting heavy work; GenSig and BuildGeneration are
-// themselves synchronous and cannot be interrupted mid-flight.
-func prepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reindex bool) (string, error) {
-	gensig, err := dump.GenSig(dumpDir)
-	if err != nil {
-		return "", fmt.Errorf("computing dump signature for %s: %w", dumpDir, err)
-	}
-
-	// Reap abandoned .building-* temp generation dirs left by a builder that died
-	// mid-build (SIGKILL / OOM / power loss) before adopting or rolling back — nothing
-	// else reaps them. Best-effort: a reap error must never fail a serve open.
-	if reaped, rErr := dump.ReapStaleBuildDirs(dumpDir, cacheDir); rErr != nil {
-		slog.Warn("serve index: stale build-dir reap failed", "dump", dumpDir, "error", rErr)
-	} else if len(reaped) > 0 {
-		slog.Info("serve index: reaped abandoned build temp dirs", "dump", dumpDir, "reaped", reaped)
-	}
-
-	if ctx.Err() != nil {
-		return "", ctx.Err()
-	}
-
-	// Read fast-path: a READY generation for this signature lets N processes coexist
-	// read-only. Skipped while --reindex forces a fresh build.
-	if !reindex && dump.GenerationReady(dumpDir, cacheDir, gensig) {
-		return gensig, nil
-	}
-
-	// Adopt an existing legacy flat cache as a generation first (an O(shards) rename
-	// that re-indexes nothing and reclaims the flat cache); only a genuinely cache-less
-	// dump — or an explicit --reindex — falls through to the full cold BuildGeneration.
-	if !reindex {
-		if g, migrated, adoptErr := dump.AdoptFlatGeneration(dumpDir, cacheDir); adoptErr != nil {
-			slog.Warn("serve index: flat->generation adopt failed; falling back to a full build",
-				"dump", dumpDir, "error", adoptErr)
-		} else if migrated {
-			slog.Info("serve index: adopted existing cache as generation without reindex",
-				"dump", dumpDir, "gensig", g)
-			return g, nil
-		}
-	}
-
-	slog.Info("serve index: building generation", "dump", dumpDir, "gensig", gensig, "reindex", reindex)
-	if reindex {
-		// --reindex must FORCE a cold rebuild of the current signature even when the
-		// dump content is unchanged (the operator is recovering a suspected-corrupt
-		// cache). A plain BuildGeneration is content-addressed and no-ops on an
-		// already-READY gensig, so it would rebuild nothing. ForceRebuildGeneration
-		// drops the current generation first — but only when no co-located process is
-		// still serving this exact generation, so a concurrent reader is never yanked
-		// (in that case the drop is skipped and BuildGeneration no-ops, preserving the
-		// in-use generation). Mirrors the legacy reindexGeneration force-rebuild.
-		if err := dump.ForceRebuildGeneration(dumpDir, cacheDir, gensig); err != nil {
-			return "", fmt.Errorf("force-rebuilding dump generation for %s: %w", dumpDir, err)
-		}
-		return gensig, nil
-	}
-	if err := dump.BuildGeneration(dumpDir, cacheDir, gensig); err != nil {
-		return "", fmt.Errorf("building dump generation for %s: %w", dumpDir, err)
-	}
-	return gensig, nil
 }

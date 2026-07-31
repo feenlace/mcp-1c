@@ -263,7 +263,7 @@ func OpenGenerationReadOnly(dir, cacheDir, gensig string) (*Index, error) {
 		return nil, fmt.Errorf("generation %q is not ready (no %s sentinel at %s)",
 			gensig, readySentinelName, genDir)
 	}
-	return openReadOnlyFrom(dir, cacheDir, genDir)
+	return openReadOnlyFrom(dir, cacheDir, genDir, nil)
 }
 
 // openReadOnlyFrom builds an Index serving the already-built shards under genDir
@@ -273,7 +273,10 @@ func OpenGenerationReadOnly(dir, cacheDir, gensig string) (*Index, error) {
 // cacheDir is recorded on the Index (NewIndex semantics: empty = platform cache
 // dir) so a later Reload builds its replacement generation under the same cache
 // this one was opened from.
-func openReadOnlyFrom(dumpDir, cacheDir, genDir string) (*Index, error) {
+//
+// held is a claim the caller already took on genDir, or nil; see
+// attachReadOnlyShards, which owns it from here on either way.
+func openReadOnlyFrom(dumpDir, cacheDir, genDir string, held *readerRegistration) (*Index, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	idx := &Index{
 		dir:           dumpDir,
@@ -288,7 +291,7 @@ func openReadOnlyFrom(dumpDir, cacheDir, genDir string) (*Index, error) {
 		done:          make(chan struct{}),
 	}
 
-	if err := idx.attachReadOnlyShards(genDir); err != nil {
+	if err := idx.attachReadOnlyShards(genDir, held); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -354,18 +357,25 @@ func NewServePlaceholder(dumpDir string) *Index {
 // exactly once on every exit path (success, failure, a ctx-cancel funneled in via
 // prepErr, or a panic while attaching). It MUST be called exactly once.
 //
-// On success it attaches the already-built READY generation gensig under cacheDir
-// READ-ONLY — registering this process as a live reader of the generation, so
-// concurrent old-generation GC never reaps a generation this process serves —
-// loads names from the generation manifest, builds the path index, and flips
-// Ready() via a RELEASE store. The shards (attachReadOnlyShards) and names
-// (loadNamesReadOnly) are therefore fully published BEFORE ready.Store(true), so
-// any reader that observes Ready()==true (or passes the Search() gate, an ACQUIRE
-// load) sees a fully-populated index with no torn read.
+// On success it attaches the generation named by gen READ-ONLY, loads names from
+// the generation manifest, builds the path index, and flips Ready() via a RELEASE
+// store. The shards (attachReadOnlyShards) and names (loadNamesReadOnly) are
+// therefore fully published BEFORE ready.Store(true), so any reader that observes
+// Ready()==true (or passes the Search() gate, an ACQUIRE load) sees a
+// fully-populated index with no torn read.
 //
-// On any failure it records BuildError() and returns WITHOUT flipping Ready():
-//   - a non-nil prepErr handed in by the caller (signature compute, build-leader
-//     timeout, BuildGeneration error, ctx cancellation, or a recovered build panic),
+// gen CARRIES THE CLAIM, and that is the point of its existing at all. It is what
+// PrepareServeGeneration came away holding, taken while the generation was still
+// a private build directory, so the generation entered the arena already held and
+// no reaper could take it — or rename it away — between the build and this attach.
+// A gensig alone could not express that: the claim is a live handle with a
+// heartbeat and a lifetime, and re-deriving one here would put back the very
+// window it was taken early to avoid.
+//
+// On any failure it records BuildError(), RELEASES gen's claim, and returns
+// WITHOUT flipping Ready():
+//   - a non-nil prepErr handed in by the caller (signature compute, build error,
+//     ctx cancellation, or a recovered build panic), in which case gen is nil,
 //   - an unresolvable cache path or a generation with no READY sentinel,
 //   - an attach/load error (corrupt shards, unreadable manifest),
 //   - a panic raised while attaching/loading (converted to BuildError by the
@@ -381,12 +391,21 @@ func NewServePlaceholder(dumpDir string) *Index {
 // but populates an existing placeholder rather than a freshly-allocated Index, so
 // dependents that captured the placeholder pointer (and are waiting on its Done())
 // transition with it instead of being orphaned by a pointer swap.
-func (idx *Index) FinishServeOpen(cacheDir, gensig string, prepErr error) {
+func (idx *Index) FinishServeOpen(cacheDir string, gen *ServeGeneration, prepErr error) {
+	gensig := gen.Gensig()
 	// Defers run LIFO: close(done) is registered first so it runs LAST — after the
 	// recover below has recorded any panic as BuildError. A waiter unblocked by the
 	// done-close therefore always sees a stable Ready()/BuildError() pair.
 	defer close(idx.done)
+	// The claim is released on every path that does NOT reach the attach. Past the
+	// attach idx owns it and Close releases it, so releasing again here would
+	// deregister a claim on the generation this index is now serving — hence the
+	// flag rather than a bare defer.
+	attached := false
 	defer func() {
+		if !attached {
+			gen.Release()
+		}
 		if r := recover(); r != nil {
 			idx.setBuildErr(fmt.Errorf("serve open: panic finishing generation %q: %v", gensig, r))
 		}
@@ -394,6 +413,10 @@ func (idx *Index) FinishServeOpen(cacheDir, gensig string, prepErr error) {
 
 	if prepErr != nil {
 		idx.setBuildErr(prepErr)
+		return
+	}
+	if gen == nil {
+		idx.setBuildErr(fmt.Errorf("serve open: no prepared generation was handed in and no error explains why"))
 		return
 	}
 
@@ -414,7 +437,10 @@ func (idx *Index) FinishServeOpen(cacheDir, gensig string, prepErr error) {
 		return
 	}
 
-	if err := idx.attachReadOnlyShards(genDir); err != nil {
+	// From here idx owns the claim: attachReadOnlyShards releases it itself if it
+	// fails, and Close releases it if it succeeds.
+	attached = true
+	if err := idx.attachReadOnlyShards(genDir, gen.claim()); err != nil {
 		idx.setBuildErr(err)
 		return
 	}
@@ -434,29 +460,43 @@ func (idx *Index) FinishServeOpen(cacheDir, gensig string, prepErr error) {
 }
 
 // attachReadOnlyShards opens the shards under genDir READ-ONLY (bbolt LOCK_SH) and
-// attaches them to idx, marks idx read-only, and registers idx as a live holder of
-// the generation in its readers/ registry so concurrent old-generation GC never
-// reaps a generation this process is serving. The reader is registered BEFORE the
-// shards are opened, so a live reader becomes visible to GC as early as possible;
-// if the open fails the registration is rolled back. The caller is responsible for
-// loading names and flipping Ready().
-func (idx *Index) attachReadOnlyShards(genDir string) error {
-	// Register FIRST, and REFUSE if it fails. This used to be best-effort: the
-	// failure was a slog.Warn and the open carried on. cmd/mcp-1c/main.go pins the
-	// default slog handler to LevelError, so that warning reached nobody, and the
-	// process then served a generation no reaper in the arena had any reason to
+// attaches them to idx, marks idx read-only, and makes idx the holder of a live
+// claim in the generation's readers/ registry, so concurrent old-generation GC
+// never reaps a generation this process is serving. The claim exists BEFORE the
+// shards are opened, so a live reader is visible to GC as early as possible; if
+// the open fails the claim is released. The caller is responsible for loading
+// names and flipping Ready().
+//
+// held is a claim the CALLER already took on this same genDir, or nil. Passing a
+// held claim is what the paths that produce their own generation do: they claim
+// it while it is still a private build directory and adopt the two together, so
+// there is no instant at which the generation is READY in the arena and unheld
+// (see buildGeneration). Taking a fresh claim here instead would put that instant
+// back. nil means "this process did not produce this generation", and then the
+// only thing left to do is registerReader's fail-closed post-adopt claim.
+//
+// OWNERSHIP: on entry idx owns held, on every path. It is released here if
+// anything below fails, and released by Close otherwise.
+func (idx *Index) attachReadOnlyShards(genDir string, held *readerRegistration) error {
+	// Claim FIRST, and REFUSE if it cannot be done. This used to be best-effort:
+	// the failure was a slog.Warn and the open carried on. cmd/mcp-1c/main.go pins
+	// the default slog handler to LevelError, so that warning reached nobody, and
+	// the process then served a generation no reaper in the arena had any reason to
 	// keep — which is exactly what a co-located reaper deleted, while this process
 	// kept answering out of unlinked inodes. Serving on without a claim is the
 	// "degraded component reports a pass" failure; the only correct answer is to
 	// stop here and say why, loudly enough to be heard at the default log level.
-	reg, err := registerReader(genDir)
-	if err != nil {
-		slog.Error("dump: refusing to serve an index generation this process cannot claim; "+
-			"another process could delete it while it is being served. Give this server its own "+
-			"cache directory (MCP_1C_CACHE_DIR / --cache-dir), or make the cache directory writable.",
-			"genDir", genDir, "error", err)
-		return fmt.Errorf("refusing to serve generation %s without a reader claim: %w",
-			filepath.Base(genDir), err)
+	reg := held
+	if reg == nil {
+		var err error
+		if reg, err = registerReader(genDir); err != nil {
+			slog.Error("dump: refusing to serve an index generation this process cannot claim; "+
+				"another process could delete it while it is being served. Give this server its own "+
+				"cache directory (MCP_1C_CACHE_DIR / --cache-dir), or make the cache directory writable.",
+				"genDir", genDir, "error", err)
+			return fmt.Errorf("refusing to serve generation %s without a reader claim: %w",
+				filepath.Base(genDir), err)
+		}
 	}
 	idx.readerReg = reg
 
@@ -654,7 +694,7 @@ func claimGenerationForRemoval(gensDir, name string) (string, error) {
 
 // ReapStaleBuildDirs sweeps the generations arena (g/) for the two kinds of
 // reclaimable remnant that nothing else removes and os.RemoveAll's each. It is meant
-// to run on startup / BEFORE a build (see prepareServeGeneration), not only after a
+// to run on startup / BEFORE a build (see PrepareServeGeneration), not only after a
 // successful build, so a leak is reclaimed even when the process that produced it
 // never reached its own cleanup. Removal is best-effort and per-dir: a permission
 // error (a cross-user dir on a shared cacheDir) is skipped, not fatal, so one
@@ -1054,19 +1094,39 @@ func forceDropGeneration(genDir, gensig string) {
 // forceDropGeneration, which respects live readers) and then rebuilds it.
 //
 // Concurrency: when another co-located process is actively serving this exact
-// gensig, forceDropGeneration skips the drop and the subsequent BuildGeneration
-// no-ops, so the in-use generation is preserved and this caller serves it as-is
-// rather than yanking it from the other process.
+// gensig, forceDropGeneration skips the drop and the subsequent build no-ops, so
+// the in-use generation is preserved and this caller serves it as-is rather than
+// yanking it from the other process.
+//
+// IT PUBLISHES AN UNCLAIMED GENERATION; see AdoptFlatGeneration for why a caller
+// that intends to serve the result must use PrepareServeGeneration instead.
 func ForceRebuildGeneration(dir, cacheDir, gensig string) error {
+	_, err := forceRebuildGeneration(dir, cacheDir, gensig, noClaim)
+	return err
+}
+
+// forceRebuildGeneration is ForceRebuildGeneration plus the option to come away
+// HOLDING the rebuilt generation. It returns a live registration only for
+// withClaim, and only on success; the caller owns it and must Close it.
+//
+// The drop-then-build shape means the claim can come from either of two places.
+// A drop that went through leaves nothing behind, so the build produces the
+// generation and claims it inside its own temp dir — no window. A drop that was
+// SKIPPED (a co-located process still holds this exact generation) leaves the
+// existing generation in place, the build no-ops on it, and the claim is then the
+// ordinary post-adopt one on a generation that was already published. Both cases
+// come back through buildGeneration, which picks the right one.
+func forceRebuildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*readerRegistration, error) {
 	cpath, err := cachePath(dir, cacheDir)
 	if err != nil {
-		return fmt.Errorf("force-rebuild: no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
+		return nil, fmt.Errorf("force-rebuild: no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
 	}
 	forceDropGeneration(generationDir(cpath, gensig), gensig)
-	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
-		return fmt.Errorf("force-rebuild: building generation %q: %w", gensig, err)
+	reg, err := buildGeneration(dir, cacheDir, gensig, claim)
+	if err != nil {
+		return nil, fmt.Errorf("force-rebuild: building generation %q: %w", gensig, err)
 	}
-	return nil
+	return reg, nil
 }
 
 // buildGenerationInto builds the shards + manifest for dumpDir into targetDir
@@ -1141,18 +1201,50 @@ func OpenForServe(dir, cacheDir string) (*Index, error) {
 		return NewIndex(dir, cacheDir, false)
 	}
 	if GenerationReady(dir, cacheDir, gensig) {
+		// A generation that was already in the arena. Nothing to claim early — see
+		// registerReader for the residual window this path keeps.
 		return OpenGenerationReadOnly(dir, cacheDir, gensig)
 	}
 	// No READY generation yet. If a legacy flat cache exists, migrate it once to
 	// the generation layout so this and future serves use the concurrent read-only
-	// path instead of the single-writer flat cache.
-	if g, migrated, mErr := migrateFlatToGeneration(dir, cacheDir); mErr != nil {
+	// path instead of the single-writer flat cache. The migration claims what it
+	// produces BEFORE publishing it and hands the claim straight to the open, so
+	// the generation this call created is never reapable while unheld.
+	g, reg, migrated, mErr := migrateFlatToGeneration(dir, cacheDir, withClaim)
+	if mErr != nil {
 		slog.Warn("dump: flat→generation migration failed; using legacy flat cache",
 			"dir", dir, "error", mErr)
 	} else if migrated {
-		return OpenGenerationReadOnly(dir, cacheDir, g)
+		return openClaimedGeneration(dir, cacheDir, g, reg)
 	}
 	return NewIndex(dir, cacheDir, false)
+}
+
+// openClaimedGeneration opens a generation this process just produced AND already
+// holds reg on, read-only. It is OpenGenerationReadOnly with the claim supplied
+// rather than taken here; the READY check is kept because a producer that returned
+// no generation at all must not reach the attach.
+func openClaimedGeneration(dir, cacheDir, gensig string, reg *readerRegistration) (*Index, error) {
+	// No claim means the generation reached the arena unheld and a reaper may
+	// already be removing it. Refuse rather than serve, exactly as the post-adopt
+	// path does. Every producer returns either a claim or an error, so this guards
+	// a future edit rather than a state reachable today.
+	if reg == nil {
+		return nil, fmt.Errorf("the migrated generation %s carries no reader claim, so it cannot be served",
+			gensig)
+	}
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		reg.Close()
+		return nil, err
+	}
+	genDir := generationDir(cpath, gensig)
+	if !generationReadyDir(genDir) {
+		reg.Close()
+		return nil, fmt.Errorf("generation %q is not ready (no %s sentinel at %s)",
+			gensig, readySentinelName, genDir)
+	}
+	return openReadOnlyFrom(dir, cacheDir, genDir, reg)
 }
 
 // migrateFlatToGeneration migrates an existing LEGACY flat cache (shard_* directly
@@ -1172,35 +1264,49 @@ func OpenForServe(dir, cacheDir string) (*Index, error) {
 // Backward-compat: when there is nothing to migrate (no flat cache) it is a no-op
 // (migrated=false) and the caller's legacy flat path still opens/builds normally;
 // a failed adoption rolls the flat shards back so the flat cache remains openable.
-func migrateFlatToGeneration(dir, cacheDir string) (string, bool, error) {
+//
+// claim says whether the caller wants to come away HOLDING the generation. With
+// withClaim every branch that produces one claims it while it is still private
+// (adoptFlatShards writes the claim into its temp dir, buildGeneration into its
+// own), so the caller never has to claim a generation that has already been
+// visible in the arena. The branch that finds a generation ALREADY READY has no
+// such phase and returns no claim, so its caller takes the ordinary post-adopt
+// one. A non-nil registration is returned ONLY on a successful migrated=true.
+func migrateFlatToGeneration(dir, cacheDir string, claim buildClaim) (string, *readerRegistration, bool, error) {
 	cpath, err := cachePath(dir, cacheDir)
 	if err != nil {
-		return "", false, err
+		return "", nil, false, err
 	}
 	gensig, err := GenSig(dir)
 	if err != nil {
-		return "", false, fmt.Errorf("computing generation signature for migration: %w", err)
+		return "", nil, false, fmt.Errorf("computing generation signature for migration: %w", err)
 	}
 	genDir := generationDir(cpath, gensig)
 
-	// Already a READY generation for this signature — nothing to migrate.
+	// Already a READY generation for this signature — nothing to migrate, and
+	// nothing this call could have claimed early either.
 	if generationReadyDir(genDir) {
-		return gensig, true, nil
+		reg, cErr := claimBuiltGeneration(genDir, claim)
+		if cErr != nil {
+			return gensig, nil, false, cErr
+		}
+		return gensig, reg, true, nil
 	}
 	// No legacy flat shards under the cache root — nothing to migrate.
 	shardDirs := cacheShardDirs(cpath)
 	if len(shardDirs) == 0 {
-		return gensig, false, nil
+		return gensig, nil, false, nil
 	}
 
 	ok, reason := flatCacheAdoptable(cpath, dir)
 	if ok {
-		if err := adoptFlatShards(cpath, gensig, shardDirs); err != nil {
-			return gensig, false, fmt.Errorf("adopting flat cache as generation %q: %w", gensig, err)
+		reg, aErr := adoptFlatShards(cpath, gensig, shardDirs, claim)
+		if aErr != nil {
+			return gensig, nil, false, fmt.Errorf("adopting flat cache as generation %q: %w", gensig, aErr)
 		}
 		slog.Info("Migrated legacy flat cache to a generation by adopting its shards (no rebuild)",
 			"gen", gensig, "shards", len(shardDirs))
-		return gensig, generationReadyDir(genDir), nil
+		return gensig, reg, generationReadyDir(genDir), nil
 	}
 
 	// Adoption is unsafe — build a fresh generation ONCE instead. This never
@@ -1208,10 +1314,11 @@ func migrateFlatToGeneration(dir, cacheDir string) (string, bool, error) {
 	// backward-compatible fallback until a later (deferred) flat-cache GC.
 	slog.Info("Legacy flat cache not safely adoptable; building a fresh generation once",
 		"gen", gensig, "reason", reason)
-	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
-		return gensig, false, fmt.Errorf("building generation for migration: %w", err)
+	reg, err := buildGeneration(dir, cacheDir, gensig, claim)
+	if err != nil {
+		return gensig, nil, false, fmt.Errorf("building generation for migration: %w", err)
 	}
-	return gensig, generationReadyDir(genDir), nil
+	return gensig, reg, generationReadyDir(genDir), nil
 }
 
 // AdoptFlatGeneration is the exported entry point for the serve build-leader's
@@ -1231,8 +1338,16 @@ func migrateFlatToGeneration(dir, cacheDir string) (string, bool, error) {
 // The flat-shard move is guarded by the read-cache lock (serve.lock): a flat cache
 // another live process still serves is reported non-adoptable, so that process's
 // memory-mapped shards are never moved out from under it.
+//
+// IT PUBLISHES AN UNCLAIMED GENERATION, so a caller that intends to SERVE the
+// result must not use it: between this returning and that caller's claim the
+// generation is READY and held by nobody, which is a legal target for every reaper
+// in the arena. PrepareServeGeneration is the serving path and takes the claim
+// with the migration instead. This entry point remains for callers that only want
+// the flat cache reclaimed.
 func AdoptFlatGeneration(dir, cacheDir string) (gensig string, migrated bool, err error) {
-	return migrateFlatToGeneration(dir, cacheDir)
+	gensig, _, migrated, err = migrateFlatToGeneration(dir, cacheDir, noClaim)
+	return gensig, migrated, err
 }
 
 // flatCacheAdoptable reports whether the legacy flat cache under cpath can be
@@ -1312,14 +1427,21 @@ func flatCacheSchemaStale(cpath string) bool {
 // back so the flat cache is restored intact (a bypassed/failed migration must
 // still leave an openable flat cache). If a concurrent migrator/builder adopts the
 // same gensig first, this rolls back too and defers to that equivalent generation.
-func adoptFlatShards(cpath, gensig string, shardDirs []string) error {
+//
+// claim mirrors buildGeneration's, for the same reason and at the same point: the
+// claim is written into the temp dir BEFORE the atomic adopt, so the adopted
+// generation enters the arena already held and is never observable as
+// READY-and-unclaimed. On the concurrent-adopter branch there is no such phase —
+// the generation being deferred to is someone else's, already published — so the
+// claim taken there is the ordinary post-adopt one.
+func adoptFlatShards(cpath, gensig string, shardDirs []string, claim buildClaim) (*readerRegistration, error) {
 	gensDir := generationsDir(cpath)
 	if err := os.MkdirAll(gensDir, 0o755); err != nil {
-		return fmt.Errorf("creating generations dir: %w", err)
+		return nil, fmt.Errorf("creating generations dir: %w", err)
 	}
 	tmpDir, err := os.MkdirTemp(gensDir, buildTmpPrefix+gensig+"-")
 	if err != nil {
-		return fmt.Errorf("creating migration temp dir: %w", err)
+		return nil, fmt.Errorf("creating migration temp dir: %w", err)
 	}
 
 	type move struct{ from, to string }
@@ -1347,7 +1469,7 @@ func adoptFlatShards(cpath, gensig string, shardDirs []string) error {
 	for _, sd := range shardDirs {
 		dst := filepath.Join(tmpDir, filepath.Base(sd))
 		if err := os.Rename(sd, dst); err != nil {
-			return fmt.Errorf("moving flat shard %s: %w", filepath.Base(sd), err)
+			return nil, fmt.Errorf("moving flat shard %s: %w", filepath.Base(sd), err)
 		}
 		moved = append(moved, move{from: sd, to: dst})
 	}
@@ -1358,31 +1480,46 @@ func adoptFlatShards(cpath, gensig string, shardDirs []string) error {
 	if src := manifestPath(cpath); fileExists(src) {
 		dst := manifestPath(tmpDir)
 		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("moving flat manifest: %w", err)
+			return nil, fmt.Errorf("moving flat manifest: %w", err)
 		}
 		moved = append(moved, move{from: src, to: dst})
 	}
 
 	// Write READY LAST, then adopt atomically (temp → g/<gensig>).
 	if err := writeReadySentinel(tmpDir, gensig); err != nil {
-		return fmt.Errorf("writing READY sentinel: %w", err)
+		return nil, fmt.Errorf("writing READY sentinel: %w", err)
+	}
+
+	// The claim goes in BEFORE the adopt, so the generation is already held the
+	// instant it becomes visible. See buildGeneration's doc comment.
+	var reg *readerRegistration
+	if claim {
+		if reg, err = claimReader(tmpDir, generationDir(cpath, gensig)); err != nil {
+			return nil, fmt.Errorf("claiming the generation %q this migration adopted: %w", gensig, err)
+		}
 	}
 
 	genDir := generationDir(cpath, gensig)
 	if err := os.Rename(tmpDir, genDir); err != nil {
+		// The claim never reached the arena. Close removes it from the temp dir it
+		// is still in, and does not block, because its heartbeat never started.
+		reg.Close()
 		if generationReadyDir(genDir) {
 			// A concurrent migrator/builder adopted this gensig first. Leave
 			// committed=false so the deferred rollback restores our flat cache as a
 			// fallback; the winner's equivalent (same-gensig) generation is what
-			// callers open.
+			// callers open — and, being someone else's already-published generation,
+			// it can only be claimed post-adopt.
 			slog.Info("migration: a concurrent process adopted this generation first; "+
 				"keeping the flat cache as fallback", "gen", gensig)
-			return nil
+			return claimBuiltGeneration(genDir, claim)
 		}
-		return fmt.Errorf("adopting migrated generation %q: %w", gensig, err)
+		return nil, fmt.Errorf("adopting migrated generation %q: %w", gensig, err)
 	}
 	committed = true
-	return nil
+	// The entry moved with the directory; only now does reg.path name a real file.
+	reg.start()
+	return reg, nil
 }
 
 // fileExists reports whether path exists and is a regular file.

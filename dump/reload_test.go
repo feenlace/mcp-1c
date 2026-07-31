@@ -461,7 +461,7 @@ func TestReload_RefusedWhileNotReady(t *testing.T) {
 	if _, err := ph.Reload(); !errors.Is(err, ErrReloadNotReady) {
 		t.Fatalf("Reload on a not-ready index: %v, want ErrReloadNotReady", err)
 	}
-	ph.FinishServeOpen(t.TempDir(), "нет-такого-поколения", nil)
+	ph.FinishServeOpen(t.TempDir(), unclaimedGeneration("нет-такого-поколения"), nil)
 	<-ph.Done()
 	if _, err := ph.Reload(); err == nil {
 		t.Fatal("Reload on an index whose build failed reported success")

@@ -783,18 +783,22 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 	}
 	genDir := generationDir(cpath, gensig)
 
-	// Force-rebuild semantics: BuildGeneration is content-addressed and no-ops on an
+	// Force-rebuild semantics: a build is content-addressed and no-ops on an
 	// already-READY gensig, so to honor --reindex (e.g. recovering a corrupt cache)
 	// drop the current generation first — but ONLY if no live reader holds it (never
 	// wipe a generation a concurrent serve has memory-mapped). forceDropGeneration is
 	// the single force-drop primitive shared with the concurrent serve path.
-	forceDropGeneration(genDir, gensig)
-
-	if err := BuildGeneration(dir, cacheDir, gensig); err != nil {
+	//
+	// withClaim, and the claim is handed straight to the attach below. Building and
+	// only then claiming would publish this generation into the shared arena READY
+	// and held by nobody, and a co-located reaper firing in that window deletes the
+	// generation this reindex is about to serve.
+	reg, err := forceRebuildGeneration(dir, cacheDir, gensig, withClaim)
+	if err != nil {
 		return fmt.Errorf("reindex: building generation: %w", err)
 	}
 
-	if err := idx.attachReadOnlyShards(genDir); err != nil {
+	if err := idx.attachReadOnlyShards(genDir, reg); err != nil {
 		return err
 	}
 	if err := idx.loadNamesReadOnly(genDir); err != nil {
@@ -2390,7 +2394,7 @@ func (idx *Index) saveManifest(cacheDir string) {
 // It takes reloadMu, so a Reload in flight completes its swap first and Close
 // then frees the shards the reload published rather than the ones it retired.
 // A reload cannot be interrupted mid-build (BuildGeneration is synchronous, the
-// same limitation prepareServeGeneration documents), so Close can wait for one.
+// same limitation PrepareServeGeneration documents), so Close can wait for one.
 func (idx *Index) Close() error {
 	idx.cancel()
 	<-idx.done

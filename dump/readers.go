@@ -107,13 +107,24 @@ type readerRegistration struct {
 // claim-by-rename (claimGenerationForRemoval), make that window FAIL-CLOSED and
 // LOUD — the loser refuses to serve and says why — but they do not remove it.
 //
-// The serve open sits inside that window. cmd/mcp-1c's prepareServeGeneration
-// calls BuildGeneration and only then opens, and the exported OpenForServe walks
-// the whole dump again for GenSig before it reaches this claim; every instruction
-// in between is window. Only a caller that owns the generation while it is still
-// PRIVATE can avoid the window rather than survive it, and that is what
-// buildGeneration does with claimReader(tmpDir, genDir). Closing it for the serve
-// open is a separate change and is NOT done here.
+// WHAT NO LONGER SITS INSIDE IT. Every path that PRODUCES the generation it is
+// about to serve now claims it while it is still private and adopts the two
+// together, so none of them reaches this function: the build (buildGeneration
+// with withClaim), the flat-cache adopt (adoptFlatShards), the --reindex cold
+// rebuild (forceRebuildGeneration) and the serve open built on them
+// (PrepareServeGeneration). A generation this process produced is therefore never
+// observable as READY-and-unclaimed, so a reaper never has anything to take and
+// never renames it away underneath the open.
+//
+// WHAT STILL DOES, and cannot be moved out of it. A generation this process did
+// NOT produce — one already READY in the arena when the open started, built by a
+// co-located process or by a previous run — has no private phase this process
+// could have claimed it in. It has been sitting unclaimed for as long as it has
+// existed, so the exposure is not a window this code opens but the generation's
+// whole idle life, and the only sound answer is the fail-closed one below: claim
+// it, verify the claim is visible and READY survived, and refuse if either fails.
+// PrepareServeGeneration's ready fast path and OpenForServe's are the two callers
+// that land here.
 func registerReader(genDir string) (*readerRegistration, error) {
 	reg, err := claimReader(genDir, genDir)
 	if err != nil {

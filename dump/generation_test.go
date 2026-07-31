@@ -630,7 +630,7 @@ func TestMigrateFlatToGeneration_AdoptsExistingShardsWithoutRebuild(t *testing.T
 	}
 	before := snapshotShardTree(t, flatShards)
 
-	g, migrated, err := migrateFlatToGeneration(dir, cacheDir)
+	g, _, migrated, err := migrateFlatToGeneration(dir, cacheDir, noClaim)
 	if err != nil {
 		t.Fatalf("migrateFlatToGeneration: %v", err)
 	}
@@ -733,7 +733,7 @@ func TestMigrateFlatToGeneration_UnstampedLegacyManifest(t *testing.T) {
 	}
 	before := snapshotShardTree(t, flatShards)
 
-	g, migrated, err := migrateFlatToGeneration(dir, cacheDir)
+	g, _, migrated, err := migrateFlatToGeneration(dir, cacheDir, noClaim)
 	if err != nil {
 		t.Fatalf("migrateFlatToGeneration: %v", err)
 	}
@@ -811,7 +811,7 @@ func TestMigrateFlatToGeneration_SchemaMismatchRebuildsInsteadOfAdopting(t *test
 		t.Fatal("expected flat shards before migration")
 	}
 
-	g, migrated, err := migrateFlatToGeneration(dir, cacheDir)
+	g, _, migrated, err := migrateFlatToGeneration(dir, cacheDir, noClaim)
 	if err != nil {
 		t.Fatalf("migrateFlatToGeneration: %v", err)
 	}

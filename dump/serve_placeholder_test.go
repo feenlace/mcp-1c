@@ -1,12 +1,33 @@
 package dump
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// mustPrepareServeGeneration runs the real serve prepare and returns the CLAIMED
+// generation handle FinishServeOpen consumes. Tests go through the production
+// path rather than fabricating a handle, so a handle that stopped carrying a
+// usable claim would surface here.
+func mustPrepareServeGeneration(t *testing.T, dir, cacheDir string) *ServeGeneration {
+	t.Helper()
+	gen, err := PrepareServeGeneration(context.Background(), dir, cacheDir, false)
+	if err != nil {
+		t.Fatalf("PrepareServeGeneration: %v", err)
+	}
+	return gen
+}
+
+// unclaimedGeneration names a generation WITHOUT a claim on it, for the failure
+// tests: the generation does not exist, so there was never anything to claim.
+// FinishServeOpen must refuse it before it reaches the attach.
+func unclaimedGeneration(gensig string) *ServeGeneration {
+	return &ServeGeneration{gensig: gensig}
+}
 
 // chanClosed reports whether ch is already closed, without blocking.
 func chanClosed(ch <-chan struct{}) bool {
@@ -84,7 +105,7 @@ func TestServePlaceholder_FinishSuccess(t *testing.T) {
 	}
 
 	// --- finish in place ---
-	ph.FinishServeOpen(cacheDir, gensig, nil)
+	ph.FinishServeOpen(cacheDir, mustPrepareServeGeneration(t, dir, cacheDir), nil)
 
 	if !ph.Ready() {
 		t.Fatalf("Ready() must be true after a successful FinishServeOpen; BuildError=%v", ph.BuildError())
@@ -129,7 +150,7 @@ func TestServePlaceholder_FinishFailurePrepErr(t *testing.T) {
 
 	ph := NewServePlaceholder(dir)
 	sentinel := errors.New("simulated background build failure")
-	ph.FinishServeOpen(cacheDir, "deadbeefdeadbeef", sentinel)
+	ph.FinishServeOpen(cacheDir, nil, sentinel)
 
 	if ph.Ready() {
 		t.Fatal("Ready() must stay false after a failed FinishServeOpen")
@@ -160,7 +181,7 @@ func TestServePlaceholder_FinishMissingGeneration(t *testing.T) {
 
 	ph := NewServePlaceholder(dir)
 	// A gensig that was never built — generationReadyDir is false.
-	ph.FinishServeOpen(cacheDir, "0000000000000000", nil)
+	ph.FinishServeOpen(cacheDir, unclaimedGeneration("0000000000000000"), nil)
 
 	if ph.Ready() {
 		t.Fatal("Ready() must stay false when the generation is missing")
@@ -239,7 +260,7 @@ func TestServePlaceholder_ConcurrentWaitersAndFinish(t *testing.T) {
 
 	// Let the readers spin against the not-ready placeholder, then finish in place.
 	time.Sleep(20 * time.Millisecond)
-	ph.FinishServeOpen(cacheDir, gensig, nil)
+	ph.FinishServeOpen(cacheDir, mustPrepareServeGeneration(t, dir, cacheDir), nil)
 
 	waitGroupWithin(t, &waitersWG, 30*time.Second, "Done()-waiters")
 	close(stop)
