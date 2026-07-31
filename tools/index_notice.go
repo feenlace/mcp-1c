@@ -102,11 +102,16 @@ func indexProtectionNotice(st dump.UnprotectedState) string {
 // the page could not swallow it (writeObjectWarnings). A wrapper has no return path
 // to miss, including ones added later.
 //
-// ERRORS ARE DECORATED TOO. The MCP SDK turns a handler error into a CallToolResult
-// with IsError and the error text as its content, so it is user-visible output like
-// any other, and a failing call on a frozen cache is exactly when the reason
-// matters. Wrapping keeps the original error in the chain, so errors.Is and
-// errors.As on it keep working.
+// ERRORS ARE DECORATED TOO, AND THE NOTICE GOES FIRST ON THEM AS WELL. The MCP SDK
+// turns a handler error into a CallToolResult with IsError and the error text as its
+// content, so it is user-visible output like any other, and a failing call on a
+// frozen cache is exactly when the reason matters most. The notice used to be
+// appended AFTER the error text, which put it at the end of a message a client is
+// free to truncate: the invisible-warning defect again, in the one place where the
+// warning is the answer. The success path has always put it first, and the two are
+// the same statement about the same answer, so they must not sit in different places
+// depending on how the call went. Wrapping keeps the original error in the chain, so
+// errors.Is and errors.As on it keep working; only the order of the two halves moved.
 //
 // The state is read AFTER the handler runs, so a reload_dump call that swaps the
 // generation is described by the state it left behind rather than the one it found.
@@ -118,7 +123,9 @@ func withIndexProtectionNotice(index *dump.Index, h mcp.ToolHandler) mcp.ToolHan
 			return res, err
 		}
 		if err != nil {
-			return res, fmt.Errorf("%w\n\n%s", err, notice)
+			// The notice already ends in a newline, so one more separates it from the
+			// error text exactly as prependNotice separates it from a body.
+			return res, fmt.Errorf("%s\n%w", notice, err)
 		}
 		return prependNotice(res, notice), nil
 	}

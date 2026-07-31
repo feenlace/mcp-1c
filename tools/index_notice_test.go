@@ -276,6 +276,20 @@ func TestIndexNotice_AFailingCallIsDecoratedToo(t *testing.T) {
 	if !strings.Contains(err.Error(), noticeMarker) {
 		t.Errorf("the error text carries no notice:\n%v", err)
 	}
+	// AND IT IS FIRST HERE TOO. It used to be appended after the error text, which put
+	// it at the end of a message a client is free to truncate, and a failing call on a
+	// frozen cache is exactly when the reason matters most. The success path has always
+	// put it first; the two are the same statement about the same answer and must not
+	// sit in different places depending on how the call went.
+	if !strings.HasPrefix(err.Error(), "> ") {
+		t.Errorf("the notice is not the first thing in the error text; it starts with %q",
+			strings.SplitN(err.Error(), "\n", 2)[0])
+	}
+	// AND THE ERROR IS STILL THERE, in full. A notice that displaced the reason would
+	// be worse than one that came second.
+	if !strings.Contains(err.Error(), sentinel.Error()) {
+		t.Errorf("the original error text was lost: %v", err)
+	}
 	// THE CHAIN SURVIVES. A wrapper that reformatted the error into a string would
 	// break every errors.Is in every caller above it, silently.
 	if !errors.Is(err, sentinel) {
