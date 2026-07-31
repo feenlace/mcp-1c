@@ -493,8 +493,10 @@ func (idx *Index) attachReadOnlyShards(genDir string, held *readerRegistration) 
 	if reg == nil {
 		reg = claimOrServeUnprotected(genDir)
 	}
-	idx.readerReg = reg
-	idx.setUnprotected(reg.unprotectedReason())
+	// adoptClaim installs the claim, tells it which Index is now serving behind it,
+	// and publishes its state, all under one lock. The middle part is what lets a
+	// claim LOST later reach the same tool response a claim never taken reaches.
+	idx.adoptClaim(reg)
 
 	shardDirs := cacheShardDirs(genDir)
 	// A GENERATION THAT VANISHED IS NOT AN EMPTY GENERATION, and nothing below can
@@ -514,25 +516,18 @@ func (idx *Index) attachReadOnlyShards(genDir string, held *readerRegistration) 
 	// empty dump builds a generation that keeps its sentinel and has nothing to
 	// shard.
 	if len(shardDirs) == 0 && !generationReadyDir(genDir) {
-		if reg != nil {
-			reg.Close()
-		}
-		idx.readerReg = nil
-		idx.setUnprotected("")
+		// Close FIRST and outside mu (dropClaim takes it): Close waits for the
+		// heartbeat goroutine, and the heartbeat takes mu to report a lost claim.
+		reg.Close()
+		idx.dropClaim()
 		return fmt.Errorf("generation %s has no shards and no %s sentinel, so it was removed while this "+
 			"open was resolving it; refusing to serve an index with nothing in it",
 			filepath.Base(genDir), readySentinelName)
 	}
 	shards, err := openCachedShards(shardDirs, true, defaultBoltTimeout)
 	if err != nil {
-		if idx.readerReg != nil {
-			idx.readerReg.Close()
-			idx.readerReg = nil
-		}
-		// Nothing is being served, so nothing is being served unprotected. Leaving the
-		// reason set would put a notice about an index in use on top of every answer
-		// of an index that never opened.
-		idx.setUnprotected("")
+		reg.Close()
+		idx.dropClaim()
 		return fmt.Errorf("opening read-only generation shards: %w", err)
 	}
 	idx.readOnly = true

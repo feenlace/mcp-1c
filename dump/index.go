@@ -487,23 +487,27 @@ type Index struct {
 	// grows only to what was actually requested rather than to dump size. Revisit
 	// if a deployment reports resident memory tracking the corpus.
 	contentByName map[string]cachedModule
-	pathByName    map[string]string   // docID -> absolute file path (always populated)
-	pathToDocID   map[string]string   // relative path (ToSlash) -> module name
-	pathIndex     *PathIndex          // decomposed path index for fast category/module filtering
-	lockDir       string              // cache dir whose serve-lock this index holds (empty = none); released in Close
-	readOnly      bool                // true when shards were opened read-only (immutable generation serve); runtime base writes are rejected
-	readerReg     *readerRegistration // live reader-registry handle for the served generation (nil = none); deregistered in Close
+	pathByName    map[string]string // docID -> absolute file path (always populated)
+	pathToDocID   map[string]string // relative path (ToSlash) -> module name
+	pathIndex     *PathIndex        // decomposed path index for fast category/module filtering
+	lockDir       string            // cache dir whose serve-lock this index holds (empty = none); released in Close
+	readOnly      bool              // true when shards were opened read-only (immutable generation serve); runtime base writes are rejected
+	// readerReg is the live reader-registry handle for the served generation (nil =
+	// none); it is deregistered in Close. It is written and read under mu, by
+	// adoptClaim / dropClaim / swapGeneration and by noteClaimState, which is what
+	// lets a heartbeat report be checked for identity against the generation
+	// currently published rather than against one that has been retired.
+	readerReg *readerRegistration
 	// unprotected carries WHY the attached generation is being served without a
-	// reader claim, or "" while it is protected. It is what UnprotectedReason
-	// surfaces into the MCP tool response.
+	// reader claim, or the zero value while it is protected. It is what
+	// UnprotectedReason and Unprotected surface into the MCP tool response.
 	//
 	// It is an atomic and not a plain field guarded by mu because of who writes it
-	// and who reads it: attachReadOnlyShards writes it from the background open
-	// goroutine without mu, swapGeneration replaces it under mu, and every tool call
-	// reads it on the request goroutine. An atomic is the one shape correct for all
-	// three; a mu-guarded field would be a data race against the open, and reading
-	// idx.readerReg directly would be the same race one level down.
-	unprotected atomic.Pointer[string]
+	// and who reads it: adoptClaim writes it from the background open goroutine,
+	// swapGeneration replaces it, the heartbeat replaces it when a claim is lost or
+	// comes back, and every tool call reads it on the request goroutine. An atomic
+	// keeps the READ off mu, so a tool call never contends with a reload for it.
+	unprotected atomic.Pointer[UnprotectedState]
 	// cacheDir is the cache location this index was opened with, in NewIndex
 	// semantics (empty = the platform cache dir). Reload needs it to build the
 	// replacement generation under the SAME cache the current one lives in;
@@ -2243,6 +2247,28 @@ func (idx *Index) Dir() string {
 	return idx.dir
 }
 
+// UnprotectedState says whether the index generation currently attached is being
+// served WITHOUT a reader claim, and by which of the two routes into that state.
+//
+// THE TWO ROUTES ARE THE SAME FACT AND A DIFFERENT SENTENCE. Either way the
+// generation is being served, is answering correctly, and can be removed by a
+// co-located process while it is in use. But a claim that could never be WRITTEN is
+// fixed by making the cache writable, while a claim that WAS written and has since
+// stopped being refreshable is not: the cache was writable, and telling that
+// operator to make it writable would be an instruction about a state they are not
+// in. One flag, so the tool layer can pick the true sentence; one atomic load, so
+// the flag and the reason can never describe different moments.
+type UnprotectedState struct {
+	// Reason is why the generation is unprotected, in English, for the log and for
+	// tests. It is "" exactly when the generation IS protected, so it doubles as the
+	// question "is there anything to say", which is all the tool layer asks first.
+	Reason string
+	// ClaimLost distinguishes the second route: a claim this process took and can no
+	// longer refresh. It is false both when the serve is protected and when the claim
+	// could never be written at all.
+	ClaimLost bool
+}
+
 // UnprotectedReason returns why the index generation currently attached is being
 // served WITHOUT a reader claim, or "" when it is protected.
 //
@@ -2259,24 +2285,85 @@ func (idx *Index) Dir() string {
 // do about either.
 //
 // It is read per call, never cached by the caller: the open finishes in the
-// background after the index is handed out, and Reload swaps the attached
-// generation, so the answer changes during the process's life.
+// background after the index is handed out, Reload swaps the attached generation,
+// and the claim behind a generation can be lost (or come back) mid-process, so the
+// answer changes during the process's life.
 func (idx *Index) UnprotectedReason() string {
+	return idx.Unprotected().Reason
+}
+
+// Unprotected returns the whole protection state in one load, for the caller that
+// has to choose what to SAY rather than only whether to say anything. Reading
+// UnprotectedReason and a second accessor instead would let a reload land between
+// the two and produce a sentence about one generation with a flag from another.
+func (idx *Index) Unprotected() UnprotectedState {
 	if idx == nil {
-		return ""
+		return UnprotectedState{}
 	}
 	if p := idx.unprotected.Load(); p != nil {
 		return *p
 	}
-	return ""
+	return UnprotectedState{}
 }
 
-// setUnprotected records the reason the attached generation is unprotected, or ""
-// when it is protected. Every site that installs or replaces idx.readerReg must
-// call it, so the notice can never describe a generation that is no longer the one
-// being served.
-func (idx *Index) setUnprotected(reason string) {
-	idx.unprotected.Store(&reason)
+// setUnprotected records the state of the attached generation. Every site that
+// installs, replaces or drops idx.readerReg must call it, so the notice can never
+// describe a generation that is no longer the one being served. Callers hold mu (or
+// are the constructor path that nothing else can observe yet); the store itself is
+// atomic so readers never take mu.
+func (idx *Index) setUnprotected(st UnprotectedState) {
+	idx.unprotected.Store(&st)
+}
+
+// adoptClaim makes reg the claim behind the generation idx is about to serve and
+// publishes what that claim currently says about protection, both under mu.
+//
+// The two happen together, and under the SAME mutex swapGeneration uses, because
+// they are one fact. reg's heartbeat is already running by the time this is called
+// (registerReader starts it before the attach), so a claim can be lost during the
+// open; adopting the registration and reading its state under one lock is what
+// makes the loss either visible in the state published here or delivered by the
+// heartbeat's own report afterwards, never dropped between the two.
+func (idx *Index) adoptClaim(reg *readerRegistration) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.readerReg = reg
+	reg.adoptedBy(idx)
+	idx.setUnprotected(reg.protectionState())
+}
+
+// dropClaim forgets the claim after an open that failed. Nothing is being served,
+// so nothing is being served unprotected: leaving the reason set would put a notice
+// about an index in use on top of every answer of an index that never opened.
+//
+// It must be called AFTER the registration's own Close and never while holding mu,
+// because that Close waits for the heartbeat goroutine to exit and the heartbeat
+// takes mu to report.
+func (idx *Index) dropClaim() {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.readerReg = nil
+	idx.setUnprotected(UnprotectedState{})
+}
+
+// noteClaimState publishes a state change a registration's heartbeat observed, but
+// ONLY while that registration is still the one being served.
+//
+// THE IDENTITY CHECK IS THE WHOLE FUNCTION, and it is what keeps an orderly
+// generation retirement silent. Reload publishes the new generation and its claim
+// inside swapGeneration's mu section, then closes the old registration outside it;
+// between those two a beat of the old heartbeat can still run. Without the check it
+// would overwrite the state of the generation that is now serving with a fact about
+// the one that is not. With it, the outcome is decided by the mutex: a report that
+// wins the lock first is published and then replaced by the swap, and one that
+// arrives after the swap is dropped.
+func (idx *Index) noteClaimState(reg *readerRegistration, st UnprotectedState) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.readerReg != reg {
+		return
+	}
+	idx.setUnprotected(st)
 }
 
 // GetPathIndex returns the path index for fast category/module filtering.
@@ -2448,10 +2535,18 @@ func (idx *Index) Close() error {
 	idx.reloadMu.Lock()
 	defer idx.reloadMu.Unlock()
 	idx.closed.Store(true)
-	if idx.readerReg != nil {
+	// Read the registration under mu (adoptClaim and swapGeneration write it there)
+	// and close it OUTSIDE, because that Close waits for the heartbeat goroutine and
+	// the heartbeat takes mu to report a lost claim.
+	idx.mu.Lock()
+	reg := idx.readerReg
+	idx.mu.Unlock()
+	if reg != nil {
 		// Deregister from the generation's readers/ registry so GC can reclaim the
-		// generation once no live reader holds it.
-		idx.readerReg.Close()
+		// generation once no live reader holds it. Close stops the heartbeat and only
+		// THEN removes the entry, so this orderly release is never seen as a lost
+		// claim and never puts a notice on anything.
+		reg.Close()
 	}
 	if idx.lockDir != "" {
 		removeCacheLock(idx.lockDir)

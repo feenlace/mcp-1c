@@ -29,6 +29,10 @@ package tools
 //     a real failing Reload on a frozen cache: producing one needs a dump that
 //     changes under a frozen cache, and that state has no service at all, so there
 //     is no handler call left to decorate.
+//   - The RECOVERY of a lost claim (the entry comes back and the notice stops) is
+//     pinned in dump/lost_claim_test.go, on the state, and not again here: this
+//     layer's whole job is to turn a state into a sentence, and it does not know
+//     which way the state last moved.
 
 import (
 	"context"
@@ -40,6 +44,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feenlace/mcp-1c/dump"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -48,7 +53,21 @@ import (
 // noticeMarker is matched as a PHRASE and not through indexUnprotectedNotice, like
 // every other marker in this package's tests, so these tests fail against a build
 // whose notice says something else rather than tautologically agreeing with it.
+//
+// It is the sentence BOTH notices open with, deliberately: it is the fact a reader
+// has to act on, and it is the same fact either way. What tells the two apart is
+// noticeUnwritableMarker and noticeLostMarker below.
 const noticeMarker = "индекс выгрузки отдаётся без защиты"
+
+// noticeUnwritableMarker and noticeLostMarker are the halves that must NOT be
+// interchangeable. The first describes a cache that refused the write; the second a
+// cache that took it and a claim that has since stopped being refreshable. Telling a
+// user in the second state to make their cache writable is an instruction about a
+// state they are not in.
+const (
+	noticeUnwritableMarker = "Серверу не удалось записать заявку читателя"
+	noticeLostMarker       = "больше не удаётся обновить"
+)
 
 // noticeTerm is carried by every module these tests write, so "the index still
 // answers" is one query away.
@@ -298,12 +317,17 @@ func TestIndexNotice_NoticeSurvivesAResultWithNoTextBlock(t *testing.T) {
 }
 
 // TestIndexNotice_TheNoticeCarriesNoDash pins the house rule for customer-facing
-// Russian, with the check applied to the shipped constant rather than to a copy.
+// Russian, with the check applied to the shipped constants rather than to a copy.
 func TestIndexNotice_TheNoticeCarriesNoDash(t *testing.T) {
-	for _, r := range []rune{'—', '–', '‒', '―', '−'} {
-		if strings.ContainsRune(indexUnprotectedNotice, r) {
-			t.Errorf("the notice contains %q (U+%04X), which customer-facing RU text must not carry",
-				string(r), r)
+	for name, notice := range map[string]string{
+		"indexUnprotectedNotice": indexUnprotectedNotice,
+		"indexClaimLostNotice":   indexClaimLostNotice,
+	} {
+		for _, r := range []rune{'—', '–', '‒', '―', '−'} {
+			if strings.ContainsRune(notice, r) {
+				t.Errorf("%s contains %q (U+%04X), which customer-facing RU text must not carry",
+					name, string(r), r)
+			}
 		}
 	}
 	// POSITIVE CONTROL: the check can fire. Without it a test comparing against an
@@ -311,4 +335,152 @@ func TestIndexNotice_TheNoticeCarriesNoDash(t *testing.T) {
 	if !strings.ContainsRune("текст — с тире", '—') {
 		t.Fatal("the control failed: the dash check cannot detect an em dash")
 	}
+}
+
+// TestIndexNotice_TheSentenceMatchesTheState pins the choice between the two
+// notices, which is the whole of what this layer decides.
+//
+// A single notice for both states would be a general sentence standing in for a
+// false specific: «Серверу не удалось записать заявку читателя» about a cache that
+// took the write is not a rounding error, it is a wrong instruction at the moment
+// the reader is deciding what to do.
+func TestIndexNotice_TheSentenceMatchesTheState(t *testing.T) {
+	cases := []struct {
+		name  string
+		state dump.UnprotectedState
+		want  string
+	}{
+		{"protected", dump.UnprotectedState{}, ""},
+		{"protected with a stray flag", dump.UnprotectedState{ClaimLost: true}, ""},
+		{"the claim could not be written", dump.UnprotectedState{Reason: "claim refused"}, indexUnprotectedNotice},
+		{"the claim was lost", dump.UnprotectedState{Reason: "claim lost", ClaimLost: true}, indexClaimLostNotice},
+	}
+	for _, c := range cases {
+		if got := indexProtectionNotice(c.state); got != c.want {
+			t.Errorf("%s: got notice %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// AND THE TWO SENTENCES ARE ACTUALLY DIFFERENT, matched as phrases rather than
+	// through the constants, so a build whose two notices had drifted into the same
+	// text would fail here instead of agreeing with itself.
+	if !strings.Contains(indexUnprotectedNotice, noticeUnwritableMarker) {
+		t.Errorf("the unwritable-cache notice no longer says what failed: %q", indexUnprotectedNotice)
+	}
+	if strings.Contains(indexClaimLostNotice, noticeUnwritableMarker) {
+		t.Errorf("the lost-claim notice tells the user their cache refused a write it accepted: %q",
+			indexClaimLostNotice)
+	}
+	if !strings.Contains(indexClaimLostNotice, noticeLostMarker) {
+		t.Errorf("the lost-claim notice does not say what actually happened: %q", indexClaimLostNotice)
+	}
+	// BOTH NAME A REMEDY. A warning with no remedy is noise by the second time, and
+	// the remedies differ: a cache that already took the write is not fixed by being
+	// made writable, so the lost-claim notice offers a restart instead.
+	for _, want := range []string{"MCP_1C_CACHE_DIR", "--cache-dir"} {
+		if !strings.Contains(indexClaimLostNotice, want) {
+			t.Errorf("the lost-claim notice does not name %q as a remedy: %q", want, indexClaimLostNotice)
+		}
+	}
+	if !strings.Contains(indexClaimLostNotice, "Перезапустите сервер") {
+		t.Errorf("the lost-claim notice does not offer the restart that takes a fresh claim: %q",
+			indexClaimLostNotice)
+	}
+	if strings.Contains(indexClaimLostNotice, "доступным для записи") {
+		t.Errorf("the lost-claim notice tells the user to make a cache writable that already is: %q",
+			indexClaimLostNotice)
+	}
+}
+
+// TestIndexNotice_ALostClaimReachesTheRealHandler is the end-to-end one, and it is
+// the only test on this side that runs the PRODUCTION heartbeat interval, so nothing
+// between the registry entry and the sentence is stubbed.
+//
+// It costs one heartbeat of wall clock, and that is the point: the shortened beat
+// that dump/lost_claim_test.go uses is a field only tests set, so a build in which
+// the heartbeat no longer routes anything to the Index would still pass over there
+// if the seam itself were what carried the report. Here nothing is shortened.
+func TestIndexNotice_ALostClaimReachesTheRealHandler(t *testing.T) {
+	dumpDir := noticeDump(t)
+	cacheDir := t.TempDir()
+
+	gen, err := dump.PrepareServeGeneration(context.Background(), dumpDir, cacheDir, false)
+	if err != nil {
+		t.Fatalf("warming the cache: %v", err)
+	}
+	gensig := gen.Gensig()
+	gen.Release()
+
+	idx, err := dump.OpenGenerationReadOnly(dumpDir, cacheDir, gensig)
+	if err != nil {
+		t.Fatalf("opening the generation for serving: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	<-idx.Done()
+
+	// CONTROL: a healthy claim, and an answer that says nothing about protection.
+	if st := idx.Unprotected(); st.Reason != "" {
+		t.Fatalf("the open is already unprotected, so nothing below tests the transition: %+v", st)
+	}
+	if text := callSearch(t, idx); strings.Contains(text, noticeMarker) {
+		t.Fatalf("the control failed: a healthy index already warns:\n%s", text)
+	}
+
+	entry := noticeReaderEntry(t, cacheDir)
+	if err := os.Remove(entry); err != nil {
+		t.Fatalf("removing the reader entry, which is what a peer's reaper does: %v", err)
+	}
+
+	// One production heartbeat plus slack. Nothing here shortens it.
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) && idx.UnprotectedReason() == "" {
+		time.Sleep(250 * time.Millisecond)
+	}
+	if idx.UnprotectedReason() == "" {
+		t.Fatal("the production heartbeat never reported the lost claim to the index")
+	}
+
+	text := callSearch(t, idx)
+	if !strings.Contains(text, noticeMarker) {
+		t.Fatalf("a search answered out of a generation nothing protects carries no notice:\n%s", text)
+	}
+	if !strings.HasPrefix(text, "> ") {
+		t.Errorf("the notice is not the first thing in the answer; it starts with %q",
+			strings.SplitN(text, "\n", 2)[0])
+	}
+	// THE RIGHT SENTENCE. This is the assertion the layer boundary exists for: the
+	// cache here took the claim write, so the unwritable-cache text would be false.
+	if !strings.Contains(text, noticeLostMarker) {
+		t.Errorf("the answer carries the wrong notice for a claim that was lost:\n%s", text)
+	}
+	if strings.Contains(text, noticeUnwritableMarker) {
+		t.Errorf("the answer tells the user their cache refused a write it accepted:\n%s", text)
+	}
+	// AND IT IS STILL AN ANSWER.
+	if searchRenderedMatches(text) == 0 {
+		t.Errorf("the unprotected index answered with no matches at all:\n%s", text)
+	}
+}
+
+// noticeReaderEntry returns the single reader-registry entry under cacheDir. It
+// walks rather than recomputing a generation signature, so it stays independent of
+// how one is derived.
+func noticeReaderEntry(t *testing.T, cacheDir string) string {
+	t.Helper()
+	var found []string
+	if err := filepath.WalkDir(cacheDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && filepath.Base(filepath.Dir(p)) == "readers" {
+			found = append(found, p)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walking the cache: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected exactly one reader entry under %s, found %d: %v", cacheDir, len(found), found)
+	}
+	return found[0]
 }

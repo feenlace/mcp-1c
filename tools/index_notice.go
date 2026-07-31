@@ -49,6 +49,49 @@ const indexUnprotectedNotice = "> ВНИМАНИЕ: индекс выгрузк�
 	"прямо во время работы с ним. Выделите этому серверу отдельный каталог кэша (переменная " +
 	"`MCP_1C_CACHE_DIR` или флаг `--cache-dir`) либо сделайте текущий каталог кэша доступным для записи.\n"
 
+// indexClaimLostNotice is the same warning about the other way into the same state:
+// the claim WAS written, and this server can no longer refresh it.
+//
+// IT IS A SEPARATE SENTENCE BECAUSE THE FIRST ONE WOULD BE FALSE HERE. «Серверу не
+// удалось записать заявку читателя» describes a cache that refused the write; this
+// server's cache accepted it, and the entry then stopped being refreshable. The
+// remedy differs with it: making the cache writable fixes nothing when it already
+// was, so what is offered is a restart, which takes a fresh claim, and the separate
+// cache directory that stops a co-located process reaching this one's generations.
+//
+// It says what was OBSERVED and stops there. The touch failed and this server is no
+// longer counted among the holders; who removed the entry, and whether it was
+// removed at all rather than merely become untouchable, is not something the server
+// measured, and a notice that named a cause it did not measure would be a guess in
+// the user's face.
+//
+// The first sentence is deliberately identical to the one above, because the fact it
+// states is identical and it is the sentence a reader has to act on.
+//
+// Customer-facing RU: no тире.
+const indexClaimLostNotice = "> ВНИМАНИЕ: индекс выгрузки отдаётся без защиты. Заявку читателя, " +
+	"которую сервер записал в каталоге кэша, больше не удаётся обновить, поэтому сервер уже не " +
+	"числится среди тех, кто использует этот индекс, и другой процесс может удалить индекс прямо " +
+	"во время работы с ним. Перезапустите сервер либо выделите ему отдельный каталог кэша " +
+	"(переменная `MCP_1C_CACHE_DIR` или флаг `--cache-dir`).\n"
+
+// indexProtectionNotice picks the line that is TRUE of the state, or "" when there
+// is nothing to say.
+//
+// The state arrives as ONE value read in ONE atomic load (dump.Index.Unprotected),
+// so the flag and the reason always describe the same moment. Asking the index twice
+// instead would let a reload land between the two questions and produce the sentence
+// for one generation with the flag from another.
+func indexProtectionNotice(st dump.UnprotectedState) string {
+	if st.Reason == "" {
+		return ""
+	}
+	if st.ClaimLost {
+		return indexClaimLostNotice
+	}
+	return indexUnprotectedNotice
+}
+
 // withIndexProtectionNotice wraps an index-backed tool handler so that every
 // response it produces carries indexUnprotectedNotice while the attached generation
 // is unprotected, and none of them carries it otherwise.
@@ -70,13 +113,14 @@ const indexUnprotectedNotice = "> ВНИМАНИЕ: индекс выгрузк�
 func withIndexProtectionNotice(index *dump.Index, h mcp.ToolHandler) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		res, err := h(ctx, req)
-		if index.UnprotectedReason() == "" {
+		notice := indexProtectionNotice(index.Unprotected())
+		if notice == "" {
 			return res, err
 		}
 		if err != nil {
-			return res, fmt.Errorf("%w\n\n%s", err, indexUnprotectedNotice)
+			return res, fmt.Errorf("%w\n\n%s", err, notice)
 		}
-		return prependNotice(res, indexUnprotectedNotice), nil
+		return prependNotice(res, notice), nil
 	}
 }
 

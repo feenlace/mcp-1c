@@ -116,10 +116,41 @@ type readerRegistration struct {
 	// channel to wait on before start, and an un-started claim must be removed from
 	// tmpPath, which is where it still is.
 	started atomic.Bool
-	// lost latches the first time the heartbeat finds the entry gone, so the "this
-	// serve is no longer protected" alarm is raised once rather than every
-	// readerHeartbeatInterval.
+	// lost is true while the heartbeat cannot refresh the entry, so the "this serve
+	// is no longer protected" alarm is raised on the TRANSITION rather than every
+	// readerHeartbeatInterval. It is cleared again if the entry becomes touchable,
+	// which is a state a reaper's rolled-back rename really does produce.
 	lost atomic.Bool
+	// owner is the Index serving the generation this claim protects, once one has
+	// adopted the registration; nil before that and for a registration no Index ever
+	// took. The heartbeat needs it because a claim lost AFTER it was taken has to
+	// reach the same place a claim that could never be taken reaches — the notice on
+	// the MCP tool response — and a log line under the cache directory is not a
+	// delivery.
+	//
+	// It is an atomic pointer because the adopt happens on the open goroutine AFTER
+	// registerReader has already started the heartbeat, so the write and the beat
+	// genuinely race. It does NOT decide whether a report is acted on: that is
+	// (*Index).noteClaimState, which re-checks identity under the mutex that
+	// publishes a generation swap.
+	owner atomic.Pointer[Index]
+	// releasing is set by Close BEFORE it stops the heartbeat, so an entry removed as
+	// part of an orderly release can never be read as a lost claim.
+	//
+	// WHY IT EXISTS ALONGSIDE THE CLOSE ORDERING. Close stops the beat, WAITS for the
+	// goroutine, and only then removes the entry, which already leaves no window. But
+	// that is a TIMING argument: it is true of the three lines as they are written, no
+	// test can force a tick into a window microseconds wide to prove it, and a future
+	// edit that reorders them reopens it silently. This makes the same property hold
+	// by STATE, which is the half a test can pin. A release announced is a release, and
+	// a claim released on purpose is never a claim lost.
+	releasing atomic.Bool
+	// beat is how often the heartbeat re-touches the entry. Zero selects
+	// readerHeartbeatInterval, which is the only value production ever uses; tests
+	// set a short one so a full lose-and-report cycle does not cost ten seconds of
+	// wall clock. It is a field and not a package-level var so tests running in
+	// parallel cannot change each other's timing.
+	beat time.Duration
 	// claimless marks a registration that records NOTHING on disk, because the claim
 	// could not be written. path and tmpPath are empty, there is no entry, the
 	// heartbeat never starts and Close removes nothing.
@@ -160,14 +191,79 @@ func claimlessRegistration(unprotected string) *readerRegistration {
 	}
 }
 
-// unprotectedReason returns why the generation this registration stands for is
-// being served without protection, or "" when it is protected — either by a real
-// claim, or by a filesystem on which nothing can be removed.
+// unprotectedReason returns why the generation this registration stands for could
+// not be CLAIMED, or "" when it was — either by a real claim, or by a filesystem on
+// which nothing can be removed. It is the claim-time half only and never changes;
+// what the user must be told right now is protectionState.
 func (r *readerRegistration) unprotectedReason() string {
 	if r == nil {
 		return ""
 	}
 	return r.unprotected
+}
+
+// protectionState is what the user must be told about the generation this
+// registration stands for, RIGHT NOW. It folds the two ways a serve ends up
+// unprotected into one answer:
+//
+//   - the claim could NEVER be written (claimless). Decided once, at claim time, by
+//     claimOrServeUnprotected, and fixed for the life of the registration;
+//   - the claim WAS written and can no longer be refreshed (lost). Decided by the
+//     heartbeat, and reversible.
+//
+// The two cannot both hold: start() refuses to run a heartbeat for a claimless
+// registration, so nothing ever sets lost on one, and a registration that took a
+// real claim has an empty unprotected. The claimless branch is tested first anyway,
+// so a future edit that made them overlap reports the permanent condition rather
+// than the transient one.
+func (r *readerRegistration) protectionState() UnprotectedState {
+	if r == nil {
+		return UnprotectedState{}
+	}
+	if r.unprotected != "" {
+		return UnprotectedState{Reason: r.unprotected}
+	}
+	if r.lost.Load() {
+		return UnprotectedState{Reason: lostClaimReason(r.path), ClaimLost: true}
+	}
+	return UnprotectedState{}
+}
+
+// lostClaimReason says what is true of a claim that can no longer be refreshed.
+//
+// It deliberately does NOT say the entry was deleted, or by whom. What was measured
+// is that the touch failed; naming a cause the code did not observe would be prose
+// about the system rather than a report of it, and the remedy is the same either
+// way.
+func lostClaimReason(entry string) string {
+	return fmt.Sprintf("the reader claim %s can no longer be refreshed, so this process is no longer "+
+		"recorded as holding the index generation it is serving and another process may remove that "+
+		"generation while it is in use", entry)
+}
+
+// adoptedBy records idx as the Index now serving the generation this claim stands
+// for. Called under idx.mu by the two places that install a registration on an
+// Index (adoptClaim and swapGeneration), so what those two publish and what a later
+// heartbeat report is checked against are the same thing.
+func (r *readerRegistration) adoptedBy(idx *Index) {
+	if r == nil {
+		return
+	}
+	r.owner.Store(idx)
+}
+
+// reportProtection pushes this registration's current state to the Index that
+// adopted it. A registration no Index has adopted reports to nobody; one that has
+// been RETIRED reports to noteClaimState, which drops it — the identity check
+// there, and not a flag here, is what decides that case, because it is the only
+// place that can decide it under the mutex publishing the swap.
+func (r *readerRegistration) reportProtection() {
+	if r == nil {
+		return
+	}
+	if idx := r.owner.Load(); idx != nil {
+		idx.noteClaimState(r, r.protectionState())
+	}
 }
 
 // registerReader records this process as a live reader of the ALREADY-PUBLISHED
@@ -414,34 +510,95 @@ func (r *readerRegistration) start() {
 // heartbeat keeps the registry entry's mtime fresh until Close stops it.
 func (r *readerRegistration) heartbeat() {
 	defer close(r.done)
-	t := time.NewTicker(readerHeartbeatInterval)
+	t := time.NewTicker(r.beatInterval())
 	defer t.Stop()
 	for {
 		select {
 		case <-r.stop:
 			return
 		case now := <-t.C:
-			if err := os.Chtimes(r.path, now, now); err != nil {
-				// The entry is gone. This process is serving a generation nothing
-				// records it as holding, so any reaper in the arena is free to delete
-				// it. This is the last line of defence behind the claim and reaper
-				// guards, and it must be AUDIBLE: cmd/mcp-1c/main.go pins the default
-				// slog handler to LevelError, so anything below Error goes nowhere.
-				// Latched, so one incident is one line.
-				//
-				// A reaper that took the generation by rename and then rolled the
-				// rename back also lands here. That is not a false alarm: a reaper did
-				// try to remove a generation this process is serving, and the operator
-				// should know the arena is contended.
-				if r.lost.CompareAndSwap(false, true) {
-					slog.Error("dump: this process no longer holds a reader claim on the index "+
-						"generation it is serving; another process may delete that generation while "+
-						"it is being served. Restart the server, or give it its own cache directory "+
-						"(MCP_1C_CACHE_DIR / --cache-dir).",
-						"entry", r.path, "error", err)
-				}
-			}
+			r.touch(now)
 		}
+	}
+}
+
+// beatInterval is the heartbeat period: readerHeartbeatInterval unless a test set
+// a shorter one on the registration. A non-positive beat is the zero value, not an
+// instruction, so it selects the production interval rather than panicking a ticker.
+func (r *readerRegistration) beatInterval() time.Duration {
+	if r.beat > 0 {
+		return r.beat
+	}
+	return readerHeartbeatInterval
+}
+
+// touch refreshes the claim's mtime and turns the outcome into the two things a
+// change of it has to produce: the operator's log line, and the user's notice.
+//
+// WHY THE NOTICE AND NOT ONLY THE LOG. Serving a generation nothing records as held
+// is the exact state the whole registry exists to make visible, and it is the same
+// state whether the claim could never be written or was written and then lost. The
+// second one used to reach the log only, and cmd/mcp-1c/main.go writes that log to a
+// file under the cache directory, which is not where anybody running a search is
+// looking. Routing it to (*Index).noteClaimState puts it where the first one already
+// goes, on the response, instead of inventing a second channel for the same fact.
+//
+// WHY A FAILED TOUCH COUNTS AS LOST even if the entry is still there. The mtime IS
+// the liveness signal (generationHasLiveReader), so an entry this process can no
+// longer touch ages past readerStaleAfter and is then reaped by the first peer that
+// looks. Telling "already gone" from "about to be treated as gone" buys the reader
+// nothing and would cost a probe on the failure path to report the same fact later.
+//
+// WHY THE NOTICE IS NOT LATCHED. It is a statement about a state that holds NOW,
+// exactly like the claim-time one, and this state can genuinely end: a reaper takes
+// a generation by renaming it out of the arena and rolls that rename back when it
+// finds a holder (claimGenerationForRemoval), and the entry is back at its path when
+// it does. A notice left standing after that warns about something that stopped,
+// which is what teaches a reader to ignore the line that matters. The LOG keeps its
+// latch per incident, so a claim lost, recovered and lost again is two incidents and
+// two lines rather than one line about the first.
+//
+// WHY THE ALL-CLEAR IS ALSO slog.Error. Not because recovery is a failure: because
+// the level here is the delivery mechanism and not a severity. main.go pins the
+// default handler to LevelError in stdio mode, so an all-clear at any lower level is
+// written nowhere and the log keeps asserting an unprotected serve that ended.
+//
+// AN ORDERLY RELEASE IS NOT A LOSS, and it is refused twice over. Close stops the
+// heartbeat and WAITS for this goroutine to exit before it removes the entry, so the
+// window is empty; and Close announces itself on releasing first, so the window being
+// empty is not what this depends on. Neither a shutdown nor the retirement of a
+// generation by Reload can therefore be observed as a loss.
+func (r *readerRegistration) touch(now time.Time) {
+	if r.releasing.Load() {
+		// This registration is being released on purpose. Its entry is being removed by
+		// us, and its absence says nothing about any reaper.
+		return
+	}
+	if err := os.Chtimes(r.path, now, now); err != nil {
+		// This process is serving a generation nothing records it as holding, so any
+		// reaper in the arena is free to delete it. This is the last line of defence
+		// behind the claim and reaper guards, and it must be AUDIBLE.
+		//
+		// A reaper that took the generation by rename and has not yet rolled the
+		// rename back also lands here. That is not a false alarm: a reaper did try to
+		// remove a generation this process is serving, and the operator should know
+		// the arena is contended.
+		if r.lost.CompareAndSwap(false, true) {
+			slog.Error("dump: this process no longer holds a reader claim on the index "+
+				"generation it is serving; another process may delete that generation while "+
+				"it is being served. Restart the server, or give it its own cache directory "+
+				"(MCP_1C_CACHE_DIR / --cache-dir).",
+				"entry", r.path, "error", err)
+			r.reportProtection()
+		}
+		return
+	}
+	if r.lost.CompareAndSwap(true, false) {
+		slog.Error("dump: the reader claim on the index generation being served can be refreshed "+
+			"again, so this process is recorded as holding it once more and the earlier warning "+
+			"about it no longer applies.",
+			"entry", r.path)
+		r.reportProtection()
 	}
 }
 
@@ -459,6 +616,9 @@ func (r *readerRegistration) Close() {
 		if r.claimless {
 			return // no entry was ever written; there is nothing to deregister
 		}
+		// Announce the release BEFORE anything is taken away, so a beat that is still
+		// to come cannot read our own removal as a reaper's.
+		r.releasing.Store(true)
 		if !r.started.Load() {
 			_ = os.Remove(r.tmpPath)
 			return

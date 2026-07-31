@@ -353,11 +353,17 @@ func (idx *Index) swapGeneration(
 	idx.alias.Swap(shards, oldShards)
 	idx.shards = shards
 	idx.readerReg = reg
+	reg.adoptedBy(idx)
 	// The notice follows the generation, in the same critical section that publishes
 	// it. A reload onto a cache that has since become unwritable starts warning; one
 	// that lands back on a writable cache stops. A notice left describing the RETIRED
 	// generation would be a claim about an index nobody is serving any more.
-	idx.setUnprotected(reg.unprotectedReason())
+	//
+	// The RETIRED registration is closed by the caller, outside this lock, and its
+	// heartbeat may beat once more before that. It cannot corrupt what is published
+	// here: noteClaimState re-checks under this same mutex that the registration
+	// reporting is still idx.readerReg, and after this line it is not.
+	idx.setUnprotected(reg.protectionState())
 	idx.gensig = gensig
 	idx.names = names
 	idx.pathByName = pathByName
