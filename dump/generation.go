@@ -473,7 +473,14 @@ func (idx *Index) FinishServeOpen(cacheDir string, gen *ServeGeneration, prepErr
 // there is no instant at which the generation is READY in the arena and unheld
 // (see buildGeneration). Taking a fresh claim here instead would put that instant
 // back. nil means "this process did not produce this generation", and then the
-// only thing left to do is registerReader's fail-closed post-adopt claim.
+// only thing left to do is claimOrProveUnreapable's fail-closed post-adopt claim.
+//
+// A nil held is NOT what the serve fast path passes. PrepareServeGeneration already
+// went through claimOrProveUnreapable and hands its result down, including the
+// claim-less registration an unreapable arena yields, which is non-nil — so this
+// branch does not re-run for it and the frozen-arena proof is logged once per open,
+// not twice. The callers that DO arrive with nil are the ones that never claimed at
+// all: OpenGenerationReadOnly, and OpenForServe through it.
 //
 // OWNERSHIP: on entry idx owns held, on every path. It is released here if
 // anything below fails, and released by Close otherwise.
@@ -489,7 +496,7 @@ func (idx *Index) attachReadOnlyShards(genDir string, held *readerRegistration) 
 	reg := held
 	if reg == nil {
 		var err error
-		if reg, err = registerReader(genDir); err != nil {
+		if reg, err = claimOrProveUnreapable(genDir); err != nil {
 			slog.Error("dump: refusing to serve an index generation this process cannot claim; "+
 				"another process could delete it while it is being served. Give this server its own "+
 				"cache directory (MCP_1C_CACHE_DIR / --cache-dir), or make the cache directory writable.",
@@ -1044,11 +1051,20 @@ func buildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*readerReg
 
 // claimBuiltGeneration takes an ordinary post-adopt claim on an already-published
 // generation, or nothing at all when the caller did not ask for one.
+//
+// Its three callers all reach it holding a generation this process did NOT produce
+// — the content-addressed build no-op, the loser of an adopt race, and the migration
+// that found the generation already there — so it goes through the same
+// claimOrProveUnreapable as the serve fast path rather than through registerReader
+// directly. MEASURED, and it is why: with the bare registerReader here, `--reindex`
+// against a read-only cache refused to serve ("force-rebuilding ... permission
+// denied") while v1.12.0 served, because forceRebuildGeneration's drop is skipped,
+// its build no-ops on the still-READY generation, and the claim lands here.
 func claimBuiltGeneration(genDir string, claim buildClaim) (*readerRegistration, error) {
 	if !claim {
 		return nil, nil
 	}
-	return registerReader(genDir)
+	return claimOrProveUnreapable(genDir)
 }
 
 // forceDropGeneration removes the immutable generation directory genDir to force a

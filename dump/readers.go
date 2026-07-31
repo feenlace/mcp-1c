@@ -1,7 +1,9 @@
 package dump
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -42,7 +45,9 @@ import (
 // fail closed:
 //
 //   - claimReader returns an ERROR, never a silent degradation, and that error is
-//     fatal to the open or reload that asked for it;
+//     fatal to the open or reload that asked for it — unless claimOrProveUnreapable
+//     can PROVE nothing is able to remove the generation, which is the one case
+//     where there is no protection to lose;
 //   - a claim is only accepted once it has been read back through the same
 //     os.ReadDir a peer's reaper uses, and once the generation is confirmed to
 //     still carry its READY marker AFTER the claim became visible;
@@ -67,6 +72,15 @@ const (
 	// prefix exists so a probe left behind by a process killed mid-check is never
 	// miscounted as a live reader's claim, and so it is recognisable on disk.
 	readerProbePrefix = ".probe-"
+
+	// reapProbePrefix names the throwaway file a READER writes into the generations
+	// arena to find out whether ANY process could remove a generation from it (see
+	// arenaUnreapable). It is the mirror of readerProbePrefix — that one asks "could
+	// a peer have claimed?", this one asks "could a peer reap?" — and it is a
+	// distinct prefix so the two are told apart on disk. It is created and removed
+	// within one call, and it goes into g/, not into a generation, so no registry
+	// scan ever sees it.
+	reapProbePrefix = ".reapprobe-"
 )
 
 // readerRegistration is a live handle on this process's reader entry for one
@@ -93,6 +107,44 @@ type readerRegistration struct {
 	// serve is no longer protected" alarm is raised once rather than every
 	// readerHeartbeatInterval.
 	lost atomic.Bool
+	// unreapable, when non-empty, marks a registration that records NOTHING on disk
+	// because nothing needed recording: no claim could be written AND it was proven
+	// that no process can remove the generation (see arenaUnreapable, which supplies
+	// this string as its proof). path and tmpPath are empty, there is no entry, the
+	// heartbeat never starts and Close removes nothing.
+	//
+	// THIS IS THE ONE SHAPE THAT MUST NEVER BE HANDED OUT CASUALLY. A registration
+	// that holds nothing while callers treat it as a hold is precisely the silent
+	// degradation the whole registry exists to prevent, so it is constructed in
+	// exactly one place — unreapableClaim, called only by claimOrProveUnreapable and
+	// only after a proof — and never from a nil check, a fallback, or an error path
+	// that merely failed to claim.
+	unreapable string
+}
+
+// unreapableClaim returns the claim-less registration described on the unreapable
+// field. reason is the proof arenaUnreapable produced and is kept for diagnostics.
+// A caller other than claimOrProveUnreapable has no business calling this.
+//
+// The channels are made even though nothing sends on them. A registration whose
+// stop/done are nil is a footgun rather than a saving: close(nil) panics and a
+// receive on nil blocks for ever, so a future edit that reached the heartbeat
+// teardown for one of these would crash or hang instead of failing an assertion.
+func unreapableClaim(reason string) *readerRegistration {
+	return &readerRegistration{
+		unreapable: reason,
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+	}
+}
+
+// unreapableReason returns the proof under which this registration holds no entry,
+// or "" for an ordinary registration that holds a real one.
+func (r *readerRegistration) unreapableReason() string {
+	if r == nil {
+		return ""
+	}
+	return r.unreapable
 }
 
 // registerReader records this process as a live reader of the ALREADY-PUBLISHED
@@ -124,7 +176,8 @@ type readerRegistration struct {
 // whole idle life, and the only sound answer is the fail-closed one below: claim
 // it, verify the claim is visible and READY survived, and refuse if either fails.
 // PrepareServeGeneration's ready fast path and OpenForServe's are the two callers
-// that land here.
+// that land here — both through claimOrProveUnreapable, which is what decides what
+// a FAILED claim means.
 func registerReader(genDir string) (*readerRegistration, error) {
 	reg, err := claimReader(genDir, genDir)
 	if err != nil {
@@ -132,6 +185,59 @@ func registerReader(genDir string) (*readerRegistration, error) {
 	}
 	reg.start()
 	return reg, nil
+}
+
+// claimOrProveUnreapable takes the ordinary post-adopt reader claim on the
+// already-published generation genDir, and decides what to do when that claim
+// cannot be written. It is the single place that decision is made; every path that
+// claims a generation this process did not produce goes through it.
+//
+// WHY A FAILED CLAIM IS NOT AUTOMATICALLY A REFUSAL. The claim exists for exactly
+// one reason: a reaper deletes a READY generation that nothing records as held. If
+// no process can remove the generation, there is no reaper to protect it from and
+// the missing claim protects nothing. Refusing there would make a cache this
+// process may read but not write — one published by a root install, a shared team
+// cache, a read-only container mount — permanently and silently unservable, which
+// is what happened when the claim was first made mandatory.
+//
+// SO IT PROVES, IT DOES NOT ASSUME. A claim-less serve is permitted ONLY when
+// arenaUnreapable establishes that no process can rename or unlink the generation
+// directory, which is what every removal in this package does. "Unwritable for us"
+// is NOT that proof: an arena its owner can still write is one its owner can still
+// reap, and there the refusal stands. What the proof does and does not cover is
+// stated in full on arenaUnreapable.
+//
+// It returns exactly one of:
+//   - a live registration holding a real entry, the ordinary outcome;
+//   - an unreapable registration holding nothing, when the proof succeeded;
+//   - an error, when the claim failed AND the proof did not, which the caller MUST
+//     turn into a refusal to serve.
+func claimOrProveUnreapable(genDir string) (*readerRegistration, error) {
+	reg, claimErr := registerReader(genDir)
+	if claimErr == nil {
+		return reg, nil
+	}
+	// The parent of a generation directory IS the generations arena; deriving it
+	// here rather than plumbing a cpath through keeps this callable from every claim
+	// site with what those sites already have.
+	reason, proofErr := arenaUnreapable(filepath.Dir(genDir))
+	if proofErr != nil {
+		return nil, fmt.Errorf("%w; and it could not be established that the generation is safe to "+
+			"serve unclaimed: %v", claimErr, proofErr)
+	}
+	// slog.Error, and not because this is a failure — the server is serving and the
+	// operator need do nothing. It is Error because it is the ONE line that says the
+	// cache is frozen, and cmd/mcp-1c/main.go pins the default handler to LevelError,
+	// so a Warn here is written nowhere in exactly the stdio mode where this arises.
+	// MEASURED: as a Warn it produced zero lines across the read-only-cache and
+	// read-only-mount runs that it describes. The level costs nothing in client noise
+	// either, because in stdio mode this handler already writes to a file rather than
+	// to the client's pipe.
+	slog.Error("dump: serving an index generation without a reader claim: the claim cannot be written "+
+		"and it is established that no process can remove the generation either. The server is serving "+
+		"normally; a read-only cache cannot pick up a changed dump until it is writable again.",
+		"gen", filepath.Base(genDir), "proof", reason, "claim_error", claimErr)
+	return unreapableClaim(reason), nil
 }
 
 // claimReader writes this process's claim into workDir's reader registry and
@@ -247,8 +353,12 @@ func readerClaimVisible(readersDir, name string) error {
 // start begins heartbeating the claim. It must be called once the entry actually
 // lives at reg.path: immediately for a claim taken on a published generation, and
 // after the adopt for a claim taken inside a build's temp dir.
+//
+// An unreapable registration has no entry, so there is nothing to heartbeat and no
+// path to touch; starting one would raise the lost-claim alarm every interval about
+// a claim that was never taken.
 func (r *readerRegistration) start() {
-	if r == nil || !r.started.CompareAndSwap(false, true) {
+	if r == nil || r.unreapable != "" || !r.started.CompareAndSwap(false, true) {
 		return
 	}
 	go r.heartbeat()
@@ -299,6 +409,9 @@ func (r *readerRegistration) Close() {
 		return
 	}
 	r.once.Do(func() {
+		if r.unreapable != "" {
+			return // no entry was ever written; there is nothing to deregister
+		}
 		if !r.started.Load() {
 			_ = os.Remove(r.tmpPath)
 			return
@@ -394,4 +507,100 @@ func registryTrustworthy(genDir string) error {
 		return fmt.Errorf("removing the reader registry write probe %s: %w", name, err)
 	}
 	return nil
+}
+
+// arenaUnreapable returns the PROOF that no process can remove a generation from
+// the generations arena gensDir, or an error saying why no such proof could be
+// made. It is what lets a process that cannot write its reader claim tell "nobody
+// is protecting this generation" apart from "nothing can touch this generation".
+//
+// WHAT IT ASKS, AND WHY THAT IS THE RIGHT QUESTION. Every removal of a generation
+// in this package goes through gensDir: GCGenerations renames the generation out of
+// the arena (claimGenerationForRemoval) before deleting it, forceDropGeneration
+// reuses that same removal, and ReapStaleBuildDirs unlinks its targets there too.
+// All three need permission to create, rename and unlink entries IN gensDir. So
+// "can this generation be reaped" reduces to "can anything write in gensDir", and
+// that is a question about one directory, answerable now, rather than a guess about
+// which peers might exist.
+//
+// HOW IT ANSWERS. By writing, because that is the only portable way to learn what a
+// write would do — an access(2)-style mode inspection alone answers the wrong
+// question, as the read-only-mount case below proves. The probe is created and
+// removed inside this call.
+//
+//   - The probe SUCCEEDS: the arena is writable by this process, so a reaper with
+//     the same rights removes generations from it freely. No proof; error.
+//   - The probe fails with EROFS: the filesystem is mounted read-only, so nothing in
+//     this mount namespace can rename or unlink anything here. PROVEN. This branch
+//     is not redundant with the mode check below and cannot be folded into it:
+//     MEASURED on a real read-only mount (macOS UDRO image), the directory still
+//     reports mode 0755 — owner write bit SET — and the failure is EROFS, not a
+//     permission error. A mode-only test would have called that arena writable.
+//   - The probe fails with a permission error AND gensDir's mode carries no write
+//     bit for its owner, its group or others: no process bound by the permission
+//     bits can create, rename or unlink here. PROVEN.
+//   - The probe fails with a permission error but the mode DOES grant write to the
+//     owner or the group: it is unwritable for US and writable for THEM. A peer
+//     running as that owner reaps normally and reads our missing claim as "unheld".
+//     No proof; error. This is the case that must not be waved through, and it is
+//     why "we cannot write" is not itself an answer.
+//   - Any other failure: unknown, so no proof; error.
+//
+// WHAT THE PROOF DOES NOT COVER, stated rather than left to be discovered. It binds
+// processes subject to the checks it made, and nothing else:
+//
+//   - root bypasses the permission bits entirely and can reap either way;
+//   - so can any process that first chmods the arena back to writable;
+//   - EROFS binds this mount namespace only, so a host process reaching the same
+//     files through a writable mount (a read-only container bind mount) still can;
+//   - on Windows directory rights are ACLs and Mode().Perm() does not describe
+//     them, so the mode branch never fires there and a process that cannot claim
+//     keeps refusing — fail-closed, and no worse than before this existed;
+//   - it proves the generation cannot be REAPED, which is the whole of what a reader
+//     claim ever bought. It says nothing about the shard files being immutable in
+//     general, and neither did the claim.
+func arenaUnreapable(gensDir string) (string, error) {
+	f, err := os.CreateTemp(gensDir, reapProbePrefix)
+	if err == nil {
+		name := f.Name()
+		_ = f.Close()
+		_ = os.Remove(name)
+		return "", fmt.Errorf("the generations arena %s is writable by this process, so a reaper "+
+			"running with the same rights can remove a generation from it", gensDir)
+	}
+	// The stat runs before the classification and not inside its permission branch:
+	// on a read-only mount it SUCCEEDS and reports an ordinary writable-looking mode,
+	// which is the measurement classifyArenaProbe exists to keep from being lost.
+	st, statErr := os.Stat(gensDir)
+	if statErr != nil {
+		return "", fmt.Errorf("stat of the generations arena %s after its write probe was refused: %w",
+			gensDir, statErr)
+	}
+	return classifyArenaProbe(gensDir, err, st.Mode().Perm())
+}
+
+// classifyArenaProbe turns a REFUSED write probe on gensDir, whose permission bits
+// are perm, into the proof that nothing can remove a generation there — or into the
+// reason no such proof exists. See arenaUnreapable for the full argument.
+//
+// It is split out from the probe so the EROFS branch can be pinned without a
+// read-only mount, which no unit test can portably create. The inputs it is fed for
+// that branch are not invented: on a macOS UDRO image the probe fails with EROFS
+// while os.Stat reports perm 0755, so a mode-only test calls that arena writable.
+func classifyArenaProbe(gensDir string, probeErr error, perm fs.FileMode) (string, error) {
+	if errors.Is(probeErr, syscall.EROFS) {
+		return fmt.Sprintf("the generations arena %s is on a read-only mount, so no process in this "+
+			"mount namespace can remove a generation from it", gensDir), nil
+	}
+	if !errors.Is(probeErr, fs.ErrPermission) {
+		return "", fmt.Errorf("probing whether the generations arena %s can be written: %w", gensDir, probeErr)
+	}
+	if perm&0o222 != 0 {
+		return "", fmt.Errorf("the generations arena %s is not writable by this process, but its mode "+
+			"%04o grants write to its owner or its group, so a process running as one of them can "+
+			"remove a generation from it: %w", gensDir, perm, probeErr)
+	}
+	return fmt.Sprintf("the generations arena %s carries no write permission for its owner, its group "+
+		"or others (mode %04o), so no process bound by those bits can remove a generation from it",
+		gensDir, perm), nil
 }

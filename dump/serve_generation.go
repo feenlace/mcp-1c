@@ -88,6 +88,10 @@ func (g *ServeGeneration) Release() {
 // fail-closed post-adopt one and it can lose to a reaper and refuse. That residual
 // case is stated where the primitive lives, in registerReader.
 //
+// A claim that cannot be WRITTEN is decided by claimOrProveUnreapable, not by this
+// function: an arena in which no process can remove a generation needs no claim and
+// is served, and any other unwritable arena is refused with the remediation.
+//
 // The returned handle owns a live claim. The caller MUST either hand it to
 // FinishServeOpen or Release it, or the generation stays pinned for the life of the
 // process and is never reclaimed.
@@ -165,14 +169,28 @@ func PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reind
 // a private phase to claim it in. This is the fail-closed post-adopt claim, and it
 // can lose: a reaper that took the generation first makes this refuse rather than
 // serve. Refusing is the correct outcome — the generation it would have served is
-// being deleted — and the operator gets registerReader's message saying so.
+// being deleted.
+//
+// A claim that cannot be WRITTEN AT ALL is a different failure from losing a race,
+// and claimOrProveUnreapable is what tells them apart: an arena nothing can reap
+// needs no claim and is served, an arena someone else can reap is refused. The
+// refusal is reported HERE, with the remediation, and not left to the generic
+// wrapper the caller would otherwise emit. Measured on the real binary before this:
+// a read-only cache produced "search: index build failed: claiming the existing
+// generation ...: permission denied" and no actionable line anywhere, because the
+// only text naming a remedy lives on paths this failure returns above.
 func claimExistingGeneration(dumpDir, cacheDir, gensig string) (*ServeGeneration, error) {
 	cpath, err := cachePath(dumpDir, cacheDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving the cache path for %s: %w", dumpDir, err)
 	}
-	reg, err := registerReader(generationDir(cpath, gensig))
+	genDir := generationDir(cpath, gensig)
+	reg, err := claimOrProveUnreapable(genDir)
 	if err != nil {
+		slog.Error("dump: refusing to serve an index generation this process cannot claim; "+
+			"another process could delete it while it is being served. Give this server its own "+
+			"cache directory (MCP_1C_CACHE_DIR / --cache-dir), or make the cache directory writable.",
+			"genDir", genDir, "error", err)
 		return nil, fmt.Errorf("claiming the existing generation %s: %w", gensig, err)
 	}
 	return heldGeneration(gensig, reg)

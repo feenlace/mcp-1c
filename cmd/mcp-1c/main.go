@@ -82,10 +82,11 @@ func main() {
 	// This avoids polluting stderr (which MCP clients show as errors)
 	// while still capturing useful diagnostic output.
 	if *debug {
-		if f, err := openDebugLog("mcp-1c", *cacheDir); err == nil {
-			log.SetOutput(f)
-			slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo})))
-			defer f.Close()
+		if t, err := openDebugLog("mcp-1c", *cacheDir); err == nil {
+			log.SetOutput(t.file)
+			slog.SetDefault(slog.New(slog.NewTextHandler(t.file, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			defer t.file.Close()
+			reportLogFallback(t)
 		}
 	}
 
@@ -142,10 +143,11 @@ func main() {
 		} else {
 			// Pipe launch (MCP client): redirect stderr to a file so third-party
 			// libraries (bleve, scorch) cannot trigger a restart loop.
-			if f, err := openStderrLog("mcp-1c", *cacheDir); err == nil {
-				os.Stderr = f
-				log.SetOutput(f)
-				slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelError})))
+			if t, err := openStderrLog("mcp-1c", *cacheDir); err == nil {
+				os.Stderr = t.file
+				log.SetOutput(t.file)
+				slog.SetDefault(slog.New(slog.NewTextHandler(t.file, &slog.HandlerOptions{Level: slog.LevelError})))
+				reportLogFallback(t)
 			} else {
 				// Fallback: if we cannot create the stderr log file (cacheDir
 				// missing, disk full, permission denied), we MUST still redirect
@@ -227,39 +229,139 @@ func main() {
 	}
 }
 
-// openDebugLog creates (or truncates) a log file for debug output.
-// The file is placed under the user cache directory:
+// logRollAtBytes caps a log file's carried-over history. Below it the file is
+// APPENDED to (see openLogFile); at or above it the next process to open the file
+// starts it over, so the disk cost stays bounded without a rotation scheme and
+// without the race a rename between co-located processes would add.
+const logRollAtBytes = 8 << 20 // 8 MiB
+
+// logTarget is the log file a run actually got, plus what it asked for. requested
+// and cause are set ONLY when the requested directory could not be used, so a
+// non-nil cause is the signal to report the substitution — into the file itself,
+// which is the only place a stdio-mode process can report anything.
+type logTarget struct {
+	file      *os.File
+	path      string
+	requested string
+	cause     error
+}
+
+// openDebugLog opens the log file for debug output. The file is placed under the
+// user cache directory:
 //
 //	macOS:   ~/Library/Caches/<name>/server.log
 //	Linux:   ~/.cache/<name>/server.log
 //	Windows: %LocalAppData%/<name>/server.log
-func openDebugLog(name, cacheDir string) (*os.File, error) {
+func openDebugLog(name, cacheDir string) (*logTarget, error) {
 	return openLogFile(name, cacheDir, "server.log")
 }
 
-// openStderrLog creates (or truncates) a file that captures stderr output in
-// MCP stdio mode. The redirect protects strict MCP clients (Kilo Code 7.x) from
-// crashing on stderr writes produced by third-party libraries.
-func openStderrLog(name, cacheDir string) (*os.File, error) {
+// openStderrLog opens the file that captures stderr output in MCP stdio mode. The
+// redirect protects strict MCP clients (Kilo Code 7.x) from crashing on stderr
+// writes produced by third-party libraries.
+func openStderrLog(name, cacheDir string) (*logTarget, error) {
 	return openLogFile(name, cacheDir, "stderr.log")
 }
 
-// openLogFile creates (or truncates) a log file under the cache directory.
-func openLogFile(name, cacheDir, filename string) (*os.File, error) {
-	var dir string
-	if cacheDir != "" {
-		dir = cacheDir
-	} else {
-		cacheBase, err := os.UserCacheDir()
-		if err != nil {
-			return nil, err
-		}
-		dir = filepath.Join(cacheBase, name)
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+// openLogFile opens a log file for this run, preferring the cache directory and
+// falling back to somewhere writable when it is not.
+//
+// THE FALLBACK IS THE POINT, and it was measured. This file used to be created
+// inside cacheDir and nowhere else, and main's handler for a failure to create it
+// is to send slog to os.DevNull. A cache directory this process may read but not
+// write therefore destroyed the only channel that could report it: on a read-only
+// cache the server refused every search and stderr.log stayed 0 bytes across a
+// warm-up and three runs, while the same refusal on a cache whose root was writable
+// produced 662 bytes and one ERROR line. The level was never the defect; the
+// destination was. So a directory that cannot take the log is not fatal here: the
+// platform cache dir is tried next (it is the default precisely because it is
+// writable), then the OS temp dir, and only a machine where none of the three works
+// reaches main's DevNull branch.
+//
+// IT APPENDS. It used to end in os.Create, which truncates, so in the shared arena
+// this whole change set exists to protect every process that started wiped the log
+// of the ones before it — measured at 36 processes, one surviving record. Appending
+// is what makes a multi-process arena auditable at all. Growth is bounded by
+// logRollAtBytes rather than by throwing the history away on every start.
+func openLogFile(name, cacheDir, filename string) (*logTarget, error) {
+	requested, err := preferredLogDir(name, cacheDir)
+	if err != nil {
+		// No preferred directory could even be named; there is nothing to fall back
+		// FROM, so report it as the failure it is rather than silently relocating.
 		return nil, err
 	}
-	return os.Create(filepath.Join(dir, filename))
+
+	candidates := []string{requested}
+	// The platform cache dir, when an explicit --cache-dir / MCP_1C_CACHE_DIR was the
+	// one that failed. os.UserCacheDir() is where the cache lives by default and is
+	// writable in every environment that has one.
+	if base, uErr := os.UserCacheDir(); uErr == nil {
+		candidates = append(candidates, filepath.Join(base, name))
+	}
+	candidates = append(candidates, filepath.Join(os.TempDir(), name))
+
+	var firstErr error
+	for _, dir := range candidates {
+		f, path, oErr := openAppendLog(dir, filename)
+		if oErr != nil {
+			if firstErr == nil {
+				firstErr = oErr
+			}
+			continue
+		}
+		t := &logTarget{file: f, path: path}
+		if dir != requested {
+			t.requested, t.cause = requested, firstErr
+		}
+		return t, nil
+	}
+	return nil, firstErr
+}
+
+// preferredLogDir names the directory a log SHOULD go in: the explicit cache dir
+// when there is one, otherwise the platform cache dir for name.
+func preferredLogDir(name, cacheDir string) (string, error) {
+	if cacheDir != "" {
+		return cacheDir, nil
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, name), nil
+}
+
+// openAppendLog opens dir/filename for appending, creating dir if needed, and
+// starts the file over when it has already grown past logRollAtBytes.
+func openAppendLog(dir, filename string) (*os.File, string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, "", err
+	}
+	path := filepath.Join(dir, filename)
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if st, err := os.Stat(path); err == nil && st.Size() >= logRollAtBytes {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, 0o644)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, path, nil
+}
+
+// reportLogFallback records, IN THE LOG THAT WAS ACTUALLY OPENED, that it is not
+// the one that was asked for. Call it after the slog handler is installed on t.
+// Error level: the cache directory being unwritable is an operator-actionable
+// condition, and this line is the only thing that names where the diagnostics for
+// this run went.
+func reportLogFallback(t *logTarget) {
+	if t == nil || t.cause == nil {
+		return
+	}
+	slog.Error("cannot write the log inside the requested directory; this run's diagnostics are in "+
+		"a fallback file instead. Make that directory writable, or point --cache-dir "+
+		"(MCP_1C_CACHE_DIR) somewhere this user can write.",
+		"requested", t.requested, "using", t.path, "error", t.cause)
 }
 
 func checkExtensionVersion(client *onec.Client) {
