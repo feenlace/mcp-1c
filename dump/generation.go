@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -440,16 +441,24 @@ func (idx *Index) FinishServeOpen(cacheDir, gensig string, prepErr error) {
 // if the open fails the registration is rolled back. The caller is responsible for
 // loading names and flipping Ready().
 func (idx *Index) attachReadOnlyShards(genDir string) error {
-	// Register first so a live reader is visible to GC before any shard FD/mmap
-	// exists. Registration is best-effort: serving without it only risks a benign
-	// GC race (unix readers keep their open shards; Windows removal fails on held
-	// files), so a registration error is logged, not fatal.
-	if reg, err := registerReader(genDir); err != nil {
-		slog.Warn("dump: could not register reader; concurrent GC could reap this "+
-			"generation while it is served", "genDir", genDir, "error", err)
-	} else {
-		idx.readerReg = reg
+	// Register FIRST, and REFUSE if it fails. This used to be best-effort: the
+	// failure was a slog.Warn and the open carried on. cmd/mcp-1c/main.go pins the
+	// default slog handler to LevelError, so that warning reached nobody, and the
+	// process then served a generation no reaper in the arena had any reason to
+	// keep — which is exactly what a co-located reaper deleted, while this process
+	// kept answering out of unlinked inodes. Serving on without a claim is the
+	// "degraded component reports a pass" failure; the only correct answer is to
+	// stop here and say why, loudly enough to be heard at the default log level.
+	reg, err := registerReader(genDir)
+	if err != nil {
+		slog.Error("dump: refusing to serve an index generation this process cannot claim; "+
+			"another process could delete it while it is being served. Give this server its own "+
+			"cache directory (MCP_1C_CACHE_DIR / --cache-dir), or make the cache directory writable.",
+			"genDir", genDir, "error", err)
+		return fmt.Errorf("refusing to serve generation %s without a reader claim: %w",
+			filepath.Base(genDir), err)
 	}
+	idx.readerReg = reg
 
 	shardDirs := cacheShardDirs(genDir)
 	shards, err := openCachedShards(shardDirs, true, defaultBoltTimeout)
@@ -485,6 +494,14 @@ func (idx *Index) attachReadOnlyShards(genDir string) error {
 // generation on a shared cacheDir) is skipped, not fatal, so one undeletable
 // generation never blocks reclaiming the others. Returns the gensigs actually
 // removed.
+//
+// IT FAILS CLOSED. "No live reader is registered" is only acted on when the
+// registry could actually be read AND could actually have been written to by a
+// peer; anything else leaves the generation alone and says so at slog.Error (see
+// removeUnheldGeneration and registryTrustworthy). The removal itself takes the
+// generation OUT of the arena by an atomic rename BEFORE deleting it, so a
+// process that claims it while this pass is deciding is detected and the
+// generation is put back rather than deleted underneath it.
 func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
 	cpath, err := cachePath(dir, cacheDir)
 	if err != nil {
@@ -515,21 +532,124 @@ func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
 		if !generationReadyDir(genDir) {
 			continue // not an adopted generation
 		}
-		if generationHasLiveReader(genDir) {
-			continue // a live reader still holds it — MUST NOT remove
-		}
-		if err := os.RemoveAll(genDir); err != nil {
-			if os.IsPermission(err) {
+		gone, err := removeUnheldGeneration(gensDir, name)
+		if err != nil {
+			// errors.Is, NOT os.IsPermission. os.IsPermission predates error
+			// wrapping and unwraps only *PathError / *LinkError / *SyscallError, so
+			// it answers FALSE for the fmt.Errorf("%w")-wrapped errors this path now
+			// returns — which would push every cross-user generation on a shared
+			// arena from Debug to Error on every pass. Measured, not assumed.
+			if errors.Is(err, fs.ErrPermission) {
 				slog.Debug("GC: skipping generation owned by another user", "gen", name, "error", err)
 			} else {
-				slog.Warn("GC: could not remove old generation", "gen", name, "error", err)
+				// NOT a Warn. Every reason this can fail is a reason a generation that
+				// might be in use was left alone, and the operator has to be able to
+				// see that the arena is unhealthy at the default log level.
+				slog.Error("GC: refusing to remove a generation whose holders cannot be established",
+					"gen", name, "error", err)
 			}
 			continue
+		}
+		if !gone {
+			continue // a live reader holds it, or claimed it while we were deciding
 		}
 		removed = append(removed, name)
 		slog.Info("GC: removed old unheld generation", "gen", name)
 	}
 	return removed, nil
+}
+
+// removeUnheldGeneration deletes the generation <gensDir>/<name> if and only if it
+// can be ESTABLISHED that nothing is serving it, and reports whether it did. A
+// non-nil error means the question could not be answered — never that the answer
+// was "unheld".
+//
+// WHY THIS IS NOT JUST "scan readers/, then RemoveAll". A reaper's scan and its
+// deletion are two moments, and a process can claim the generation in between: it
+// would find READY present and its own entry visible, and go on to serve while the
+// deletion ran. The claim-by-rename collapses the two moments into one observable
+// event:
+//
+//	scan readers/  →  RENAME the generation out of the arena  →  scan readers/ again
+//
+// The rename is atomic, so afterwards no NEW claim can land: claimReader creates
+// its entry with a single-level os.Mkdir under the ORIGINAL path, which no longer
+// resolves, and its post-claim re-read of READY reads the original path too. So
+// either a racing claimant got its entry in before the rename — in which case the
+// entry moved with the directory, the second scan finds it, and the rename is
+// undone — or it did not, and it fails and refuses to serve. Neither ends with a
+// deleted generation that something is serving.
+func removeUnheldGeneration(gensDir, name string) (bool, error) {
+	genDir := filepath.Join(gensDir, name)
+
+	live, err := generationHasLiveReader(genDir)
+	if err != nil {
+		return false, err
+	}
+	if live {
+		return false, nil // a live reader still holds it — MUST NOT remove
+	}
+	// An empty registry only means "unheld" if it is one a peer could have written
+	// to. See registryTrustworthy.
+	if err := registryTrustworthy(genDir); err != nil {
+		return false, err
+	}
+
+	claimed, err := claimGenerationForRemoval(gensDir, name)
+	if err != nil {
+		return false, err
+	}
+
+	live, err = generationHasLiveReader(claimed)
+	if err != nil || live {
+		// Someone claimed it in the window between the first scan and the rename.
+		// Put it back where its holder expects it.
+		if rbErr := os.Rename(claimed, genDir); rbErr != nil {
+			slog.Error("GC: a reader claimed a generation while it was being removed and it could not be "+
+				"moved back; the holder keeps serving from its open files, and the directory is reclaimed "+
+				"once that holder exits",
+				"gen", name, "claimed", claimed, "error", rbErr)
+		} else {
+			slog.Info("GC: a reader claimed a generation while it was being removed; kept it", "gen", name)
+		}
+		return false, err
+	}
+
+	if err := os.RemoveAll(claimed); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// claimGenerationForRemoval atomically moves a generation OUT of the arena, under
+// a name carrying buildTmpPrefix, and returns the new path. The prefix is what
+// makes the claim self-cleaning: GCGenerations skips buildTmpPrefix dirs, and
+// ReapStaleBuildDirs removes one once its whole tree has gone untouched for
+// buildDirStaleAfter — so a claim whose removal fails (a live holder's mmap'd
+// files on Windows) is reclaimed on a later pass instead of leaking.
+//
+// The rename also makes the removal ALL-OR-NOTHING, which os.RemoveAll is not.
+// RemoveAll deletes depth-first, so on an arena this process may read but not
+// write — a generation owned by another unix user — it strips READY and the
+// shards and only THEN fails on the final rmdir, leaving a gutted directory
+// behind and reporting an error. A rename that is refused changes nothing at all,
+// so the generation is still whole and still servable. Measured: with the rename
+// removed, the cross-user GC test finds its generation no longer READY.
+//
+// A holder that is still serving out of the renamed tree does NOT keep it fresh:
+// its heartbeat re-touches readerRegistration.path, which names the ORIGINAL
+// location and no longer resolves, so it raises the lost-claim alarm instead. The
+// tree is therefore reclaimed once it goes stale even while a unix holder reads
+// from its unlinked inodes — which is safe, because unlinking cannot disturb an
+// open descriptor, and on Windows the removal simply fails again until the holder
+// exits.
+func claimGenerationForRemoval(gensDir, name string) (string, error) {
+	claimed := filepath.Join(gensDir, fmt.Sprintf("%sreaping-%s-%d-%d",
+		buildTmpPrefix, name, os.Getpid(), time.Now().UnixNano()))
+	if err := os.Rename(filepath.Join(gensDir, name), claimed); err != nil {
+		return "", fmt.Errorf("claiming generation %s for removal: %w", name, err)
+	}
+	return claimed, nil
 }
 
 // ReapStaleBuildDirs sweeps the generations arena (g/) for the two kinds of
@@ -610,7 +730,13 @@ func ReapStaleBuildDirs(dir, cacheDir string) ([]string, error) {
 		if generationReadyDir(genPath) {
 			continue // healthy adopted generation — MUST NOT remove
 		}
-		if generationHasLiveReader(genPath) {
+		if live, err := generationHasLiveReader(genPath); err != nil {
+			// The registry could not be read, so whether anything is serving this
+			// orphan is UNKNOWN. Unknown is not "unheld".
+			slog.Error("reap: refusing to remove an orphaned generation whose holders cannot be established",
+				"dir", name, "error", err)
+			continue
+		} else if live {
 			continue // a live reader still holds it — MUST NOT remove
 		}
 		if !buildDirStale(genPath, cutoff) {
@@ -764,24 +890,63 @@ func readGenerationNames(dumpDir, genDir string) (names []string, pathByName, pa
 // losers discard their temp dir). That is safe but redundant; the single-leader
 // optimization lives in the (deferred) advanced coordination layer.
 func BuildGeneration(dir, cacheDir, gensig string) error {
+	_, err := buildGeneration(dir, cacheDir, gensig, noClaim)
+	return err
+}
+
+// buildClaim says whether a build should come away HOLDING a reader claim on the
+// generation it produced. It is a named type rather than a bare bool so the call
+// sites read as what they mean instead of as a trailing true/false.
+type buildClaim bool
+
+const (
+	noClaim   buildClaim = false
+	withClaim buildClaim = true
+)
+
+// buildGeneration is BuildGeneration plus the option to come away holding a
+// reader claim on the result. It returns a live registration only when claim is
+// withClaim, and only on success; the caller owns it and must Close it.
+//
+// WHY A BUILD CAN CLAIM WITHOUT A WINDOW AND AN OPEN CANNOT. Registering AFTER
+// the generation is adopted always leaves a window: from the instant the atomic
+// rename publishes g/<gensig>/, the generation is READY, unclaimed, and therefore
+// a legal target for every reaper in the arena, and it stays that way until the
+// claim lands. That window is not theoretical — a reload's manifest read sits
+// inside it, and a co-located reaper firing there was measured to delete the
+// generation the reload then published (with the old code the claim's os.MkdirAll
+// even recreated the directory, so the reload reported success over an empty
+// shell).
+//
+// A build has something an open does not: the generation is still a PRIVATE temp
+// directory nothing else can see. Writing the claim there, BEFORE the rename,
+// means the directory enters the arena already carrying a live reader. There is
+// no instant at which it is visible and unclaimed, so for this caller the window
+// is not narrowed, it is absent.
+//
+// Callers that cannot do this — the content-addressed no-op, and the loser of an
+// adopt race — fall back to the ordinary registerReader path and its
+// claim/READY barrier, which is fail-closed but, as registerReader documents,
+// still has an open window.
+func buildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*readerRegistration, error) {
 	cpath, err := cachePath(dir, cacheDir)
 	if err != nil {
-		return fmt.Errorf("no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
+		return nil, fmt.Errorf("no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
 	}
 
 	genDir := generationDir(cpath, gensig)
 	if generationReadyDir(genDir) {
-		return nil // already built and adopted
+		return claimBuiltGeneration(genDir, claim) // already built and adopted
 	}
 
 	gensDir := generationsDir(cpath)
 	if err := os.MkdirAll(gensDir, 0o755); err != nil {
-		return fmt.Errorf("creating generations dir: %w", err)
+		return nil, fmt.Errorf("creating generations dir: %w", err)
 	}
 
 	tmpDir, err := os.MkdirTemp(gensDir, buildTmpPrefix+gensig+"-")
 	if err != nil {
-		return fmt.Errorf("creating generation temp dir: %w", err)
+		return nil, fmt.Errorf("creating generation temp dir: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -794,34 +959,56 @@ func BuildGeneration(dir, cacheDir, gensig string) error {
 	}()
 
 	if err := buildGenerationInto(dir, tmpDir); err != nil {
-		return fmt.Errorf("building generation %q: %w", gensig, err)
+		return nil, fmt.Errorf("building generation %q: %w", gensig, err)
 	}
 
 	// An empty-dump build writes no shards/manifest; ensure the dir exists so the
 	// sentinel can be written and the (empty) generation is still adoptable.
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return fmt.Errorf("ensuring generation temp dir: %w", err)
+		return nil, fmt.Errorf("ensuring generation temp dir: %w", err)
 	}
 
 	// Write the READY sentinel LAST, into the temp dir, BEFORE the atomic adopt.
 	// The final generation dir therefore appears (via rename) already containing
 	// READY and is never visible in a half-written, READY-less state.
 	if err := writeReadySentinel(tmpDir, gensig); err != nil {
-		return fmt.Errorf("writing READY sentinel: %w", err)
+		return nil, fmt.Errorf("writing READY sentinel: %w", err)
+	}
+
+	// The claim goes in BEFORE the adopt. See the doc comment.
+	var reg *readerRegistration
+	if claim {
+		if reg, err = claimReader(tmpDir, genDir); err != nil {
+			return nil, fmt.Errorf("claiming the generation %q this build produced: %w", gensig, err)
+		}
 	}
 
 	// Adopt atomically. If another builder adopted the same gensig first, the
 	// rename fails (target non-empty); treat an existing READY generation as
 	// success and let the deferred cleanup drop our temp dir.
 	if err := os.Rename(tmpDir, genDir); err != nil {
+		// The claim never reached the arena. Close removes it from the temp dir it
+		// is still in, and does not block, because its heartbeat never started.
+		reg.Close()
 		if generationReadyDir(genDir) {
-			return nil
+			return claimBuiltGeneration(genDir, claim)
 		}
-		return fmt.Errorf("adopting generation %q: %w", gensig, err)
+		return nil, fmt.Errorf("adopting generation %q: %w", gensig, err)
 	}
 	committed = true
+	// The entry moved with the directory; only now does reg.path name a real file.
+	reg.start()
 	slog.Info("Built and adopted index generation", "gen", gensig, "dir", genDir)
-	return nil
+	return reg, nil
+}
+
+// claimBuiltGeneration takes an ordinary post-adopt claim on an already-published
+// generation, or nothing at all when the caller did not ask for one.
+func claimBuiltGeneration(genDir string, claim buildClaim) (*readerRegistration, error) {
+	if !claim {
+		return nil, nil
+	}
+	return registerReader(genDir)
 }
 
 // forceDropGeneration removes the immutable generation directory genDir to force a
@@ -838,15 +1025,22 @@ func BuildGeneration(dir, cacheDir, gensig string) error {
 // serving. Forcing a genuine rebuild in that case requires stopping the other
 // servers on this dump first.
 func forceDropGeneration(genDir, gensig string) {
-	if generationHasLiveReader(genDir) {
+	if _, err := os.Stat(genDir); os.IsNotExist(err) {
+		return // nothing built yet — a cold --reindex has nothing to drop
+	}
+	// Goes through the same claim-by-rename removal GCGenerations uses, so a
+	// --reindex can no more yank a generation a co-located process claimed
+	// mid-drop than a background GC can.
+	dropped, err := removeUnheldGeneration(filepath.Dir(genDir), filepath.Base(genDir))
+	if err != nil {
+		slog.Error("reindex: refusing to drop the current generation before a rebuild; "+
+			"BuildGeneration will reuse it if it is still adoptable", "gen", gensig, "error", err)
+		return
+	}
+	if !dropped {
 		slog.Warn("reindex: a live reader holds the current generation; serving the "+
 			"existing generation WITHOUT an in-place rebuild (stop other servers on this "+
 			"dump to force a full rebuild)", "gen", gensig)
-		return
-	}
-	if err := os.RemoveAll(genDir); err != nil {
-		slog.Warn("reindex: could not drop the current generation before rebuild; "+
-			"BuildGeneration will reuse it if still adoptable", "gen", gensig, "error", err)
 	}
 }
 

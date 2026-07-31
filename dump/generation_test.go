@@ -1034,7 +1034,7 @@ func TestReapStaleBuildDirs_KeepsReadylessGenerationWithLiveReader(t *testing.T)
 	if err := os.Remove(readySentinelPath(genDir)); err != nil {
 		t.Fatalf("strip READY: %v", err)
 	}
-	if !generationHasLiveReader(genDir) {
+	if !reapHasLiveReader(t, genDir) {
 		t.Fatal("precondition: a freshly registered reader must be live")
 	}
 

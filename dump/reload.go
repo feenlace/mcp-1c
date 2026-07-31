@@ -106,8 +106,12 @@ var ErrReloadClosed = errors.New("dump: index is closed")
 // reloadBuildGeneration is the build step of Reload, indirected through a
 // variable so a test can inject a failure at exactly the point where the live
 // index has not yet been touched and prove that a failed reload keeps serving.
-// Production always calls BuildGeneration.
-var reloadBuildGeneration = BuildGeneration
+// Production always builds WITH a claim: a reload must come away already holding
+// the generation it is about to serve, because a generation that is merely READY
+// in the arena is a legal target for every reaper there (see buildGeneration).
+var reloadBuildGeneration = func(dir, cacheDir, gensig string) (*readerRegistration, error) {
+	return buildGeneration(dir, cacheDir, gensig, withClaim)
+}
 
 // Reload picks up on-disk changes to the dump WITHOUT restarting the process, so
 // a fresh DumpConfigToFiles becomes visible to search_code in all three modes and
@@ -199,19 +203,36 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	// idx.reloadMu.Unlock() would have run either way; recovering additionally
 	// keeps the caller, and the process, alive to use it.
 	var buildErr error
+	var reg *readerRegistration
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				buildErr = fmt.Errorf("panic during the reload build of %s: %v", idx.dir, r)
 			}
 		}()
-		buildErr = reloadBuildGeneration(idx.dir, cacheDir, sigAfter)
+		reg, buildErr = reloadBuildGeneration(idx.dir, cacheDir, sigAfter)
 	}()
+	// From here on the reload HOLDS a claim on the new generation, so every early
+	// return has to release it — otherwise the generation would stay pinned for the
+	// life of the process and never be reclaimed.
 	if buildErr != nil {
+		reg.Close()
 		rep.Elapsed = time.Since(start)
 		return rep, fmt.Errorf("dump: building the new index generation: %w", buildErr)
 	}
+	// A build that reported success WITHOUT a claim is a build this process cannot
+	// safely serve: the generation is in the arena, reapable, and nothing records
+	// that it is about to be served. Refusing keeps the previous generation, which
+	// is what a failed reload has always promised.
+	if reg == nil {
+		slog.Error("dump: refusing to swap in an index generation this process cannot claim; "+
+			"the previous generation keeps serving. Retry the reload, or give this server its own "+
+			"cache directory (MCP_1C_CACHE_DIR / --cache-dir).", "genDir", genDir)
+		rep.Elapsed = time.Since(start)
+		return rep, fmt.Errorf("dump: the new index generation %s was built without a reader claim", sigAfter)
+	}
 	if !generationReadyDir(genDir) {
+		reg.Close()
 		rep.Elapsed = time.Since(start)
 		return rep, fmt.Errorf("dump: the new generation %s has no %s sentinel after a build that reported success",
 			sigAfter, readySentinelName)
@@ -222,6 +243,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	// intact and serving.
 	names, pathByName, pathToDocID, err := readGenerationNames(idx.dir, genDir)
 	if err != nil {
+		reg.Close()
 		rep.Elapsed = time.Since(start)
 		return rep, fmt.Errorf("dump: reading the new generation's manifest: %w", err)
 	}
@@ -242,21 +264,11 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	// must never produce. Refuse and keep serving; an operator who really did
 	// empty the dump can restart.
 	if len(names) == 0 && before > 0 {
+		reg.Close()
 		rep.Elapsed = time.Since(start)
 		return rep, fmt.Errorf("dump: the new state of %s has no .bsl modules while the "+
 			"current index has %d; refusing to replace a working index with an empty one",
 			idx.dir, before)
-	}
-
-	// registerReader marks this process as a live holder of the NEW generation
-	// before its shards are opened, so a concurrent GC (ours below, or another
-	// process's) cannot reap it out from under the swap. A registration failure is
-	// not fatal for the same reason it is not fatal on the initial open.
-	reg, regErr := registerReader(genDir)
-	if regErr != nil {
-		slog.Warn("dump: reload could not register a reader for the new generation; "+
-			"a concurrent GC could reap it while it is served",
-			"genDir", genDir, "error", regErr)
 	}
 
 	shards, err := openCachedShards(cacheShardDirs(genDir), true, defaultBoltTimeout)
@@ -264,6 +276,16 @@ func (idx *Index) Reload() (ReloadReport, error) {
 		reg.Close()
 		rep.Elapsed = time.Since(start)
 		return rep, fmt.Errorf("dump: opening the new generation's shards: %w", err)
+	}
+	// A generation whose manifest lists modules but whose directory holds no shard
+	// to open is not a generation. openCachedShards cannot say so, because an empty
+	// input list is not an error to it — which is how a reaped generation became a
+	// live index that reported success and then answered nothing.
+	if len(shards) == 0 && len(names) > 0 {
+		reg.Close()
+		rep.Elapsed = time.Since(start)
+		return rep, fmt.Errorf("dump: the new generation %s lists %d modules but contains no shards to open; "+
+			"refusing to replace a working index with it", sigAfter, len(names))
 	}
 
 	oldShards, oldReg := idx.swapGeneration(sigAfter, shards, reg,

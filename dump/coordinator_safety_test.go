@@ -217,7 +217,7 @@ func TestReaderRegistry_LivenessReapsDeadEntry(t *testing.T) {
 	genDir := generationDir(cpath, gensig)
 
 	// No reader yet → not held.
-	if generationHasLiveReader(genDir) {
+	if reapHasLiveReader(t, genDir) {
 		t.Fatal("generationHasLiveReader true with no registered reader")
 	}
 
@@ -237,7 +237,7 @@ func TestReaderRegistry_LivenessReapsDeadEntry(t *testing.T) {
 	}
 
 	// Liveness must report not-held AND reap the dead entry as a side effect.
-	if generationHasLiveReader(genDir) {
+	if reapHasLiveReader(t, genDir) {
 		t.Fatal("a stale (dead) entry was counted as a live reader")
 	}
 	if _, err := os.Stat(dead); !os.IsNotExist(err) {
@@ -249,11 +249,11 @@ func TestReaderRegistry_LivenessReapsDeadEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registerReader: %v", err)
 	}
-	if !generationHasLiveReader(genDir) {
+	if !reapHasLiveReader(t, genDir) {
 		t.Fatal("a freshly registered reader was not detected as live")
 	}
 	reg.Close()
-	if generationHasLiveReader(genDir) {
+	if reapHasLiveReader(t, genDir) {
 		t.Fatal("reader still considered live after Close (deregister failed)")
 	}
 	// Close is idempotent.
