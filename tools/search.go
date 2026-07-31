@@ -60,6 +60,27 @@ func SearchCodeTool() *mcp.Tool {
 	}
 }
 
+// emptyIndexMessage is what search_code answers when the index holds no modules at
+// all. It is a named constant because it is the FIRST thing a new user sees when they
+// make the commonest first mistake, and because all three search modes must give the
+// same answer to the same question.
+//
+// WHAT IT HAS TO DO. An empty index is not an error and not a failed search: it is a
+// configuration that has not been dumped, or a --dump pointing somewhere else. Both
+// are things the user can check, so both are named. What it must NOT do is read as a
+// malfunction, which is exactly how «bleve search: cannot perform operation on empty
+// alias» read, and that was the shipped behaviour of the smart mode.
+//
+// It says «пуст» about the INDEX and not about the configuration, because an empty
+// index is all the server observed. A configuration that exists and was never dumped
+// produces the same empty index as a path that points at nothing.
+//
+// Customer-facing RU: no тире.
+const emptyIndexMessage = "Индекс пуст: в каталоге, указанном в --dump, не найдено ни одного " +
+	"файла .bsl.\n\nПроверьте два момента:\n" +
+	"1. Указан ли в --dump путь к каталогу выгрузки конфигурации.\n" +
+	"2. Выполнена ли сама выгрузка: Конфигуратор, Конфигурация -> Выгрузить конфигурацию в файлы."
+
 // NewSearchCodeHandler returns a ToolHandler that searches BSL code in a local dump.
 //
 // The handler is wrapped so every answer it gives carries the index-protection
@@ -100,7 +121,7 @@ func NewSearchCodeHandler(index *dump.Index) mcp.ToolHandler {
 		}
 
 		if stats.Total == 0 && index.ModuleCount() == 0 {
-			return textResult("Индекс пуст: в директории --dump не найдено .bsl файлов. Проверьте путь к выгрузке конфигурации."), nil
+			return textResult(emptyIndexMessage), nil
 		}
 
 		return textResult(FormatSearchResultWithStats(matches, stats, input.Query, mode, nil)), nil

@@ -3,6 +3,7 @@ package dump
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -1810,6 +1811,27 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 	req := bleve.NewSearchRequestOptions(q, params.Limit, 0, false)
 	result, err := idx.alias.Search(req)
 	if err != nil {
+		// AN INDEX WITH NOTHING IN IT IS NOT A FAILED SEARCH. bleve refuses to search
+		// an alias holding no indexes, and an empty dump legitimately produces exactly
+		// that: MEASURED, a dump directory with no .bsl builds a generation with ZERO
+		// shard directories and its READY sentinel in place, which the attach serves on
+		// purpose (see attachReadOnlyShards and TestReadOnlyCache_AnEmptyDumpIsStillServed).
+		// So the first search a new user ran against the wrong --dump answered with
+		// "bleve search: cannot perform operation on empty alias", an internal
+		// search-engine string, at the worst possible moment. Regex and exact never did:
+		// they scan a candidate list and a scan of nothing is zero matches, no error.
+		// Reporting nothing found is what the other two modes already report and what is
+		// actually true.
+		//
+		// THE MODULE COUNT IS THE DISCRIMINATOR, and it is the whole of the guard. An
+		// empty alias on an index that ALSO knows about no modules is an empty dump. An
+		// empty alias on an index that LISTS modules is the "lists N modules and holds no
+		// shards" state — the one Reload refuses to swap in and the one a generation
+		// reaped mid-open produces — and that must keep surfacing as the error it is
+		// rather than be dressed up as an empty configuration.
+		if errors.Is(err, bleve.ErrorAliasEmpty) && idx.ModuleCount() == 0 {
+			return nil, SearchStats{}, nil
+		}
 		return nil, SearchStats{}, fmt.Errorf("bleve search: %w", err)
 	}
 
