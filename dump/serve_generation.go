@@ -85,12 +85,12 @@ func (g *ServeGeneration) Release() {
 // them ever leaves a READY-and-unheld generation for a reaper to take. The one
 // branch that cannot do this is the fast path, where the generation was already in
 // the arena before this call: it has no private phase, so its claim is the ordinary
-// fail-closed post-adopt one and it can lose to a reaper and refuse. That residual
-// case is stated where the primitive lives, in registerReader.
+// post-adopt one and it can lose to a reaper. That residual case is stated where the
+// primitive lives, in registerReader.
 //
-// A claim that cannot be WRITTEN is decided by claimOrProveUnreapable, not by this
-// function: an arena in which no process can remove a generation needs no claim and
-// is served, and any other unwritable arena is refused with the remediation.
+// A claim that cannot be WRITTEN is decided by claimOrServeUnprotected, not by this
+// function, and it is never a refusal: the generation is served either way, and any
+// arena whose unwritability is not the kernel's EROFS is reported to the user.
 //
 // The returned handle owns a live claim. The caller MUST either hand it to
 // FinishServeOpen or Release it, or the generation stays pinned for the life of the
@@ -166,43 +166,37 @@ func PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reind
 
 // claimExistingGeneration claims a generation that was ALREADY in the arena when
 // this open started, i.e. one this process did not produce and therefore never had
-// a private phase to claim it in. This is the fail-closed post-adopt claim, and it
-// can lose: a reaper that took the generation first makes this refuse rather than
-// serve. Refusing is the correct outcome — the generation it would have served is
-// being deleted.
+// a private phase to claim it in. This is the post-adopt claim, and it can lose to
+// a reaper that took the generation first.
 //
-// A claim that cannot be WRITTEN AT ALL is a different failure from losing a race,
-// and claimOrProveUnreapable is what tells them apart: an arena nothing can reap
-// needs no claim and is served, an arena someone else can reap is refused. The
-// refusal is reported HERE, with the remediation, and not left to the generic
-// wrapper the caller would otherwise emit. Measured on the real binary before this:
-// a read-only cache produced "search: index build failed: claiming the existing
-// generation ...: permission denied" and no actionable line anywhere, because the
-// only text naming a remedy lives on paths this failure returns above.
+// LOSING THE CLAIM DOES NOT REFUSE THE OPEN, in any of its forms — that is what
+// claimOrServeUnprotected settles, and it never returns an error. What a failure
+// costs is protection, not service: the generation is served, the state is logged
+// at ERROR, and the user is told in the MCP tool response itself. Measured on the
+// real binary when this DID refuse: a read-only cache produced "search: index build
+// failed: claiming the existing generation ...: permission denied" on every start
+// for ever, while the shipped v1.12.0 answered the same query from the same cache.
+//
+// A generation that was actually REAPED mid-claim is still caught, by the checks
+// that can see it: FinishServeOpen re-tests the READY sentinel before attaching,
+// and openCachedShards fails on the vanished shard directories.
 func claimExistingGeneration(dumpDir, cacheDir, gensig string) (*ServeGeneration, error) {
 	cpath, err := cachePath(dumpDir, cacheDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving the cache path for %s: %w", dumpDir, err)
 	}
-	genDir := generationDir(cpath, gensig)
-	reg, err := claimOrProveUnreapable(genDir)
-	if err != nil {
-		slog.Error("dump: refusing to serve an index generation this process cannot claim; "+
-			"another process could delete it while it is being served. Give this server its own "+
-			"cache directory (MCP_1C_CACHE_DIR / --cache-dir), or make the cache directory writable.",
-			"genDir", genDir, "error", err)
-		return nil, fmt.Errorf("claiming the existing generation %s: %w", gensig, err)
-	}
-	return heldGeneration(gensig, reg)
+	return heldGeneration(gensig, claimOrServeUnprotected(generationDir(cpath, gensig)))
 }
 
-// heldGeneration wraps a claim that a producing path came away with, and REFUSES
-// when there is none. A nil registration here means the generation reached the
-// arena unclaimed: it is reapable, nothing records that this process is about to
-// serve it, and serving it anyway is exactly the silent degradation the whole
-// registry exists to prevent. Every producer either returns a live claim or an
-// error, so this is a guard against a future edit rather than a reachable state
-// today, which is why it names what went wrong rather than trying to recover.
+// heldGeneration wraps the registration a producing path came away with, and
+// refuses when there is NONE AT ALL. A nil registration is not the same thing as a
+// claimless one: a claimless registration is a decision this package made and
+// reports, whereas nil means a producing path returned success while forgetting to
+// say anything about the claim, and there is no honest notice to attach to that.
+// Every producer either returns a registration or an error — claimOrServeUnprotected
+// always returns one — so this is a guard against a future edit rather than a
+// reachable state today, which is why it names what went wrong rather than
+// trying to recover.
 func heldGeneration(gensig string, reg *readerRegistration) (*ServeGeneration, error) {
 	if reg == nil {
 		slog.Error("dump: refusing to serve an index generation that was prepared without a reader claim; "+

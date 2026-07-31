@@ -50,15 +50,21 @@ func ReloadDumpTool() *mcp.Tool {
 func boolPtr(b bool) *bool { return &b }
 
 // NewReloadDumpHandler returns a ToolHandler that reloads the dump index in place.
+//
+// It carries the index-protection notice for the same reason search_code does, and
+// with more force: an unwritable cache is precisely what reload_dump cannot work
+// around, so a user calling it is a user who needs to be told about the cache. The
+// state is read after the reload, so the notice describes the generation the call
+// leaves attached. See index_notice.go.
 func NewReloadDumpHandler(index *dump.Index) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return withIndexProtectionNotice(index, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		rep, err := index.Reload()
 		if err != nil {
 			return nil, fmt.Errorf("перезагрузка выгрузки не выполнена: %w.%s",
 				err, searchStateAfterFailedReload(index, err))
 		}
 		return textResult(FormatReloadReport(rep, index.Dir())), nil
-	}
+	})
 }
 
 // searchStateAfterFailedReload describes what the caller can still do, decided

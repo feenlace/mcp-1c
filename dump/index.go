@@ -493,6 +493,17 @@ type Index struct {
 	lockDir       string              // cache dir whose serve-lock this index holds (empty = none); released in Close
 	readOnly      bool                // true when shards were opened read-only (immutable generation serve); runtime base writes are rejected
 	readerReg     *readerRegistration // live reader-registry handle for the served generation (nil = none); deregistered in Close
+	// unprotected carries WHY the attached generation is being served without a
+	// reader claim, or "" while it is protected. It is what UnprotectedReason
+	// surfaces into the MCP tool response.
+	//
+	// It is an atomic and not a plain field guarded by mu because of who writes it
+	// and who reads it: attachReadOnlyShards writes it from the background open
+	// goroutine without mu, swapGeneration replaces it under mu, and every tool call
+	// reads it on the request goroutine. An atomic is the one shape correct for all
+	// three; a mu-guarded field would be a data race against the open, and reading
+	// idx.readerReg directly would be the same race one level down.
+	unprotected atomic.Pointer[string]
 	// cacheDir is the cache location this index was opened with, in NewIndex
 	// semantics (empty = the platform cache dir). Reload needs it to build the
 	// replacement generation under the SAME cache the current one lives in;
@@ -2230,6 +2241,42 @@ func (idx *Index) BuildError() error {
 // Dir returns the dump directory path.
 func (idx *Index) Dir() string {
 	return idx.dir
+}
+
+// UnprotectedReason returns why the index generation currently attached is being
+// served WITHOUT a reader claim, or "" when it is protected.
+//
+// THIS IS THE GUARANTEE'S OTHER HALF, and it is exported for exactly one purpose:
+// the server must never SILENTLY serve a generation it could not protect, and the
+// log is not where a user is looking. A non-empty return means the generation is
+// being served and answering correctly, and that a co-located process could remove
+// it while it is in use. The MCP tool layer turns it into a notice on the response
+// (see tools.withIndexProtectionNotice).
+//
+// "" covers both a generation held by a live claim and one on a read-only
+// filesystem, where the kernel refuses every write and there is no reaper to
+// protect it from. Those are not distinguished here because the user has nothing to
+// do about either.
+//
+// It is read per call, never cached by the caller: the open finishes in the
+// background after the index is handed out, and Reload swaps the attached
+// generation, so the answer changes during the process's life.
+func (idx *Index) UnprotectedReason() string {
+	if idx == nil {
+		return ""
+	}
+	if p := idx.unprotected.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// setUnprotected records the reason the attached generation is unprotected, or ""
+// when it is protected. Every site that installs or replaces idx.readerReg must
+// call it, so the notice can never describe a generation that is no longer the one
+// being served.
+func (idx *Index) setUnprotected(reason string) {
+	idx.unprotected.Store(&reason)
 }
 
 // GetPathIndex returns the path index for fast category/module filtering.

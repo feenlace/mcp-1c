@@ -1,0 +1,110 @@
+package tools
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/feenlace/mcp-1c/dump"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// The index-protection notice: the user-visible half of "the server never SILENTLY
+// serves an index generation it could not protect".
+//
+// WHY IT IS HERE AND NOT ONLY IN THE LOG. The dump package already reports an
+// unprotected serve at slog.Error (claimOrServeUnprotected). That line goes into a
+// file under the cache directory, which in stdio mode is the only place it CAN go,
+// and which is not where anybody running a search is looking. The whole defect in
+// the shipped release was not that a read-only cache serves; it is that it served
+// with nothing the user could see. A log nobody reads and no message at all are the
+// same thing.
+//
+// WHY EVERY RESPONSE AND NOT ONCE. The state is not an event, it is a condition
+// that holds for as long as the generation is attached, and it can begin or end
+// mid-process when Reload swaps the generation. A one-shot announcement is missable
+// by exactly the mechanism this exists to defeat: an MCP client that drops early
+// context, or a user who reads the fifth answer and not the first. The house
+// pattern is the same for every other standing condition in this package (the
+// «> Диагностика:» notes and the search shortfall note both re-appear on every
+// answer they apply to).
+//
+// WHY IT IS NOT NOISE. It is attached to the two tools that answer FROM the index
+// and to nothing else, so a server whose cache is fine never emits it at all, and
+// the tools that talk to live 1C are never decorated with a fact about a cache they
+// do not use. Silence is the normal case and is what gives the line its weight: a
+// notice on a properly claimed index would be the same defect as a refusal, just
+// quieter.
+
+// indexUnprotectedNotice is that line. It states what is true and nothing more: the
+// index is being served, it cannot be protected, a peer may remove it while it is
+// in use, and here are the two ways to fix that.
+//
+// It deliberately does NOT assert that the answer below it is complete or that the
+// server is working normally. It is attached to failed calls as well as successful
+// ones, and a reassurance printed next to an error is worth less than nothing.
+//
+// Customer-facing RU: no тире.
+const indexUnprotectedNotice = "> ВНИМАНИЕ: индекс выгрузки отдаётся без защиты. Серверу не удалось " +
+	"записать заявку читателя в каталоге кэша, поэтому другой процесс может удалить этот индекс " +
+	"прямо во время работы с ним. Выделите этому серверу отдельный каталог кэша (переменная " +
+	"`MCP_1C_CACHE_DIR` или флаг `--cache-dir`) либо сделайте текущий каталог кэша доступным для записи.\n"
+
+// withIndexProtectionNotice wraps an index-backed tool handler so that every
+// response it produces carries indexUnprotectedNotice while the attached generation
+// is unprotected, and none of them carries it otherwise.
+//
+// IT WRAPS THE HANDLER RATHER THAN THE FORMATTERS, and that is the point. A notice
+// added inside a formatter is a notice some other return path forgets: this package
+// already has a case where a warning had to be duplicated onto an early return so
+// the page could not swallow it (writeObjectWarnings). A wrapper has no return path
+// to miss, including ones added later.
+//
+// ERRORS ARE DECORATED TOO. The MCP SDK turns a handler error into a CallToolResult
+// with IsError and the error text as its content, so it is user-visible output like
+// any other, and a failing call on a frozen cache is exactly when the reason
+// matters. Wrapping keeps the original error in the chain, so errors.Is and
+// errors.As on it keep working.
+//
+// The state is read AFTER the handler runs, so a reload_dump call that swaps the
+// generation is described by the state it left behind rather than the one it found.
+func withIndexProtectionNotice(index *dump.Index, h mcp.ToolHandler) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res, err := h(ctx, req)
+		if index.UnprotectedReason() == "" {
+			return res, err
+		}
+		if err != nil {
+			return res, fmt.Errorf("%w\n\n%s", err, indexUnprotectedNotice)
+		}
+		return prependNotice(res, indexUnprotectedNotice), nil
+	}
+}
+
+// prependNotice puts notice at the very front of a tool result.
+//
+// It SPLICES INTO THE FIRST TEXT BLOCK rather than adding a second content block,
+// because a client that renders only the first block would drop a separate one, and
+// a notice that some clients do not show is the invisible-warning defect again in a
+// new place. A result with no text block to splice into gets the notice as its own
+// block, which is the best available and still better than nothing.
+//
+// The front, and not the end under the body: this is a statement about the whole
+// answer, like the «> Диагностика:» notes, not a footnote about one number, like
+// the search shortfall note.
+func prependNotice(res *mcp.CallToolResult, notice string) *mcp.CallToolResult {
+	if res == nil {
+		return textResult(notice)
+	}
+	for i, c := range res.Content {
+		tc, ok := c.(*mcp.TextContent)
+		if !ok {
+			continue
+		}
+		// A fresh value rather than a mutation: the caller's block may be shared with
+		// something that has already been handed out.
+		res.Content[i] = &mcp.TextContent{Text: notice + "\n" + tc.Text}
+		return res
+	}
+	res.Content = append([]mcp.Content{&mcp.TextContent{Text: notice}}, res.Content...)
+	return res
+}

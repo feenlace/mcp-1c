@@ -473,47 +473,66 @@ func (idx *Index) FinishServeOpen(cacheDir string, gen *ServeGeneration, prepErr
 // there is no instant at which the generation is READY in the arena and unheld
 // (see buildGeneration). Taking a fresh claim here instead would put that instant
 // back. nil means "this process did not produce this generation", and then the
-// only thing left to do is claimOrProveUnreapable's fail-closed post-adopt claim.
+// only thing left to do is claimOrServeUnprotected's post-adopt claim.
 //
 // A nil held is NOT what the serve fast path passes. PrepareServeGeneration already
-// went through claimOrProveUnreapable and hands its result down, including the
-// claim-less registration an unreapable arena yields, which is non-nil — so this
-// branch does not re-run for it and the frozen-arena proof is logged once per open,
+// went through claimOrServeUnprotected and hands its result down, including the
+// claimless registration an unwritable arena yields, which is non-nil — so this
+// branch does not re-run for it and the unprotected state is logged once per open,
 // not twice. The callers that DO arrive with nil are the ones that never claimed at
 // all: OpenGenerationReadOnly, and OpenForServe through it.
 //
 // OWNERSHIP: on entry idx owns held, on every path. It is released here if
 // anything below fails, and released by Close otherwise.
 func (idx *Index) attachReadOnlyShards(genDir string, held *readerRegistration) error {
-	// Claim FIRST, and REFUSE if it cannot be done. This used to be best-effort:
-	// the failure was a slog.Warn and the open carried on. cmd/mcp-1c/main.go pins
-	// the default slog handler to LevelError, so that warning reached nobody, and
-	// the process then served a generation no reaper in the arena had any reason to
-	// keep — which is exactly what a co-located reaper deleted, while this process
-	// kept answering out of unlinked inodes. Serving on without a claim is the
-	// "degraded component reports a pass" failure; the only correct answer is to
-	// stop here and say why, loudly enough to be heard at the default log level.
+	// Claim FIRST, so a live reader is visible to every reaper in the arena as early
+	// as possible. A claim that cannot be written does not stop the open — it is
+	// carried on the registration and surfaced to the user by UnprotectedReason, and
+	// that is what claimOrServeUnprotected decides.
 	reg := held
 	if reg == nil {
-		var err error
-		if reg, err = claimOrProveUnreapable(genDir); err != nil {
-			slog.Error("dump: refusing to serve an index generation this process cannot claim; "+
-				"another process could delete it while it is being served. Give this server its own "+
-				"cache directory (MCP_1C_CACHE_DIR / --cache-dir), or make the cache directory writable.",
-				"genDir", genDir, "error", err)
-			return fmt.Errorf("refusing to serve generation %s without a reader claim: %w",
-				filepath.Base(genDir), err)
-		}
+		reg = claimOrServeUnprotected(genDir)
 	}
 	idx.readerReg = reg
+	idx.setUnprotected(reg.unprotectedReason())
 
 	shardDirs := cacheShardDirs(genDir)
+	// A GENERATION THAT VANISHED IS NOT AN EMPTY GENERATION, and nothing below can
+	// tell them apart on its own. cacheShardDirs swallows its ReadDir error and
+	// returns nil, openCachedShards does not treat an empty input as a failure, and
+	// LoadManifest reports a MISSING manifest as (nil, nil) — so loadNamesReadOnly
+	// falls back to walking the dump and the open finishes READY, with 5 names, 0
+	// shards, and every search answering "cannot perform operation on empty alias".
+	// MEASURED, exactly that, by removing the generation between the READY check and
+	// this call.
+	//
+	// It became reachable when a claim that cannot be written stopped refusing: the
+	// refusal used to catch the reaped generation on its way past, for the wrong
+	// reason. Reload has carried the same guard since the same defect was found
+	// there. READY is what separates the two cases: a reaper renames the whole
+	// directory out of the arena, taking the sentinel with it, while a genuinely
+	// empty dump builds a generation that keeps its sentinel and has nothing to
+	// shard.
+	if len(shardDirs) == 0 && !generationReadyDir(genDir) {
+		if reg != nil {
+			reg.Close()
+		}
+		idx.readerReg = nil
+		idx.setUnprotected("")
+		return fmt.Errorf("generation %s has no shards and no %s sentinel, so it was removed while this "+
+			"open was resolving it; refusing to serve an index with nothing in it",
+			filepath.Base(genDir), readySentinelName)
+	}
 	shards, err := openCachedShards(shardDirs, true, defaultBoltTimeout)
 	if err != nil {
 		if idx.readerReg != nil {
 			idx.readerReg.Close()
 			idx.readerReg = nil
 		}
+		// Nothing is being served, so nothing is being served unprotected. Leaving the
+		// reason set would put a notice about an index in use on top of every answer
+		// of an index that never opened.
+		idx.setUnprotected("")
 		return fmt.Errorf("opening read-only generation shards: %w", err)
 	}
 	idx.readOnly = true
@@ -624,8 +643,11 @@ func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
 // resolves, and its post-claim re-read of READY reads the original path too. So
 // either a racing claimant got its entry in before the rename — in which case the
 // entry moved with the directory, the second scan finds it, and the rename is
-// undone — or it did not, and it fails and refuses to serve. Neither ends with a
-// deleted generation that something is serving.
+// undone — or it did not, and its claim fails. A failed claim no longer stops that
+// claimant (claimOrServeUnprotected serves and reports instead), so what stops it
+// here is the generation itself being gone: the READY sentinel went with the
+// rename, and attachReadOnlyShards refuses a shardless generation that has lost it.
+// Neither branch ends with a deleted generation that something is serving.
 func removeUnheldGeneration(gensDir, name string) (bool, error) {
 	genDir := filepath.Join(gensDir, name)
 
@@ -1055,16 +1077,19 @@ func buildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*readerReg
 // Its three callers all reach it holding a generation this process did NOT produce
 // — the content-addressed build no-op, the loser of an adopt race, and the migration
 // that found the generation already there — so it goes through the same
-// claimOrProveUnreapable as the serve fast path rather than through registerReader
+// claimOrServeUnprotected as the serve fast path rather than through registerReader
 // directly. MEASURED, and it is why: with the bare registerReader here, `--reindex`
 // against a read-only cache refused to serve ("force-rebuilding ... permission
 // denied") while v1.12.0 served, because forceRebuildGeneration's drop is skipped,
 // its build no-ops on the still-READY generation, and the claim lands here.
+//
+// The error result is retained because the signature is shared with the callers'
+// own failure handling; claimOrServeUnprotected never produces one.
 func claimBuiltGeneration(genDir string, claim buildClaim) (*readerRegistration, error) {
 	if !claim {
 		return nil, nil
 	}
-	return claimOrProveUnreapable(genDir)
+	return claimOrServeUnprotected(genDir), nil
 }
 
 // forceDropGeneration removes the immutable generation directory genDir to force a
@@ -1241,10 +1266,11 @@ func OpenForServe(dir, cacheDir string) (*Index, error) {
 // rather than taken here; the READY check is kept because a producer that returned
 // no generation at all must not reach the attach.
 func openClaimedGeneration(dir, cacheDir, gensig string, reg *readerRegistration) (*Index, error) {
-	// No claim means the generation reached the arena unheld and a reaper may
-	// already be removing it. Refuse rather than serve, exactly as the post-adopt
-	// path does. Every producer returns either a claim or an error, so this guards
-	// a future edit rather than a state reachable today.
+	// A nil registration is not a failed claim — a failed claim is a claimless
+	// registration, which serves and reports. It means a producer returned success
+	// while saying nothing at all about the claim, and there is no honest notice to
+	// attach to that. Every producer returns either a registration or an error, so
+	// this guards a future edit rather than a state reachable today.
 	if reg == nil {
 		return nil, fmt.Errorf("the migrated generation %s carries no reader claim, so it cannot be served",
 			gensig)

@@ -61,8 +61,12 @@ func SearchCodeTool() *mcp.Tool {
 }
 
 // NewSearchCodeHandler returns a ToolHandler that searches BSL code in a local dump.
+//
+// The handler is wrapped so every answer it gives carries the index-protection
+// notice while the served generation is unprotected. search_code IS the index, so
+// this is the surface where that state has to be visible; see index_notice.go.
 func NewSearchCodeHandler(index *dump.Index) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return withIndexProtectionNotice(index, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input searchCodeInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
 			return nil, fmt.Errorf("parsing input: %w", err)
@@ -100,7 +104,7 @@ func NewSearchCodeHandler(index *dump.Index) mcp.ToolHandler {
 		}
 
 		return textResult(FormatSearchResultWithStats(matches, stats, input.Query, mode, nil)), nil
-	}
+	})
 }
 
 // MatchDisplay holds the display name and optional prefix for a search match.

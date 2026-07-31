@@ -2,22 +2,27 @@ package dump
 
 // A cache this process may READ but not WRITE.
 //
-// THE DEFECT. Making the reader claim mandatory turned every generation in an
-// unwritable cache into a permanent refusal. Measured on the real binary against a
-// warm cache that had just answered "220 совпадений": chmod -R a-w, and the next
-// start returns "search: index build failed: claiming the existing generation ...:
-// permission denied", and so does the one after it, and every one after that.
-// v1.12.0 on the same cache answers the query. The refusal is right whenever
-// something could delete the generation; it is wrong when nothing can, and the
-// process was not asking which.
+// THE PROPERTY these tests pin, in one sentence: the server never SILENTLY serves
+// an index generation it could not protect. Both halves are load-bearing and each
+// one alone is a defect.
 //
-// THE PROPERTY these tests pin: a claim that cannot be WRITTEN is not by itself a
-// reason to refuse, and it is not by itself a reason to serve either. Serving is
-// permitted only against a PROOF that no process can remove the generation
-// (arenaUnreapable), and an arena someone else could still write is refused exactly
-// as before. The pair matters more than either half: a fix that only made the
-// refusal go away would have restored the original defect — serving a generation
-// nothing protects — under a new name.
+//   - It SERVES. Making the reader claim mandatory turned every generation in an
+//     unwritable cache into a permanent refusal. Measured on the real binary against
+//     a warm cache that had just answered: chmod -R a-w, and the next start returns
+//     "search: index build failed: claiming the existing generation ...: permission
+//     denied", and so does every one after it. v1.12.0 on the same cache answers.
+//   - It SAYS SO, where the user is looking. The claim-less serve is logged at ERROR
+//     and, crucially, carried into the MCP tool response through
+//     (*Index).UnprotectedReason. A log line under the cache directory is not a
+//     report; the shipped release "warned" that way and nobody ever saw it.
+//
+// AND IT NO LONGER CONSULTS THE MODE BITS. The previous attempt allowed a silent
+// claim-less serve against a "proof" built from os.Stat().Mode().Perm(): a
+// permission-refused probe plus a mode with no write bit for anyone. That proof is
+// FALSE, and TestReadOnlyCache_AnACLBearing0555ArenaIsNotSilentlyTrusted is the
+// measurement that kills it. The only proof still accepted is EROFS, which is the
+// kernel asserting a property of the whole filesystem rather than of our
+// credentials.
 //
 // EVERY FROZEN-ARENA TEST CARRIES A POSITIVE CONTROL that the claim really could
 // not be written (serveFrozenClaimRefused). Without it a chmod that silently failed,
@@ -26,30 +31,25 @@ package dump
 //
 // WHAT IS NOT PINNED HERE, stated rather than left to be discovered:
 //
-//   - The EROFS branch is pinned only through classifyArenaProbe, not through a
-//     real read-only mount, because no unit test can portably create one. The
-//     inputs the table feeds it are MEASURED, not invented: on a macOS UDRO image
-//     the probe fails with EROFS while os.Stat reports mode 0755. The end-to-end
-//     half was run by hand against a mounted UDRO image of a warm cache — v1.12.0
-//     served, a74dc1a refused, this code serves and logs the read-only-mount proof
-//     — and that run is not reproduced by any test in this repo.
-//   - The branch that refuses an arena writable BY ITS OWNER but not by us is
-//     pinned only through classifyArenaProbe for the same kind of reason: creating
-//     a directory owned by another uid needs privileges a test does not have. The
-//     end-to-end refusal IS pinned, but via the arena-writable-by-us case
-//     (TestReadOnlyCache_AnArenaAPeerCouldReapIsStillRefused), which reaches the
-//     same refusal through a different branch of the same function.
-//   - Nothing here pins the Windows behaviour. There directory rights are ACLs and
-//     Mode().Perm() does not describe them, so the mode branch never fires and an
-//     unclaimable generation keeps being refused. That is fail-closed and no worse
-//     than a74dc1a, but it is untested on this machine.
-//   - Close's unreapable guard IS pinned, but only against a state no production
-//     path can reach: a claim-less registration whose started flag is set. start()
-//     refuses to set it, so the test sets it directly. Without that half the guard
-//     survived every mutation — with started false, Close falls into the
-//     never-started branch and removes an empty path, which is indistinguishable
-//     from the guard's own early return. It is a real test of the guard and not a
-//     test that anything today can reach it.
+//   - The EROFS branch is pinned only through probeProvesReadOnlyFilesystem, on
+//     synthesised errors, because no unit test can portably create a read-only
+//     mount. The inputs are MEASURED, not invented: on a macOS UDRO image the probe
+//     fails with EROFS while os.Stat reports mode 0755. NOTHING HERE PINS THE
+//     END-TO-END EROFS PATH — that an index on a read-only mount is served AND
+//     carries no notice is pinned only at the unit boundary (the claimless
+//     registration with an empty reason), never through a real mount.
+//   - Nothing here pins the Windows behaviour. There directory rights are ACLs,
+//     which is now irrelevant to the decision — the mode is not consulted anywhere —
+//     but the probe's error classification on Windows is untested on this machine.
+//   - The ACL test is darwin-only and skips elsewhere. It shells out to /bin/chmod
+//     because Go's os package cannot set an ACL.
+//   - Close's claimless guard IS pinned, but only against a state no production path
+//     can reach: a claimless registration whose started flag is set. start() refuses
+//     to set it, so the test sets it directly. Without that half the guard survived
+//     every mutation — with started false, Close falls into the never-started branch
+//     and removes an empty path, which is indistinguishable from the guard's own
+//     early return. It is a real test of the guard and not a test that anything
+//     today can reach it.
 
 import (
 	"context"
@@ -57,7 +57,9 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -154,8 +156,9 @@ func serveFrozenPrepared(t *testing.T, dumpDir, cacheDir string) string {
 // serveFrozenSearch opens gen for serving and returns the number of hits for the
 // term every module carries. It goes through the same FinishServeOpen the real
 // serve entry point uses, so a claim-less registration is carried through the
-// attach exactly as in production.
-func serveFrozenSearch(t *testing.T, dumpDir, cacheDir string, gen *ServeGeneration) int {
+// attach exactly as in production. idx is returned so the caller can also read the
+// state the attach published.
+func serveFrozenSearch(t *testing.T, dumpDir, cacheDir string, gen *ServeGeneration) (int, *Index) {
 	t.Helper()
 	idx := NewServePlaceholder(dumpDir)
 	t.Cleanup(func() { _ = idx.Close() })
@@ -172,13 +175,13 @@ func serveFrozenSearch(t *testing.T, dumpDir, cacheDir string, gen *ServeGenerat
 	if err != nil {
 		t.Fatalf("searching the served generation: %v", err)
 	}
-	return len(hits)
+	return len(hits), idx
 }
 
-// TestReadOnlyCache_FrozenArenaIsServedWithoutAClaim is the regression itself: a
-// cache whose write bits are all gone must still serve, because nothing can remove
-// what is in it.
-func TestReadOnlyCache_FrozenArenaIsServedWithoutAClaim(t *testing.T) {
+// TestReadOnlyCache_FrozenArenaIsServedAndReported is the regression itself, and
+// both of its assertions are the point: a cache whose write bits are all gone must
+// still serve, AND the process must say it is serving unprotected.
+func TestReadOnlyCache_FrozenArenaIsServedAndReported(t *testing.T) {
 	dumpDir := serveFrozenDump(t)
 	cacheDir := t.TempDir()
 	gensig := serveFrozenPrepared(t, dumpDir, cacheDir)
@@ -191,25 +194,108 @@ func TestReadOnlyCache_FrozenArenaIsServedWithoutAClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a frozen cache must still be servable, but the open refused: %v", err)
 	}
-	// It must have taken the PROVEN route, not an ordinary claim. Without this the
-	// test would also pass if the freeze had silently not applied.
-	if reason := gen.claim().unreapableReason(); reason == "" {
-		t.Fatal("the generation was served with an ordinary reader claim, so the frozen-arena route " +
-			"was never exercised")
-	} else if !strings.Contains(reason, "no write permission") {
-		t.Errorf("the proof does not name the mode that produced it: %q", reason)
+	// It must have taken the claim-less route, not an ordinary claim. Without this
+	// the test would also pass if the freeze had silently not applied.
+	reason := gen.claim().unprotectedReason()
+	if reason == "" {
+		t.Fatal("the generation reports itself protected; either it took an ordinary reader claim, " +
+			"so the frozen-arena route was never exercised, or it is serving unprotected in silence")
 	}
-	if n := serveFrozenSearch(t, dumpDir, cacheDir, gen); n != serveFrozenModules {
-		t.Errorf("the frozen cache served %d modules, want %d", n, serveFrozenModules)
+	if !strings.Contains(reason, gensig) {
+		t.Errorf("the reason does not name the generation it is about: %q", reason)
+	}
+
+	hits, idx := serveFrozenSearch(t, dumpDir, cacheDir, gen)
+	if hits != serveFrozenModules {
+		t.Errorf("the frozen cache served %d modules, want %d", hits, serveFrozenModules)
+	}
+	// THE STATE MUST SURVIVE INTO THE INDEX, because that is the only place the tool
+	// layer can read it. A reason carried on the registration and dropped at the
+	// attach is a warning that never reaches a user.
+	if idx.UnprotectedReason() == "" {
+		t.Error("the index serving the frozen generation reports itself protected, so no tool " +
+			"response will carry a notice and the serve is silent after all")
+	}
+}
+
+// TestReadOnlyCache_AnACLBearing0555ArenaIsNotSilentlyTrusted is the measurement
+// that killed the mode-bits proof, kept as a test.
+//
+// The previous attempt served an arena claim-less and IN SILENCE whenever a refused
+// probe met a mode with no write bit for anyone. os.Stat().Mode().Perm() cannot see
+// ACLs, so an arena reporting 0555 that a group may still write was declared
+// unreapable. It is not: the real reap — the same os.Rename out of the arena that
+// claimGenerationForRemoval performs — succeeds on such a directory and leaves the
+// mode still reading 0555. ~/Library/Caches on macOS carries an ACL already, so
+// this is routine rather than exotic.
+//
+// The no-ACL control is the plain frozen arena in the test above: same mode, no
+// ACL, and it must reach the same verdict. If the two ever diverged, the mode or
+// the ACL would be deciding something again.
+func TestReadOnlyCache_AnACLBearing0555ArenaIsNotSilentlyTrusted(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("chmod +a and ls -le are macOS ACL tools; this vector is not portable")
+	}
+	dumpDir := serveFrozenDump(t)
+	cacheDir := t.TempDir()
+	gensig := serveFrozenPrepared(t, dumpDir, cacheDir)
+
+	genDir := serveClaimGenDir(t, dumpDir, cacheDir, gensig)
+	arena := filepath.Dir(genDir)
+	freezeTree(t, cacheDir)
+
+	// The ACL grants write to a group this test process is NOT in, which is what
+	// makes the arena unwritable for us and writable for someone else — exactly the
+	// shape the mode-bits proof waved through.
+	if out, err := exec.Command("/bin/chmod", "+a",
+		"group:wheel allow write,delete,add_file,add_subdirectory,delete_child", arena).CombinedOutput(); err != nil {
+		t.Skipf("cannot set an ACL on %s (%v): %s", arena, err, out)
+	}
+
+	// VERIFY THE FIXTURE IS WHAT IT CLAIMS TO BE, on both counts, or the test proves
+	// nothing about ACLs at all.
+	out, err := exec.Command("/bin/ls", "-lde", arena).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ls -le on %s: %v", arena, err)
+	}
+	if !strings.Contains(string(out), "group:wheel allow") {
+		t.Fatalf("the control failed: no ACL is present on %s after chmod +a:\n%s", arena, out)
+	}
+	st, err := os.Stat(arena)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o555 {
+		t.Fatalf("the control failed: the arena reports mode %04o, not 0555, so it is not the "+
+			"fixture this test is about", perm)
+	}
+	serveFrozenClaimRefused(t, genDir)
+
+	gen, err := PrepareServeGeneration(context.Background(), dumpDir, cacheDir, false)
+	if err != nil {
+		t.Fatalf("an ACL-bearing read-only cache must still serve, but the open refused: %v", err)
+	}
+	if gen.claim().unprotectedReason() == "" {
+		t.Fatalf("an arena reporting mode 0555 WITH an ACL granting write to group wheel was served "+
+			"as if protected. A wheel process can rename the generation out of %s and delete it, "+
+			"and Mode().Perm() cannot see that ACL, so this serve is silent and unprotected", arena)
+	}
+	hits, idx := serveFrozenSearch(t, dumpDir, cacheDir, gen)
+	if hits != serveFrozenModules {
+		t.Errorf("the ACL-bearing cache served %d modules, want %d", hits, serveFrozenModules)
+	}
+	if idx.UnprotectedReason() == "" {
+		t.Error("the index reports itself protected, so no tool response will carry a notice")
 	}
 }
 
 // TestReadOnlyCache_ReindexOnAFrozenArenaStillServes covers the path the brief for
-// this fix did not name. --reindex skips the ready fast path entirely: it goes to
-// forceRebuildGeneration, whose drop cannot happen on a frozen arena, whose build
-// then no-ops on the still-READY generation, and whose claim lands in
-// claimBuiltGeneration. MEASURED on the real binary before the fix: v1.12.0 served,
-// a74dc1a returned "force-rebuilding dump generation ...: permission denied".
+// the previous fix did not name. --reindex skips the ready fast path entirely: it
+// goes to forceRebuildGeneration, whose drop cannot happen on a frozen arena, whose
+// build then no-ops on the still-READY generation, and whose claim lands in
+// claimBuiltGeneration. MEASURED on the real binary before that fix: v1.12.0
+// served, a74dc1a returned "force-rebuilding dump generation ...: permission
+// denied".
 func TestReadOnlyCache_ReindexOnAFrozenArenaStillServes(t *testing.T) {
 	dumpDir := serveFrozenDump(t)
 	cacheDir := t.TempDir()
@@ -223,11 +309,12 @@ func TestReadOnlyCache_ReindexOnAFrozenArenaStillServes(t *testing.T) {
 		t.Fatalf("--reindex against a frozen cache must still serve the existing generation, "+
 			"but it refused: %v", err)
 	}
-	if gen.claim().unreapableReason() == "" {
-		t.Fatal("the reindex path took an ordinary claim, so the frozen-arena route was not exercised")
+	if gen.claim().unprotectedReason() == "" {
+		t.Fatal("the reindex path reports the generation protected, so either it took an ordinary " +
+			"claim and the frozen-arena route was not exercised, or it is serving silently")
 	}
-	if n := serveFrozenSearch(t, dumpDir, cacheDir, gen); n != serveFrozenModules {
-		t.Errorf("the frozen cache served %d modules under --reindex, want %d", n, serveFrozenModules)
+	if hits, _ := serveFrozenSearch(t, dumpDir, cacheDir, gen); hits != serveFrozenModules {
+		t.Errorf("the frozen cache served %d modules under --reindex, want %d", hits, serveFrozenModules)
 	}
 }
 
@@ -246,8 +333,9 @@ func TestReadOnlyCache_OpenForServeIsCoveredToo(t *testing.T) {
 		t.Fatalf("OpenGenerationReadOnly must serve a frozen arena, but it refused: %v", err)
 	}
 	t.Cleanup(func() { _ = idx.Close() })
-	if reason := idx.readerReg.unreapableReason(); reason == "" {
-		t.Fatal("the read-only open took an ordinary claim, so the frozen-arena route was not exercised")
+	if idx.UnprotectedReason() == "" {
+		t.Fatal("the read-only open reports the generation protected, so either it took an ordinary " +
+			"claim and the frozen-arena route was not exercised, or it is serving silently")
 	}
 	<-idx.Done()
 	hits, _, err := idx.Search(SearchParams{Query: serveFrozenTerm, Limit: 20})
@@ -259,12 +347,16 @@ func TestReadOnlyCache_OpenForServeIsCoveredToo(t *testing.T) {
 	}
 }
 
-// TestReadOnlyCache_AnArenaAPeerCouldReapIsStillRefused is the other half, and the
-// one that stops the fix from becoming the defect it replaced. The generation
-// directory is frozen so no claim can be written, but the ARENA around it is not,
-// so a reaper can still rename the generation out of it and delete it. There is
-// nothing to prove and the only sound answer is to refuse.
-func TestReadOnlyCache_AnArenaAPeerCouldReapIsStillRefused(t *testing.T) {
+// TestReadOnlyCache_AnArenaAPeerCouldReapIsServedAndReported is the case the
+// previous attempt refused. The generation directory is frozen so no claim can be
+// written, but the ARENA around it is not, so a reaper can rename the generation
+// out of it and delete it. The owner's decision is that breaking a working setup to
+// guard against that is worse than the risk, PROVIDED the risk is not hidden: this
+// serves, and it reports.
+//
+// The reaper the notice is about really can act, which is what stops this from
+// being a test of a warning about nothing.
+func TestReadOnlyCache_AnArenaAPeerCouldReapIsServedAndReported(t *testing.T) {
 	dumpDir := serveFrozenDump(t)
 	cacheDir := t.TempDir()
 	gensig := serveFrozenPrepared(t, dumpDir, cacheDir)
@@ -274,90 +366,324 @@ func TestReadOnlyCache_AnArenaAPeerCouldReapIsStillRefused(t *testing.T) {
 	serveFrozenClaimRefused(t, genDir)
 
 	gen, err := PrepareServeGeneration(context.Background(), dumpDir, cacheDir, false)
-	if err == nil {
-		gen.Release()
-		t.Fatal("an unclaimable generation in a WRITABLE arena was served; a reaper can remove it, " +
-			"so serving it is the defect this whole change set exists to prevent")
+	if err != nil {
+		t.Fatalf("an unclaimable generation in a writable arena must be served, not refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "is writable by this process") {
-		t.Errorf("the refusal does not say why no proof was possible: %v", err)
+	if gen.claim().unprotectedReason() == "" {
+		t.Fatal("a generation a peer's reaper can remove was served as if protected")
 	}
-	// And the reaper the refusal is about really can act, which is what makes the
-	// refusal correct rather than merely cautious.
+	if hits, idx := serveFrozenSearch(t, dumpDir, cacheDir, gen); hits != serveFrozenModules {
+		t.Errorf("the served generation returned %d modules, want %d", hits, serveFrozenModules)
+	} else if idx.UnprotectedReason() == "" {
+		t.Error("the index reports itself protected, so no tool response will carry a notice")
+	}
+
+	// CONTROL: the reaper really can run against this arena.
 	if _, gcErr := GCGenerations(dumpDir, cacheDir, serveClaimForeignGensig); gcErr != nil {
 		t.Fatalf("the control failed: GC could not even run against this arena: %v", gcErr)
 	}
 }
 
-// TestReadOnlyCache_ProbeClassification pins each branch of the proof, including
-// the two no test on this machine can reach through the filesystem. See the file
-// header for what that does and does not establish.
-func TestReadOnlyCache_ProbeClassification(t *testing.T) {
-	const arena = "/some/cache/g"
-	perr := func(e error) error { return &fs.PathError{Op: "open", Path: arena + "/.reapprobe-1", Err: e} }
+// TestReadOnlyCache_AHealthyCacheIsSilent is requirement-shaped rather than
+// defect-shaped: a warning on a properly claimed index is the same defect as a
+// refusal, just quieter. An ordinary writable cache must produce a live claim, an
+// empty reason, and NO ERROR-level log line.
+func TestReadOnlyCache_AHealthyCacheIsSilent(t *testing.T) {
+	dumpDir := serveFrozenDump(t)
+	cacheDir := t.TempDir()
+
+	rec := captureLogs(t)
+	gen, err := PrepareServeGeneration(context.Background(), dumpDir, cacheDir, false)
+	if err != nil {
+		t.Fatalf("an ordinary writable cache must serve: %v", err)
+	}
+	if reason := gen.claim().unprotectedReason(); reason != "" {
+		t.Errorf("a writable cache reported itself unprotected: %q", reason)
+	}
+	if gen.claim().claimless {
+		t.Error("a writable cache produced a claimless registration, so nothing records the serve")
+	}
+	hits, idx := serveFrozenSearch(t, dumpDir, cacheDir, gen)
+	if hits != serveFrozenModules {
+		t.Errorf("the healthy cache served %d modules, want %d", hits, serveFrozenModules)
+	}
+	if reason := idx.UnprotectedReason(); reason != "" {
+		t.Errorf("the index on a healthy cache would put a notice on every tool response: %q", reason)
+	}
+	for _, msg := range rec.atLevel(slog.LevelError) {
+		if strings.Contains(msg, "without a reader claim") {
+			t.Errorf("a healthy serve logged the unprotected line at ERROR: %q", msg)
+		}
+	}
+}
+
+// TestReadOnlyCache_AReapedGenerationIsNotServedAsAnEmptyIndex is the defect the
+// removal of the refusal opened, closed.
+//
+// Serving on a failed claim means the reaped generation is no longer stopped by
+// the claim on its way past, and nothing below the claim could tell "removed" from
+// "empty": cacheShardDirs swallows its ReadDir error, openCachedShards accepts an
+// empty list, and LoadManifest reports a missing manifest as no manifest, so
+// loadNamesReadOnly walks the dump instead. MEASURED before this guard: ready=true,
+// buildErr=nil, 0 shards, 5 names, and every search answering "cannot perform
+// operation on empty alias". A component that reports success while holding nothing
+// is the failure mode this whole change set exists to prevent.
+//
+// It calls openReadOnlyFrom rather than OpenGenerationReadOnly on purpose: the
+// state under test is the one AFTER the READY gate has passed, which is precisely
+// the window a real reaper wins.
+func TestReadOnlyCache_AReapedGenerationIsNotServedAsAnEmptyIndex(t *testing.T) {
+	dumpDir := serveFrozenDump(t)
+	cacheDir := t.TempDir()
+	gensig := serveFrozenPrepared(t, dumpDir, cacheDir)
+	genDir := serveClaimGenDir(t, dumpDir, cacheDir, gensig)
+
+	// POSITIVE CONTROL: the same call on the same generation, still present, opens
+	// and answers. Without it a guard that refused everything would pass below.
+	ctrl, err := openReadOnlyFrom(dumpDir, cacheDir, genDir, nil)
+	if err != nil {
+		t.Fatalf("the control failed: an intact generation must open: %v", err)
+	}
+	<-ctrl.Done()
+	if hits, _, sErr := ctrl.Search(SearchParams{Query: serveFrozenTerm, Limit: 20}); sErr != nil || len(hits) != serveFrozenModules {
+		t.Fatalf("the control failed: an intact generation answered %d hits (err %v), want %d",
+			len(hits), sErr, serveFrozenModules)
+	}
+	_ = ctrl.Close()
+
+	// The reaper won the race: claimGenerationForRemoval renamed the generation out
+	// of the arena and deleted it, taking the READY sentinel with it.
+	if err := os.RemoveAll(genDir); err != nil {
+		t.Fatal(err)
+	}
+
+	idx, err := openReadOnlyFrom(dumpDir, cacheDir, genDir, nil)
+	if err == nil {
+		t.Cleanup(func() { _ = idx.Close() })
+		<-idx.Done()
+		hits, total, sErr := idx.Search(SearchParams{Query: serveFrozenTerm, Limit: 20})
+		t.Fatalf("a generation that no longer exists was opened for serving: ready=%v buildErr=%v "+
+			"shards=%d names=%d, and a search over it returns hits=%d total=%d err=%v",
+			idx.Ready(), idx.BuildError(), len(idx.shards), len(idx.names), len(hits), total, sErr)
+	}
+	if !strings.Contains(err.Error(), gensig) {
+		t.Errorf("the refusal does not name the generation it is about: %v", err)
+	}
+}
+
+// TestReadOnlyCache_AnEmptyDumpIsStillServed is the other half of the guard above,
+// and it is not hypothetical: MEASURED, a dump directory with no .bsl at all builds
+// a perfectly good generation with ZERO shard directories and its READY sentinel in
+// place (entries: READY, readers). A guard that refused on "no shards" alone would
+// therefore refuse every server started against an empty dump — a spurious refusal,
+// which is the exact defect class this whole change is undoing.
+//
+// This test exists because a mutation that dropped the READY half of the condition
+// SURVIVED the rest of the suite: nothing else opens an empty-dump generation
+// through the read-only attach.
+func TestReadOnlyCache_AnEmptyDumpIsStillServed(t *testing.T) {
+	dumpDir := t.TempDir() // deliberately empty
+	cacheDir := t.TempDir()
+
+	gen, err := PrepareServeGeneration(context.Background(), dumpDir, cacheDir, false)
+	if err != nil {
+		t.Fatalf("an empty dump must still prepare a generation: %v", err)
+	}
+	gensig := gen.Gensig()
+	gen.Release()
+
+	genDir := serveClaimGenDir(t, dumpDir, cacheDir, gensig)
+	// The fixture is what the guard has to tell apart from a reaped generation:
+	// no shards, sentinel present. Asserted, not assumed.
+	if n := len(cacheShardDirs(genDir)); n != 0 {
+		t.Fatalf("the fixture is wrong: an empty dump produced %d shard dirs, so this test does not "+
+			"exercise the zero-shard branch", n)
+	}
+	if !generationReadyDir(genDir) {
+		t.Fatal("the fixture is wrong: the empty-dump generation carries no READY sentinel")
+	}
+
+	idx, err := OpenGenerationReadOnly(dumpDir, cacheDir, gensig)
+	if err != nil {
+		t.Fatalf("an empty dump must be served, not refused: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	<-idx.Done()
+	if !idx.Ready() {
+		t.Fatalf("the empty-dump index never became ready: %v", idx.BuildError())
+	}
+}
+
+// TestReadOnlyCache_ARefusedAttachReleasesTheClaimItWasGiven pins the ownership
+// contract on the guard's own failure path. attachReadOnlyShards owns the claim it
+// is handed on EVERY path; a refusal that returned without releasing would pin the
+// generation against every reaper for the life of the process, and would leave the
+// index reporting an unprotected serve that is not happening.
+//
+// It also needed writing because a mutation deleting exactly that release SURVIVED:
+// the reaped-generation test above cannot reach it, since a generation that is gone
+// is one no claim could have been taken on in the first place.
+func TestReadOnlyCache_ARefusedAttachReleasesTheClaimItWasGiven(t *testing.T) {
+	dumpDir := serveFrozenDump(t)
+	cacheDir := t.TempDir()
+	gensig := serveFrozenPrepared(t, dumpDir, cacheDir)
+	genDir := serveClaimGenDir(t, dumpDir, cacheDir, gensig)
+
+	// A REAL claim, held, exactly as a producing path would hand one down.
+	held, err := registerReader(genDir)
+	if err != nil {
+		t.Fatalf("taking the claim this test hands in: %v", err)
+	}
+	if live, lErr := generationHasLiveReader(genDir); lErr != nil || !live {
+		t.Fatalf("the control failed: the claim is not visible in the registry (live=%v err=%v)", live, lErr)
+	}
+
+	// Now strip the generation down to the state the guard refuses: no shards, no
+	// sentinel, but the directory and its registry still there.
+	for _, d := range cacheShardDirs(genDir) {
+		if rErr := os.RemoveAll(d); rErr != nil {
+			t.Fatal(rErr)
+		}
+	}
+	if rErr := os.Remove(filepath.Join(genDir, readySentinelName)); rErr != nil {
+		t.Fatal(rErr)
+	}
+
+	// openReadOnlyFrom is the caller that hands a held claim down, and it returns
+	// the attach's error without leaving an Index behind. A bare NewServePlaceholder
+	// would be the wrong instrument here: its Close blocks on a done channel that
+	// only FinishServeOpen closes.
+	idx, aErr := openReadOnlyFrom(dumpDir, cacheDir, genDir, held)
+	if aErr == nil {
+		_ = idx.Close()
+		t.Fatal("a generation with no shards and no READY sentinel was attached")
+	}
+	if live, lErr := generationHasLiveReader(genDir); lErr != nil {
+		t.Fatalf("reading the registry after the refusal: %v", lErr)
+	} else if live {
+		t.Error("the refused attach kept the reader claim it was handed; the generation stays pinned " +
+			"against every reaper for the life of the process")
+	}
+}
+
+// thawTree gives every write bit back under root, so a test can move a cache from
+// unwritable to writable in the middle of a run.
+func thawTree(t *testing.T, root string) {
+	t.Helper()
+	if err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, iErr := d.Info()
+		if iErr != nil {
+			return iErr
+		}
+		return os.Chmod(p, info.Mode().Perm()|0o200)
+	}); err != nil {
+		t.Fatalf("restoring write bits under %s: %v", root, err)
+	}
+}
+
+// TestReadOnlyCache_AReloadRepublishesTheState pins the OTHER place the reason is
+// installed. attachReadOnlyShards sets it at the open; swapGeneration must reset it
+// when a reload replaces the generation, or the notice goes on describing a
+// generation nobody is serving any more.
+//
+// It runs the recovery direction — unprotected, then the cache becomes writable and
+// a reload lands a properly claimed generation — because that is the direction a
+// stale value is VISIBLE in: a notice that never clears would tell a user with a
+// perfectly healthy cache that their index is unprotected, for the life of the
+// process, with no way to make it stop.
+func TestReadOnlyCache_AReloadRepublishesTheState(t *testing.T) {
+	dumpDir := serveFrozenDump(t)
+	cacheDir := t.TempDir()
+	gensig := serveFrozenPrepared(t, dumpDir, cacheDir)
+
+	freezeTree(t, cacheDir)
+	serveFrozenClaimRefused(t, serveClaimGenDir(t, dumpDir, cacheDir, gensig))
+
+	idx, err := OpenGenerationReadOnly(dumpDir, cacheDir, gensig)
+	if err != nil {
+		t.Fatalf("the frozen cache must serve: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	<-idx.Done()
+	if idx.UnprotectedReason() == "" {
+		t.Fatal("the precondition failed: the open is not in the unprotected state this test is about")
+	}
+
+	// The operator does what the notice told them to: the cache becomes writable.
+	// The dump also moves, because an unchanged dump returns from Reload before it
+	// ever reaches the swap.
+	thawTree(t, cacheDir)
+	mkBSLFile(t, dumpDir, "CommonModules/МодульПослеПерезагрузки/Ext/Module.bsl",
+		fmt.Sprintf("Процедура Новая() Экспорт\n\tСообщить(\"%s 9999\");\nКонецПроцедуры\n", serveFrozenTerm))
+
+	rep, err := idx.Reload()
+	if err != nil {
+		t.Fatalf("the reload onto a now-writable cache failed: %v", err)
+	}
+	if !rep.Changed {
+		t.Fatal("the reload reported no change, so it never reached the generation swap and this " +
+			"test proves nothing")
+	}
+	if reason := idx.UnprotectedReason(); reason != "" {
+		t.Errorf("the index kept warning after a reload took a real reader claim; the notice now "+
+			"describes a retired generation and cannot be cleared: %q", reason)
+	}
+	if hits, _, sErr := idx.Search(SearchParams{Query: serveFrozenTerm, Limit: 20}); sErr != nil {
+		t.Fatalf("searching after the reload: %v", sErr)
+	} else if len(hits) != serveFrozenModules+1 {
+		t.Errorf("the reloaded index served %d modules, want %d", len(hits), serveFrozenModules+1)
+	}
+}
+
+// TestReadOnlyCache_OnlyEROFSProvesAnything pins what the proof is now, and every
+// case it must reject. The mode is not an input at all any more: the function does
+// not take one.
+func TestReadOnlyCache_OnlyEROFSProvesAnything(t *testing.T) {
+	perr := func(e error) error { return &fs.PathError{Op: "open", Path: "/c/g/.reapprobe-1", Err: e} }
 
 	cases := []struct {
-		name      string
-		probeErr  error
-		perm      fs.FileMode
-		wantProof string // substring; "" means the classification must be an error
-		wantErr   string // substring, checked when wantProof is ""
+		name  string
+		err   error
+		proof bool
 	}{{
-		// MEASURED on a macOS UDRO image: EROFS, and a mode with the owner write
-		// bit SET. This is why the mount branch cannot be folded into the mode one.
-		name:     "a read-only mount is a proof even though the mode looks writable",
-		probeErr: perr(syscall.EROFS), perm: 0o755,
-		wantProof: "read-only mount",
+		// MEASURED on a macOS UDRO image: EROFS, and a mode with the owner write bit
+		// SET. The kernel is asserting a property of the filesystem, not of our
+		// credentials, so nobody can reap here.
+		name: "a read-only mount is the one proof", err: perr(syscall.EROFS), proof: true,
 	}, {
-		name:     "no write bit for anyone is a proof",
-		probeErr: perr(syscall.EACCES), perm: 0o555,
-		wantProof: "no write permission for its owner, its group or others (mode 0555)",
+		// The case that must NEVER be a proof again. A permission refusal says "not
+		// you"; the owner, an ACL holder or root may still write and still reap. The
+		// previous attempt turned exactly this, plus a 0555 mode, into a silent serve.
+		name: "permission denied is not a proof", err: perr(syscall.EACCES), proof: false,
 	}, {
-		name:     "unwritable for us but writable for its owner is NOT a proof",
-		probeErr: perr(syscall.EACCES), perm: 0o755,
-		wantErr: "grants write to its owner or its group",
+		// A full disk refuses the probe too, and an ENOSPC arena is fully reapable.
+		name: "a full disk is not a proof", err: perr(syscall.ENOSPC), proof: false,
 	}, {
-		name:     "unwritable for us but writable for its group is NOT a proof",
-		probeErr: perr(syscall.EACCES), perm: 0o775,
-		wantErr: "grants write to its owner or its group",
+		name: "a successful probe is not a proof", err: nil, proof: false,
 	}, {
-		// A full disk refuses the probe too. Treating any refusal as a proof would
-		// serve an ENOSPC arena unprotected, and an ENOSPC arena is fully reapable.
-		name:     "a failure that is not about permission is never a proof",
-		probeErr: perr(syscall.ENOSPC), perm: 0o555,
-		wantErr: "probing whether the generations arena",
+		name: "a missing directory is not a proof", err: perr(syscall.ENOENT), proof: false,
 	}}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			proof, err := classifyArenaProbe(arena, tc.probeErr, tc.perm)
-			if tc.wantProof == "" {
-				if err == nil {
-					t.Fatalf("this must not be a proof, but it returned one: %q", proof)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("error %q does not contain %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("this must be a proof, but it returned an error: %v", err)
-			}
-			if !strings.Contains(proof, tc.wantProof) {
-				t.Errorf("proof %q does not contain %q", proof, tc.wantProof)
+			if got := probeProvesReadOnlyFilesystem(tc.err); got != tc.proof {
+				t.Errorf("probeProvesReadOnlyFilesystem(%v) = %v, want %v", tc.err, got, tc.proof)
 			}
 		})
 	}
 }
 
 // TestReadOnlyCache_ArenaProbeAnswersTheRealFilesystem pins the probe half, which
-// the classifier table cannot: that a writable arena is reported as writable and a
-// frozen one is not, through real syscalls rather than synthesised errors.
+// the classifier cannot: that a writable arena is reported writable and a frozen
+// one is not, through real syscalls rather than synthesised errors.
 func TestReadOnlyCache_ArenaProbeAnswersTheRealFilesystem(t *testing.T) {
 	arena := t.TempDir()
 
-	if _, err := arenaUnreapable(arena); err == nil {
-		t.Fatal("a writable arena must never yield a proof that nothing can reap it")
+	if err := arenaWriteProbe(arena); err != nil {
+		t.Fatalf("a writable arena must accept the probe, got: %v", err)
 	}
 	// The probe must leave nothing behind: a file loitering in g/ is something every
 	// reaper and every generation scan has to step over.
@@ -370,32 +696,46 @@ func TestReadOnlyCache_ArenaProbeAnswersTheRealFilesystem(t *testing.T) {
 	}
 
 	freezeTree(t, arena)
-	proof, err := arenaUnreapable(arena)
-	if err != nil {
-		t.Fatalf("a frozen arena must yield a proof, got: %v", err)
+	err = arenaWriteProbe(arena)
+	if err == nil {
+		t.Fatal("a frozen arena must refuse the probe")
 	}
-	if !strings.Contains(proof, arena) {
-		t.Errorf("the proof does not name the arena it is about: %q", proof)
+	// And that refusal is NOT a proof, which is the whole change: a frozen directory
+	// is unwritable for us and says nothing about anyone else.
+	if probeProvesReadOnlyFilesystem(err) {
+		t.Errorf("a chmod-frozen directory was taken as a read-only filesystem: %v", err)
 	}
 }
 
 // TestReadOnlyCache_ClaimlessRegistrationRecordsNothing pins what the claim-less
 // registration IS, which is the part that must never quietly become a claim-shaped
-// thing that protects nothing on a writable arena. It records nothing, no peer sees
-// it as a holder, it never heartbeats, and closing it is a no-op that returns.
+// thing that protects nothing. It records nothing, no peer sees it as a holder, it
+// never heartbeats, and closing it is a no-op that returns.
 func TestReadOnlyCache_ClaimlessRegistrationRecordsNothing(t *testing.T) {
 	dumpDir := serveFrozenDump(t)
 	cacheDir := t.TempDir()
 	gensig := serveFrozenPrepared(t, dumpDir, cacheDir)
 	genDir := serveClaimGenDir(t, dumpDir, cacheDir, gensig)
 
-	reg := unreapableClaim("because this test says so")
-	if reg.unreapableReason() != "because this test says so" {
-		t.Errorf("the proof was not carried: %q", reg.unreapableReason())
+	reg := claimlessRegistration("because this test says so")
+	if reg.unprotectedReason() != "because this test says so" {
+		t.Errorf("the reason was not carried: %q", reg.unprotectedReason())
+	}
+	if !reg.claimless {
+		t.Error("a claimless registration does not report itself claimless, so start() and Close() " +
+			"will treat it as one holding a real entry")
 	}
 	if reg.path != "" || reg.tmpPath != "" {
 		t.Errorf("a claim-less registration names files it never wrote: path=%q tmpPath=%q",
 			reg.path, reg.tmpPath)
+	}
+	// The read-only-filesystem shape: claimless, and deliberately WITHOUT a reason,
+	// because there is nothing to tell. An empty reason here is a positive statement,
+	// not a missing one.
+	proven := claimlessRegistration("")
+	if !proven.claimless || proven.unprotectedReason() != "" {
+		t.Errorf("the proven-safe shape is wrong: claimless=%v reason=%q",
+			proven.claimless, proven.unprotectedReason())
 	}
 
 	reg.start()
@@ -424,13 +764,13 @@ func TestReadOnlyCache_ClaimlessRegistrationRecordsNothing(t *testing.T) {
 	}
 
 	// AND THE SAME WITH started SET, which is the only state in which Close's
-	// unreapable guard is load-bearing. It is NOT reachable from any production path
+	// claimless guard is load-bearing. It is NOT reachable from any production path
 	// today — start() refuses to set it for a claim-less registration, which is what
 	// the assertion above pins — so this constructs it directly, the way
 	// serve_claim_test.go's nil-claim tests construct theirs. Without the guard,
 	// Close falls into the heartbeat teardown and waits for a goroutine that was
 	// never started, for ever.
-	stuck := unreapableClaim("proof")
+	stuck := claimlessRegistration("reason")
 	stuck.started.Store(true)
 	closed := make(chan struct{})
 	go func() { stuck.Close(); close(closed) }()
@@ -441,38 +781,14 @@ func TestReadOnlyCache_ClaimlessRegistrationRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestReadOnlyCache_RefusalNamesARemedy pins the text an operator actually gets on
-// the path they will actually hit. Before this fix the fast path's failure returned
-// through PrepareServeGeneration with only a generic wrapper: the sentence naming a
-// remedy lived on heldGeneration and attachReadOnlyShards, neither of which this
-// failure reaches.
-func TestReadOnlyCache_RefusalNamesARemedy(t *testing.T) {
-	dumpDir := serveFrozenDump(t)
-	cacheDir := t.TempDir()
-	gensig := serveFrozenPrepared(t, dumpDir, cacheDir)
-
-	genDir := serveClaimGenDir(t, dumpDir, cacheDir, gensig)
-	freezeTree(t, genDir)
-	serveFrozenClaimRefused(t, genDir)
-
-	rec := captureLogs(t)
-	gen, err := PrepareServeGeneration(context.Background(), dumpDir, cacheDir, false)
-	if err == nil {
-		gen.Release()
-		t.Fatal("this configuration must be refused")
-	}
-	errors := strings.Join(rec.atLevel(slog.LevelError), "\n")
-	for _, want := range []string{"MCP_1C_CACHE_DIR", "--cache-dir", "cannot claim"} {
-		if !strings.Contains(errors, want) {
-			t.Errorf("the ERROR-level log of the refusal does not contain %q; got:\n%s", want, errors)
-		}
-	}
-}
-
-// TestReadOnlyCache_ServingUnclaimedIsAudible pins the other message. It is logged
-// at ERROR and not at WARN on purpose: cmd/mcp-1c/main.go pins the default handler
-// to LevelError in stdio mode, and as a Warn this line produced ZERO output across
-// the read-only-cache and read-only-mount runs it describes.
+// TestReadOnlyCache_ServingUnclaimedIsAudible pins the log half. It is logged at
+// ERROR and not at WARN on purpose: cmd/mcp-1c/main.go pins the default handler to
+// LevelError in stdio mode, and as a Warn this line produced ZERO output across the
+// read-only-cache runs it describes.
+//
+// The log is not the delivery this fix is about — that is the tool response, pinned
+// in tools/index_notice_test.go — but it is the record an operator reads afterwards
+// and it must not regress to invisible.
 func TestReadOnlyCache_ServingUnclaimedIsAudible(t *testing.T) {
 	dumpDir := serveFrozenDump(t)
 	cacheDir := t.TempDir()
@@ -494,5 +810,23 @@ func TestReadOnlyCache_ServingUnclaimedIsAudible(t *testing.T) {
 	if !strings.Contains(errs, "without a reader claim") {
 		t.Errorf("the claim-less serve was not reported at ERROR, so it is written nowhere in stdio "+
 			"mode; ERROR records were:\n%s", errs)
+	}
+	// AND IT MUST NAME THE REMEDY, on the path the operator actually reaches. The
+	// previous shape of this failure returned through PrepareServeGeneration with
+	// only a generic wrapper, and the sentence naming a remedy lived on functions
+	// that failure never reached.
+	for _, want := range []string{"MCP_1C_CACHE_DIR", "--cache-dir"} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("the ERROR log of an unprotected serve does not name %q; got:\n%s", want, errs)
+		}
+	}
+	// AND IT MUST NOT PROMISE SERVICE IT CANNOT DELIVER. The text this replaced said
+	// "The server is serving normally; a read-only cache cannot pick up a changed
+	// dump until it is writable again". Measured: once the dump actually changes a
+	// frozen cache gives NO service at all — the initial build cannot create its
+	// generation temp dir and reload_dump cannot recover.
+	if strings.Contains(errs, "serving normally") {
+		t.Errorf("the ERROR log still claims the server keeps serving normally after a dump change, "+
+			"which is measurably false:\n%s", errs)
 	}
 }

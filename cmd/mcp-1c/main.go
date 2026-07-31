@@ -269,11 +269,14 @@ func openStderrLog(name, cacheDir string) (*logTarget, error) {
 // THE FALLBACK IS THE POINT, and it was measured. This file used to be created
 // inside cacheDir and nowhere else, and main's handler for a failure to create it
 // is to send slog to os.DevNull. A cache directory this process may read but not
-// write therefore destroyed the only channel that could report it: on a read-only
-// cache the server refused every search and stderr.log stayed 0 bytes across a
-// warm-up and three runs, while the same refusal on a cache whose root was writable
-// produced 662 bytes and one ERROR line. The level was never the defect; the
-// destination was. So a directory that cannot take the log is not fatal here: the
+// write therefore destroyed the only channel that could report it. As measured at
+// the time, when such a cache still made the server refuse every search: stderr.log
+// stayed 0 bytes across a warm-up and three runs, while the same refusal on a cache
+// whose root was writable produced 662 bytes and one ERROR line. The refusal is
+// gone — an unwritable cache is served now, and reported — but the log defect it
+// exposed was never about the refusal: the level was never wrong, the destination
+// was, and an unwritable cache is exactly when there is something to say. So a
+// directory that cannot take the log is not fatal here: the
 // platform cache dir is tried next (it is the default precisely because it is
 // writable), then the OS temp dir, and only a machine where none of the three works
 // reaches main's DevNull branch.

@@ -353,6 +353,11 @@ func (idx *Index) swapGeneration(
 	idx.alias.Swap(shards, oldShards)
 	idx.shards = shards
 	idx.readerReg = reg
+	// The notice follows the generation, in the same critical section that publishes
+	// it. A reload onto a cache that has since become unwritable starts warning; one
+	// that lands back on a writable cache stops. A notice left describing the RETIRED
+	// generation would be a claim about an index nobody is serving any more.
+	idx.setUnprotected(reg.unprotectedReason())
 	idx.gensig = gensig
 	idx.names = names
 	idx.pathByName = pathByName

@@ -13,6 +13,12 @@ package main
 // permission denied". Not once. Permanently. v1.12.0 on the same cache answered the
 // query.
 //
+// AND THE OTHER HALF: serving is not enough. An index served without a reader claim
+// must SAY so, or the fix is the original silent degradation wearing the opposite
+// sign. That half is pinned where it is delivered, in tools/index_notice_test.go;
+// what is pinned here is that the open reaches the serving state at all and that
+// the reason survives onto the Index the server hands to the tool layer.
+//
 // NOT PINNED HERE: the read-only MOUNT half of the same defect. Creating one needs
 // hdiutil (or a loop device) and root-ish machine state that a test must not take,
 // so the mount case was run by hand and is recorded in the change description only.
@@ -101,15 +107,27 @@ func TestReadOnlyCache_ServeOpenKeepsServingAFrozenCache(t *testing.T) {
 		if err := serveReapSearchWorks(idx); err != nil {
 			t.Errorf("round %d: the frozen cache opened but answers nothing: %v", round, err)
 		}
+		// AND IT MUST NOT BE SILENT. Serving a frozen cache without saying the serve
+		// is unprotected is the same silent degradation as the original defect, just
+		// with the opposite sign. This is what the tool layer reads.
+		if idx.UnprotectedReason() == "" {
+			t.Errorf("round %d: the frozen cache is served but reports itself protected, so no tool "+
+				"response will carry a notice", round)
+		}
 		_ = idx.Close()
 	}
 }
 
-// TestReadOnlyCache_ServeOpenStillRefusesWhatAPeerCouldReap is the other half. The
-// generation cannot be claimed and the arena around it CAN be written, so a reaper
-// can still take it. Serving there is the defect the reader registry exists to
-// prevent, and no amount of "but it used to work" makes it safe.
-func TestReadOnlyCache_ServeOpenStillRefusesWhatAPeerCouldReap(t *testing.T) {
+// TestReadOnlyCache_ServeOpenServesAndReportsWhatAPeerCouldReap is the case this
+// entry point used to REFUSE. The generation cannot be claimed and the arena around
+// it CAN be written, so a peer's reaper can still take it.
+//
+// The owner's decision is that refusing here breaks a working setup to guard
+// against a scenario needing three coincidences — an unwritable cache, a peer with
+// write access, and that peer actually reaping — while on Unix the served process
+// keeps answering correctly out of unlinked inodes even then. So it serves. What it
+// must never do is serve in silence.
+func TestReadOnlyCache_ServeOpenServesAndReportsWhatAPeerCouldReap(t *testing.T) {
 	dumpDir := t.TempDir()
 	cacheDir := t.TempDir()
 	for i := range 8 {
@@ -137,16 +155,46 @@ func TestReadOnlyCache_ServeOpenStillRefusesWhatAPeerCouldReap(t *testing.T) {
 	case <-time.After(180 * time.Second):
 		t.Fatal("the serve open did not finish within 180s")
 	}
-	if idx.Ready() {
-		t.Fatal("an unclaimable generation in a WRITABLE arena was served; a co-located reaper can " +
-			"remove it while it is being served")
+	if !idx.Ready() {
+		t.Fatalf("an unclaimable generation in a writable arena must be served, not refused: %v",
+			idx.BuildError())
 	}
-	buildErr := idx.BuildError()
-	if buildErr == nil {
-		t.Fatal("the open neither became ready nor recorded why")
+	if err := serveReapSearchWorks(idx); err != nil {
+		t.Errorf("the index opened but answers nothing: %v", err)
 	}
-	if !strings.Contains(buildErr.Error(), "writable by this process") {
-		t.Errorf("the recorded error does not say why serving unclaimed could not be justified: %v", buildErr)
+	reason := idx.UnprotectedReason()
+	if reason == "" {
+		t.Fatal("a generation a peer's reaper can remove is being served with nothing said about it; " +
+			"that is the silent degradation the reader registry exists to prevent")
+	}
+	if !strings.Contains(reason, "could not be written") {
+		t.Errorf("the reason does not say what actually failed: %q", reason)
+	}
+}
+
+// TestReadOnlyCache_AWritableCacheSaysNothing is the control that stops every
+// assertion above from passing on a server that simply always warns. A warning on a
+// properly claimed index is the same defect as a refusal, just quieter.
+func TestReadOnlyCache_AWritableCacheSaysNothing(t *testing.T) {
+	dumpDir := t.TempDir()
+	cacheDir := t.TempDir()
+	for i := range 8 {
+		serveReapWriteModule(t, dumpDir, i)
+	}
+
+	for round := 1; round <= 2; round++ {
+		idx, err := serveReapOpenAndWait(t, dumpDir, cacheDir)
+		if err != nil {
+			t.Fatalf("round %d: an ordinary writable cache must serve: %v", round, err)
+		}
+		if err := serveReapSearchWorks(idx); err != nil {
+			t.Errorf("round %d: the writable cache answers nothing: %v", round, err)
+		}
+		if reason := idx.UnprotectedReason(); reason != "" {
+			t.Errorf("round %d: a healthy cache would put a notice on every tool response: %q",
+				round, reason)
+		}
+		_ = idx.Close()
 	}
 }
 

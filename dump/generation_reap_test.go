@@ -24,11 +24,15 @@ package dump
 //     and still reported success.
 //
 // THE PROPERTY these tests pin is the one that must never regress: a process
-// that cannot establish that its generation is protected must refuse LOUDLY,
-// never serve quietly. Each test asserts the refusal directly AND carries the
-// invariant behind it — whenever a process reaches a serving state, a concurrent
-// reaper must not be able to remove what it serves — so a future fix that
-// protects the generation some other way still passes the second half.
+// that cannot establish that its generation is protected must never serve
+// QUIETLY. It used to have to refuse; it does not any more, because refusing
+// broke every cache a process may read but not write, permanently. What replaced
+// the refusal is a report the user cannot miss, so each test asserts
+// UnprotectedReason rather than an error, AND carries the invariant behind it —
+// whenever a process reaches a serving state, a concurrent reaper must not be
+// able to remove what it serves — which is what makes serving-without-a-claim
+// survivable rather than reckless. That second half is unchanged and is what a
+// future fix protecting the generation some other way still has to pass.
 //
 // Every "must not be removed" assertion is paired with a POSITIVE CONTROL that
 // shows the reaper removing a different generation in the SAME call. Without it
@@ -194,13 +198,20 @@ func reapSearchWorks(t *testing.T, idx *Index) error {
 	return nil
 }
 
-// TestReap_UnwritableRegistryMustNotServe is defect (1), in one process and with
-// no timing involved: the reader registry cannot be WRITTEN to, so this process
-// cannot record that it holds the generation. It must refuse to serve. If it
-// served anyway, a reaper that knows nothing about it would delete the
-// generation out from under it — which the second half of this test shows a
-// reaper doing, to a generation with a healthy registry, in the same GC pass.
-func TestReap_UnwritableRegistryMustNotServe(t *testing.T) {
+// TestReap_UnwritableRegistryServesAndSaysSo is defect (1), in one process and
+// with no timing involved: the reader registry cannot be WRITTEN to, so this
+// process cannot record that it holds the generation.
+//
+// IT SERVES, AND IT SAYS SO. This used to be a refusal, and the refusal was over
+// applied: a cache a process may read but not write is an ordinary working setup,
+// and refusing there breaks it permanently. What must never happen is serving in
+// SILENCE, so the assertion here is on UnprotectedReason and not on an error.
+//
+// THE REAPER HALF IS UNCHANGED AND IS THE POINT: a reaper that cannot trust the
+// registry must still refuse to remove this generation, while removing a healthy
+// one in the same pass. That is what keeps the serve above from being the original
+// defect, and it is asserted with a positive control that the reaper really ran.
+func TestReap_UnwritableRegistryServesAndSaysSo(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod cannot make a directory unwritable")
 	}
@@ -228,24 +239,27 @@ func TestReap_UnwritableRegistryMustNotServe(t *testing.T) {
 			removed, controlSig)
 	}
 
-	if openErr == nil {
-		if slices.Contains(removed, victimSig) {
-			t.Fatalf("REAP OF A LIVE GENERATION: this process serves %s and the reaper removed it (removed=%v)",
-				victimSig, removed)
-		}
-		t.Fatalf("the open served generation %s although this process could not record a reader claim on it; "+
-			"it must refuse loudly instead", victimSig)
+	if openErr != nil {
+		t.Fatalf("a generation whose registry cannot be written must still be served: %v", openErr)
 	}
-	if !strings.Contains(openErr.Error(), victimSig) {
-		t.Fatalf("the refusal must name the generation it refused; got %v", openErr)
+	if slices.Contains(removed, victimSig) {
+		t.Fatalf("REAP OF A LIVE GENERATION: this process serves %s and the reaper removed it (removed=%v)",
+			victimSig, removed)
+	}
+	if reason := idx.UnprotectedReason(); reason == "" {
+		t.Fatalf("generation %s is served with no reader claim and nothing says so; a claim-less serve "+
+			"that is silent is the defect this whole registry exists to prevent", victimSig)
+	} else if !strings.Contains(reason, victimSig) {
+		t.Fatalf("the reason must name the generation it is about; got %q", reason)
 	}
 }
 
-// TestReap_UnreadableRegistryMustNotServe is the other half of an unusable
-// registry: the claim CAN be written but nothing can list it back (mode 0o333).
-// A claim no reaper can see is not a claim, so writing one successfully is not
-// enough to start serving on.
-func TestReap_UnreadableRegistryMustNotServe(t *testing.T) {
+// TestReap_UnreadableRegistryServesAndSaysSo is the other half of an unusable
+// registry: the claim CAN be written but nothing can list it back (mode 0o333). A
+// claim no reaper can see is not a claim, so writing one successfully is not enough
+// to call the serve protected — and it is exactly the state the user must be told
+// about, because from inside the process everything looks fine.
+func TestReap_UnreadableRegistryServesAndSaysSo(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod cannot make a directory unreadable")
 	}
@@ -257,11 +271,13 @@ func TestReap_UnreadableRegistryMustNotServe(t *testing.T) {
 	reapCrippleRegistry(t, dumpDir, cacheDir, victimSig, 0o333)
 
 	idx, openErr := OpenGenerationReadOnly(dumpDir, cacheDir, victimSig)
-	if openErr == nil {
-		_ = idx.Close()
-		t.Fatalf("the open served generation %s after writing a reader claim into a registry nothing can "+
-			"list; every reaper in the arena sees that registry as empty, so the claim protects nothing",
-			victimSig)
+	if openErr != nil {
+		t.Fatalf("a generation whose registry cannot be listed must still be served: %v", openErr)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	if idx.UnprotectedReason() == "" {
+		t.Fatalf("generation %s is served on a claim no reaper in the arena can see, and nothing says "+
+			"so; every reaper reads that registry as empty, so the claim protects nothing", victimSig)
 	}
 }
 
@@ -335,7 +351,11 @@ func TestReapServeHelperProcess(t *testing.T) {
 		fmt.Printf("HELPER_REFUSED build: %v\n", idx.BuildError())
 		return
 	}
-	fmt.Printf("HELPER_SERVING gensig=%s modules=%d\n", gensig, idx.ModuleCount())
+	// unprotected is printed so the PARENT can assert the child did not serve in
+	// silence. A child that served a generation nothing protects and said nothing is
+	// the original defect; a child that served and said so is the current contract.
+	fmt.Printf("HELPER_SERVING gensig=%s modules=%d unprotected=%v\n",
+		gensig, idx.ModuleCount(), idx.UnprotectedReason() != "")
 	if err := os.WriteFile(readyFile, []byte("serving\n"), 0o644); err != nil {
 		fmt.Printf("HELPER_ERR ready file: %v\n", err)
 		return
@@ -439,32 +459,45 @@ waitLoop:
 	}
 
 	childOut := out.String()
-	if serving {
-		if gcErr != nil {
-			t.Logf("GC returned an error (acceptable as long as nothing was removed): %v", gcErr)
-		}
-		if slices.Contains(removed, gensig) {
-			t.Fatalf("REAP OF A LIVE GENERATION ACROSS PROCESSES: the child serves %s and this process removed "+
-				"it (removed=%v)\n--- child output ---\n%s", gensig, removed, childOut)
-		}
-		if !strings.Contains(childOut, "HELPER_POSTGC ready=true") {
-			t.Fatalf("the generation the child serves did not survive this process's reaper"+
-				"\n--- child output ---\n%s", childOut)
-		}
-		t.Fatalf("the child served generation %s without being able to record a reader claim on it; "+
-			"it must refuse loudly instead\n--- child output ---\n%s", gensig, childOut)
+	if !serving {
+		t.Fatalf("the child refused to serve a generation it could not claim; a cache a process may "+
+			"read but not write must still be served\n--- child output ---\n%s", childOut)
 	}
-	if !strings.Contains(childOut, "HELPER_REFUSED") {
-		t.Fatalf("the child neither served nor refused\n--- child output ---\n%s", childOut)
+	if gcErr != nil {
+		t.Logf("GC returned an error (acceptable as long as nothing was removed): %v", gcErr)
+	}
+	// THE DEFECT ITSELF, unchanged: the reaper in this process must not remove a
+	// generation the child is serving. It is what makes serving-without-a-claim
+	// survivable rather than reckless, and it holds because the reaper refuses to
+	// act on a registry it cannot trust (registryTrustworthy), not because the child
+	// registered anything.
+	if slices.Contains(removed, gensig) {
+		t.Fatalf("REAP OF A LIVE GENERATION ACROSS PROCESSES: the child serves %s and this process removed "+
+			"it (removed=%v)\n--- child output ---\n%s", gensig, removed, childOut)
+	}
+	if !strings.Contains(childOut, "HELPER_POSTGC ready=true") {
+		t.Fatalf("the generation the child serves did not survive this process's reaper"+
+			"\n--- child output ---\n%s", childOut)
+	}
+	// AND THE CHILD DID NOT SERVE IN SILENCE. Without this the test would pass just
+	// as happily on the build where a claim-less serve told nobody, which is the
+	// version that shipped.
+	if !strings.Contains(childOut, "unprotected=true") {
+		t.Fatalf("the child served generation %s without a reader claim and reported itself protected; "+
+			"nothing would put that in front of its user\n--- child output ---\n%s", gensig, childOut)
 	}
 }
 
-// TestReap_ReloadRefusesAGenerationItCannotClaim pins the reload half of the
-// registration guard deterministically, with no racing reaper: the replacement
-// generation is already built and perfectly healthy, but its reader registry
-// cannot be written to. Swapping it in would leave this process serving a
-// generation nothing records it as holding.
-func TestReap_ReloadRefusesAGenerationItCannotClaim(t *testing.T) {
+// TestReap_ReloadSwapsInAGenerationItCannotClaimAndSaysSo pins the reload half
+// deterministically, with no racing reaper: the replacement generation is already
+// built and perfectly healthy, but its reader registry cannot be written to.
+//
+// THE RULE IS THE SAME ON EVERY PATH, and that is deliberate. A reload that refused
+// here would be the over-application again in one corner: the user asked for the
+// new dump, the new dump is what they get, and the cost — that nothing records the
+// serve — is reported rather than traded for silence about a stale index. The
+// index's own state says so afterwards, which is what reaches the tool response.
+func TestReap_ReloadSwapsInAGenerationItCannotClaimAndSaysSo(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: chmod cannot make a directory unwritable")
 	}
@@ -480,8 +513,9 @@ func TestReap_ReloadRefusesAGenerationItCannotClaim(t *testing.T) {
 	t.Cleanup(func() { _ = idx.Close() })
 	before := idx.ModuleCount()
 
-	// CONTROL — a reload onto a healthy pre-built generation succeeds, so the
-	// refusal below is caused by the registry and not by the fixture shape.
+	// CONTROL — a reload onto a healthy pre-built generation succeeds AND stays
+	// silent, so the report below is caused by the crippled registry and not by the
+	// fixture shape or by a build that always warns.
 	reapAddModule(t, dumpDir, 1)
 	controlSig := reapBuildGen(t, dumpDir, cacheDir)
 	rep, err := idx.Reload()
@@ -492,28 +526,33 @@ func TestReap_ReloadRefusesAGenerationItCannotClaim(t *testing.T) {
 		t.Fatalf("control: reload reported changed=%v sig=%s modules=%d; want a swap to %s with %d modules",
 			rep.Changed, rep.SigAfter, rep.ModulesAfter, controlSig, before+1)
 	}
+	if reason := idx.UnprotectedReason(); reason != "" {
+		t.Fatalf("control: a healthy reload reported the index unprotected: %q", reason)
+	}
 
-	// THE DEFECT — build the next generation, then take away the ability to claim it.
+	// THE STATE UNDER TEST — build the next generation, then take away the ability
+	// to claim it.
 	reapAddModule(t, dumpDir, 2)
 	targetSig := reapBuildGen(t, dumpDir, cacheDir)
 	reapCrippleRegistry(t, dumpDir, cacheDir, targetSig, 0o555)
 
 	rep, err = idx.Reload()
-	if err == nil {
-		t.Fatalf("reload swapped in generation %s (changed=%v modules=%d) without being able to record a "+
-			"reader claim on it; it must refuse and keep the previous generation serving",
-			targetSig, rep.Changed, rep.ModulesAfter)
+	if err != nil {
+		t.Fatalf("a reload onto a generation whose registry cannot be written must still swap it in: %v", err)
 	}
-	// A refused reload must leave the PREVIOUS generation serving, untouched.
+	if !rep.Changed || rep.SigAfter != targetSig || rep.ModulesAfter != before+2 {
+		t.Fatalf("reload reported changed=%v sig=%s modules=%d; want a swap to %s with %d modules",
+			rep.Changed, rep.SigAfter, rep.ModulesAfter, targetSig, before+2)
+	}
 	if serr := reapSearchWorks(t, idx); serr != nil {
-		t.Fatalf("after a refused reload the previous index stopped serving: %v", serr)
+		t.Fatalf("after the reload the index stopped serving: %v", serr)
 	}
-	if got := idx.ModuleCount(); got != before+1 {
-		t.Fatalf("after a refused reload the index has %d modules; want the previous generation's %d",
-			got, before+1)
-	}
-	if !GenerationReady(dumpDir, cacheDir, controlSig) {
-		t.Fatalf("a refused reload retired generation %s, which is still being served", controlSig)
+	// AND THE SWAP REPUBLISHED THE STATE. A reload that installed an unclaimable
+	// generation while the index kept reporting the retired one as protected would
+	// be a silent claim-less serve reached through the back door.
+	if idx.UnprotectedReason() == "" {
+		t.Fatalf("the reload swapped in generation %s without being able to record a reader claim on "+
+			"it, and the index still reports itself protected", targetSig)
 	}
 }
 
