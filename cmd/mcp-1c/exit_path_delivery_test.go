@@ -64,8 +64,8 @@ var malformedFrame = []byte("this is not json\n")
 // TestServeFailureReachesTheUserInPipeMode is the reachable half of the defect.
 //
 // A single undecodable byte on stdin ends the session with an error, and the
-// process then reports it with fmt.Fprintf(os.Stderr, ...) sixty lines after
-// os.Stderr stopped being file descriptor 2. Gate B could not trigger this and
+// process then reported it with a direct write to os.Stderr, which by that point
+// in main is no longer file descriptor 2. Gate B could not trigger this and
 // marked it NOT RUN; the input above triggers it every time.
 func TestServeFailureReachesTheUserInPipeMode(t *testing.T) {
 	cacheDir := filepath.Join(t.TempDir(), "cache")

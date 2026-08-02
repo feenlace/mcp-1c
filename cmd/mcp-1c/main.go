@@ -462,7 +462,7 @@ func reportLogFallback(t *logTarget) {
 //
 // Components are compared as NUMBERS. Lexicographic order gets 0.4.10 < 0.4.9
 // and 0.10.0 < 0.9.9 wrong, and those are ordinary version numbers, not corner
-// cases. A missing trailing component counts as zero, so 0.4.6 and 0.4.6.0 are
+// cases. A missing trailing component counts as zero, so 1.2.3 and 1.2.3.0 are
 // the same version.
 //
 // A suffix that is not part of the dotted number (a pre-release marker such as
@@ -567,7 +567,7 @@ func checkExtensionVersion(client *onec.Client) {
 
 	if order < 0 {
 		// The one genuine fault. Extension releases ADD endpoints the Go side calls
-		// (/subsystems arrived in ext 0.4.4), so below the floor an endpoint this
+		// (/subsystems arrived in ext 0.4.3), so below the floor an endpoint this
 		// binary uses may simply not be there.
 		//
 		// This is also the only outcome where --install is the remedy, so it is the

@@ -29,7 +29,7 @@ import (
 // What the string does support is ORDER, and that is what the constant means:
 // expectedExtensionVersion is the LOWEST extension this binary can rely on,
 // because extension releases added endpoints the Go side calls (/subsystems
-// arrived in ext 0.4.4, commit 2f784df). Below it, endpoints may be missing and
+// arrived in ext 0.4.3, commit 43fdfcf). Below it, endpoints may be missing and
 // the pairing is genuinely broken. At or above it, everything this binary calls
 // exists — which is why running the paid editions' newer extension against the
 // Community binary is a supported combination, and why reporting it as an error
@@ -210,7 +210,10 @@ func TestVersionProbe_TooOldIsStillReported(t *testing.T) {
 // TestVersionProbe_MessageInventsNoEdition pins the limit of what the probe saw.
 // A bare version string cannot identify an edition, so no outcome may name one.
 func TestVersionProbe_MessageInventsNoEdition(t *testing.T) {
-	for _, v := range []string{"0.7.4", "0.4.0", "0.4.6"} {
+	// The third entry is meant to BE the matching case, so it tracks the constant
+	// rather than repeating its value; a literal here would quietly stop being the
+	// matching case the day the constant moves.
+	for _, v := range []string{"0.7.4", "0.4.0", expectedExtensionVersion} {
 		got := strings.ToLower(versionAnswer(t, v))
 		for _, invented := range []string{"advanced", "enterprise", "professional", "edition", "редакц"} {
 			if strings.Contains(got, invented) {
