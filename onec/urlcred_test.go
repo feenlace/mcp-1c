@@ -1,6 +1,9 @@
 package onec
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/url"
 	"strings"
 	"testing"
@@ -149,6 +152,71 @@ func TestRefusalMessageMatchesItsCause(t *testing.T) {
 			t.Errorf("%q has no userinfo (url.Parse reports user=<nil>) yet is refused with "+
 				"the message that says the address contains a login and a password", in)
 		}
+	}
+}
+
+// TestStrippedKeepsAuthority gives the step 6 proof obligation the only kind of
+// test it can honestly have.
+//
+// Measured by mutation: turning the CALL off leaves the 53-row corpus green,
+// because no address in it reaches step 6 with a broken authority. The same
+// mutation on the check this one replaced left the 47-row corpus green at commit
+// 04611e9, so the property is inherited rather than introduced. A corpus row
+// therefore cannot be the evidence, and these constructed inputs are.
+func TestStrippedKeepsAuthority(t *testing.T) {
+	cases := []struct {
+		name     string
+		base     string
+		wantHost string
+		want     bool
+	}{
+		{"clean strip", `http://host/hs`, "host", true},
+		{"an '@' left in the PATH is not a defect", `http://host/hs/mcp-1c@v2`, "host", true},
+		{"userinfo survived the strip", `http://admin:secret@host/hs`, "host", false},
+		{"the host changed", `http://other/hs`, "host", false},
+		{"the result no longer parses", `http://%zz/hs`, "host", false},
+		{"the host lost its port", `http://host/hs`, "host:8080", false},
+	}
+	for _, c := range cases {
+		if got := strippedKeepsAuthority(c.base, c.wantHost); got != c.want {
+			t.Errorf("[%s] strippedKeepsAuthority(%q, %q) = %v, want %v",
+				c.name, c.base, c.wantHost, got, c.want)
+		}
+	}
+}
+
+// TestStep6IsWired is the other half. The predicate above can be correct and
+// still never run; only the source says whether it is called, and only a
+// structural assertion survives a refactor that moves it.
+func TestStep6IsWired(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "urlcred.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parsing urlcred.go: %v", err)
+	}
+	var split *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "SplitURLCredentials" {
+			split = fn
+		}
+	}
+	if split == nil {
+		t.Fatal("premise broken: urlcred.go declares no SplitURLCredentials")
+	}
+	calls := 0
+	ast.Inspect(split.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "strippedKeepsAuthority" {
+			calls++
+		}
+		return true
+	})
+	if calls != 1 {
+		t.Errorf("SplitURLCredentials calls strippedKeepsAuthority %d times, want exactly 1: "+
+			"the proof obligation is the one check the corpus cannot reach, so nothing else would notice", calls)
 	}
 }
 
