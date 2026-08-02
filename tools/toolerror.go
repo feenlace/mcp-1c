@@ -259,10 +259,13 @@ const (
 // Customer-facing RU: no тире.
 const remedyQueryRejected = "Проверьте:\n" +
 	"1. Имена таблиц и полей: get_object_structure по объекту из запроса.\n" +
-	"2. Синтаксис: validate_query разбирает тот же текст и к данным не обращается.\n\n" +
-	"Если validate_query отвечает valid: true, причина не в тексте запроса, и переписывать его " +
-	"бесполезно. Тогда дело в правах доступа, блокировках или состоянии базы, а это за пределами " +
-	"того, что видит этот инструмент.\n"
+	"2. Синтаксис: validate_query разбирает тот же текст и к данным не обращается.\n" +
+	"3. Параметры запроса: их подстановка идёт в том же блоке, что и выполнение, поэтому " +
+	"неподходящее значение параметра даёт ровно такой же отказ, а validate_query параметры не " +
+	"подставляет и о них ничего не скажет.\n\n" +
+	"Если validate_query отвечает valid: true и параметров в запросе нет, причина не в тексте " +
+	"запроса, и переписывать его бесполезно. Тогда дело в правах доступа, блокировках или " +
+	"состоянии базы, а это за пределами того, что видит этот инструмент.\n"
 
 // Customer-facing RU: no тире.
 const queryMarkerHint = "Позицию, на которой разбор остановился, 1С отмечает вставкой `<<?>>`.\n"
@@ -273,15 +276,44 @@ const queryMarkerHint = "Позицию, на которой разбор ост
 // to attribute it: a web server, a proxy and the platform itself all answer that
 // way, so the body cannot even identify its own author.
 //
+// IT USED TO NAME ONE CAUSE AND THAT CAUSE WAS NOT THE ONLY ONE. The sentence
+// «до того, как управление дошло до расширения» is true of a publication or an
+// authentication failure and FALSE of the cause an operator hits most often on a
+// working publication: an unhandled exception raised inside the extension, after
+// which the platform answers with a page of its own and the body is foreign by
+// exactly the same test. Grounded in the extension's own source rather than
+// argued: ЖурналРегистрацииPOST calls ВыгрузитьЖурналРегистрации OUTSIDE every
+// Попытка it opens, so a rights failure there raises after some sixty lines of
+// extension code have already run, and the advice sent the operator to check a
+// publication that had already worked. Verified with
+//
+//	/usr/bin/awk 'NR>=873 && NR<=959 && (/Попытка/ || /КонецПопытки/ ||
+//	  /ВыгрузитьЖурналРегистрации/)' <the module>
+//
+// which shows every Попытка closed before the call. ОтветОшибка is the only
+// thing in that module that produces the {"error":…} envelope, so a raised
+// exception cannot arrive as one.
+//
+// The remedy now states both causes and orders the checks so that the one which
+// distinguishes them comes first: an answer to /version separates «the request
+// never arrived» from «it arrived and the handler threw».
+//
 // Customer-facing RU: no тире.
-const remedyForeignBody = "Так отвечает промежуточное звено: веб-сервер, прокси или сама платформа 1С " +
-	"до того, как управление дошло до расширения. Тело ответа не показано, потому что определить " +
-	"его источник по нему нельзя.\n\n" +
+const remedyForeignBody = "Так отвечает либо промежуточное звено (веб-сервер, прокси или сама " +
+	"платформа 1С), до которого дошёл запрос, но которое не передало его расширению, либо сама " +
+	"платформа после того, как обработчик расширения уже начал работу и прервался исключением. " +
+	"Тело ответа не показано, потому что определить его источник по нему нельзя.\n\n" +
 	"Проверьте:\n" +
-	"1. Публикацию: в `default.vrd` нужен элемент `<httpServices publishExtensionsByDefault=\"true\"/>` " +
+	"1. Отвечает ли расширение вообще: вызовите get_configuration_info. Если он отвечает, " +
+	"публикация и учётные данные в порядке, и дело в самой операции.\n" +
+	"2. Публикацию: в `default.vrd` нужен элемент `<httpServices publishExtensionsByDefault=\"true\"/>` " +
 	"либо явный `<service name=\"MCPService\" rootUrl=\"mcp-1c\"/>`.\n" +
-	"2. Учётные данные: коды 401 и 403 означают, что до обработчика расширения запрос не дошёл.\n" +
-	"3. Адрес в `--base`: он должен указывать на публикацию базы, а не на корень веб-сервера.\n"
+	"3. Учётные данные: при кодах 401 и 403 запрос отклонён на проверке доступа и до кода " +
+	"расширения не доходит. Отклонить может и веб-сервер, и сама платформа 1С.\n" +
+	"4. Права учётной записи на саму операцию: чтение журнала регистрации, доступ к метаданным и " +
+	"выполнение запроса требуют разных прав, и нехватка любого из них прерывает уже начатый " +
+	"обработчик.\n" +
+	"5. Адрес в `--base`: он должен указывать на публикацию базы, а не на корень веб-сервера.\n"
 
 // remedyRedirect объясняет ровно то, что произошло: onec.Client переходит по
 // перенаправлению только в пределах адреса из `--base` (см. onec/client.go,
@@ -290,19 +322,39 @@ const remedyForeignBody = "Так отвечает промежуточное з
 // причине, по которой не показывается тело: его выбрала та сторона.
 //
 // Customer-facing RU: no тире.
-const remedyRedirect = "Клиент по перенаправлению не пошёл. Переход выполняется только в пределах адреса " +
-	"из `--base`, иначе логин и пароль ушли бы на хост или порт, которого никто не задавал. " +
-	"Адрес назначения не показан: его выбрала та сторона.\n\n" +
+const remedyRedirect = "Клиент дальше по перенаправлению не пошёл. Он идёт по нему только в пределах " +
+	"адреса из `--base`, иначе логин и пароль ушли бы на хост или порт, которого никто не задавал, " +
+	"и не более десяти переходов подряд. Адрес назначения не показан: его выбрала та сторона.\n\n" +
 	"Проверьте:\n" +
 	"1. Значение `--base`: запишите в него конечный адрес публикации, а не тот, с которого веб-сервер уводит.\n" +
-	"2. Схему адреса: если веб-сервер переводит http в https, укажите в `--base` сразу https.\n"
+	"2. Схему адреса: если веб-сервер переводит http в https, укажите в `--base` сразу https.\n" +
+	"3. Не зациклено ли перенаправление на самой публикации: цепочка внутри одного адреса тоже " +
+	"обрывается, когда переходов становится слишком много.\n"
 
+// remedyUnreachable is shown for the two classes where NO HTTP exchange took
+// place: TransportError, where http.Client.Do failed, and RequestError, where
+// the request was never even built.
+//
+// IT USED TO ASK ABOUT CREDENTIALS, AND CREDENTIALS CANNOT CAUSE EITHER. onec's
+// client sends them with req.SetBasicAuth inside do(), on a request that must
+// first connect; a wrong login or password comes back as a 401, which is a
+// StatusError and is rendered by a different branch entirely. So the third check
+// was an instruction to look where the answer provably is not, on the one class
+// of failure where the operator has least to go on. It is replaced by the checks
+// that CAN be the cause, and «публикация базы включена» is dropped from the
+// second: a disabled publication answers, and answering is what did not happen.
+//
 // Customer-facing RU: no тире.
-const remedyUnreachable = "Проверьте:\n" +
+const remedyUnreachable = "До 1С не удалось достучаться, поэтому ответа нет вовсе, и код ответа тоже " +
+	"не с чем сравнивать. Учётные данные тут ни при чём: неверный логин или пароль дали бы ответ " +
+	"с кодом 401, а его не было.\n\n" +
+	"Проверьте:\n" +
 	"1. Адрес в `--base`: он должен вести на публикацию базы, например " +
 	"`http://server/base/hs/mcp-1c`.\n" +
-	"2. Доступность веб-сервера и то, что публикация базы включена.\n" +
-	"3. Учётные данные в `--user` и `--password`.\n"
+	"2. Запущен ли веб-сервер и слушает ли он тот порт, который указан в адресе.\n" +
+	"3. Сеть между этой машиной и веб-сервером: имя хоста, маршрут, брандмауэр.\n" +
+	"4. Схему адреса: обращение по http к порту, который обслуживает только https, обрывается " +
+	"так же, как недоступный узел.\n"
 
 // queryReadOnlyReassurance is emitted for execute_query only, and only when 1С
 // itself answered. Grounded twice: the client side check in NewQueryHandler and
