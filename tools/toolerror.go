@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -83,8 +84,55 @@ func WithToolErrors(heading string, h mcp.ToolHandler) mcp.ToolHandler {
 		// jsonrpc2 layer logs an internal error and discards the result when a
 		// handler answers with both, so propagating both would lose the answer at
 		// the transport with nothing saying so.
-		return textError(renderFailure(heading, err)), nil
+		text := renderFailure(heading, err)
+		logOperationalFailure(req, text)
+		return textError(text), nil
 	}
+}
+
+// logMsgToolFailed is the log message for an operational tool failure. English,
+// like every other slog call in this repository (cmd/mcp-1c/main.go
+// checkExtensionVersion, tools/form.go NewFormStructureHandler): the log is the
+// operator's, not the model's.
+const logMsgToolFailed = "Tool call failed"
+
+// logAttrAnswer names the attribute carrying what the model was told.
+const logAttrAnswer = "answer"
+
+// logOperationalFailure writes the failure to the operator's log.
+//
+// WHY ANYTHING AT ALL. Before this branch an operational failure travelled as a
+// JSON-RPC error frame, which the MCP client records in its own log, so the
+// operator investigating a customer report had somewhere to look. Turning those
+// failures into results with IsError set is right for the model and removed that
+// somewhere. Measured on the real binary, driven over pipes with --debug and a
+// get_configuration_info call against a dead port: without this call server.log
+// is 0 bytes while the model receives an answer of 701 bytes (485 runes; the
+// text is Cyrillic, so the two numbers differ and only one of them is a file
+// size). With it server.log is 825 bytes and the model receives the same answer,
+// byte for byte. The regression is in KIND, not in degree, and this is where it
+// is repaired, in the one wrapper every operational failure passes through.
+//
+// WHY THE MODEL'S OWN TEXT AND NOTHING ELSE. The obvious alternative, logging
+// the Go error next to the rendered answer, builds the divergence surface the
+// repair exists to avoid: two prose accounts of one failure, free to drift, with
+// the operator unable to tell which one the model acted on. What is logged is
+// the exact string returned, so the operator reads what the model read, and
+// TestLoggedFailureIsTheModelFacingText asserts the byte identity rather than
+// trusting this comment. The remaining attributes are FACTS, not a second
+// account: the tool's name, which the answer does not carry.
+//
+// WHY ERROR LEVEL. It is the only level that reaches the operator in the way
+// every MCP client launches this program. cmd/mcp-1c/main.go installs a
+// LevelError handler over the redirected stderr log on the pipe path, and
+// LevelInfo only under --debug or on a terminal; a Warn here would be invisible
+// in exactly the configuration the defect was measured in.
+func logOperationalFailure(req *mcp.CallToolRequest, text string) {
+	name := ""
+	if req != nil && req.Params != nil {
+		name = req.Params.Name
+	}
+	slog.Error(logMsgToolFailed, "tool", name, logAttrAnswer, text)
 }
 
 // textError builds the failure result.
