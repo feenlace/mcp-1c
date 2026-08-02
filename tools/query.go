@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -58,6 +59,13 @@ func QueryTool() *mcp.Tool {
 	}
 }
 
+// queryNotSelectMsg names both keywords, which is also what keeps the existing
+// assertion in query_test.go green.
+//
+// Customer-facing RU: no тире.
+const queryNotSelectMsg = "разрешены только запросы, начинающиеся с ВЫБРАТЬ или SELECT. " +
+	"Этот инструмент только читает данные, изменяющий запрос 1С не выполнит"
+
 // NewQueryHandler returns a ToolHandler that executes a read-only query in 1C.
 func NewQueryHandler(client *onec.Client) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -71,19 +79,28 @@ func NewQueryHandler(client *onec.Client) mcp.ToolHandler {
 
 		// Client-side read-only check (hint for LLM callers).
 		// Server-side 1C extension enforces read-only execution.
-		prefix := strings.TrimSpace(input.Query)
+		//
+		// The trimmed text is what gets sent, because the extension applies the
+		// same rule in the opposite order: it truncates to ten characters and
+		// trims afterwards (ЗапросPOST in
+		// extension/src/HTTPServices/MCPService/Ext/Module.bsl). ВЫБРАТЬ is
+		// seven characters, so leading whitespace eats the keyword and the
+		// extension answers 400 for a query that visibly starts with it.
+		// Sending the trimmed text removes the divergence at the source.
+		queryText := strings.TrimSpace(input.Query)
+		prefix := queryText
 		if len(prefix) > 30 {
 			prefix = prefix[:30]
 		}
 		upper := strings.ToUpper(prefix)
 		if !strings.HasPrefix(upper, "ВЫБРАТЬ") && !strings.HasPrefix(upper, "SELECT") {
-			return nil, fmt.Errorf("только SELECT/ВЫБРАТЬ запросы разрешены")
+			return nil, errors.New(queryNotSelectMsg)
 		}
 
 		input.Limit = clampLimit(input.Limit, defaultQueryLimit, maxQueryLimit)
 
 		body := onec.QueryRequest{
-			Query:      input.Query,
+			Query:      queryText,
 			Limit:      input.Limit,
 			Parameters: input.Parameters,
 		}
