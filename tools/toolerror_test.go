@@ -254,14 +254,21 @@ func TestRenderFailure_Classes(t *testing.T) {
 			}),
 			present: []string{
 				"## " + headingMetadata,
-				fmt.Sprintf(lineStatusForeign, 401, "text/html", len(iisErrorPage)),
+				fmt.Sprintf(lineStatusForeign, 401, len(iisErrorPage)),
+				// The header IS shown on this branch, so it is framed and it
+				// sits in code marks rather than inside the class sentence.
+				untrustedHeaderNotice,
+				fmt.Sprintf(lineForeignContentType, "text/html"),
 				remedyForeignBody,
 			},
 			absent: []string{
 				`C:\inetpub\wwwroot\1c\`,
 				`DOMAIN\svc_1c`,
 				"<!-- x -->",
-				untrustedTextNotice, // nothing upstream is shown, so nothing to frame
+				// untrustedTextNotice names 1С as the author. Here the author is
+				// unknown, so the notice that ships is the one that says so;
+				// asserting this one absent is what keeps the two apart.
+				untrustedTextNotice,
 				captionOnecError,
 			},
 		},
@@ -555,12 +562,15 @@ func TestRenderFailure_NoDashes(t *testing.T) {
 		headingQuery, headingValidateQuery, headingMetadata, headingObject, headingForm,
 		headingEventLog, headingConfigInfo, headingSubsystems, headingSearch, headingReload,
 		fmt.Sprintf(lineStatusExtension, 400),
-		fmt.Sprintf(lineStatusForeign, 401, "text/html", 1234),
+		fmt.Sprintf(lineStatusForeign, 401, 1234),
+		fmt.Sprintf(lineForeignContentType, "text/html"),
+		lineForeignContentTypeUnusable,
 		fmt.Sprintf(lineTransport, "http://server"),
 		lineTransportNoBase,
 		lineRequest,
 		lineGeneric,
 		untrustedTextNotice,
+		untrustedHeaderNotice,
 		captionOnecError, captionCause, captionNetwork,
 		remedyQueryRejected, remedyForeignBody, remedyUnreachable,
 		queryMarkerHint, queryReadOnlyReassurance,
