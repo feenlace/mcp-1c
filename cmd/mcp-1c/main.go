@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/feenlace/mcp-1c/dump"
@@ -437,18 +439,156 @@ func reportLogFallback(t *logTarget) {
 		"requested", t.requested, "using", t.path, "error", t.cause)
 }
 
+// compareExtensionVersions orders two dotted numeric extension versions,
+// returning -1, 0 or 1, and ok=false when either side is not a version at all.
+//
+// Components are compared as NUMBERS. Lexicographic order gets 0.4.10 < 0.4.9
+// and 0.10.0 < 0.9.9 wrong, and those are ordinary version numbers, not corner
+// cases. A missing trailing component counts as zero, so 0.4.6 and 0.4.6.0 are
+// the same version.
+//
+// A suffix that is not part of the dotted number (a pre-release marker such as
+// the "-beta" in 0.5.0-beta) is trimmed rather than rejected: refusing to parse
+// it would turn a perfectly readable version into the "cannot tell" branch and
+// produce an alarm about a healthy extension. Ordering ignores the suffix, which
+// is imprecise between two pre-releases of one version and irrelevant here,
+// where the question is only whether the installed extension reaches a floor.
+func compareExtensionVersions(a, b string) (int, bool) {
+	an, aok := versionComponents(a)
+	bn, bok := versionComponents(b)
+	if !aok || !bok {
+		return 0, false
+	}
+	for i := 0; i < len(an) || i < len(bn); i++ {
+		var av, bv int
+		if i < len(an) {
+			av = an[i]
+		}
+		if i < len(bn) {
+			bv = bn[i]
+		}
+		if av != bv {
+			if av < bv {
+				return -1, true
+			}
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+// versionComponents splits a dotted numeric version into its components,
+// stopping at the first character that cannot belong to one. It reports false
+// when there is no leading number at all, which is what an empty string, an
+// HTML page or a foreign JSON body produces.
+func versionComponents(v string) ([]int, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil, false
+	}
+	// Cut any pre-release / build suffix: keep the leading run of digits and dots.
+	end := strings.IndexFunc(v, func(r rune) bool {
+		return r != '.' && (r < '0' || r > '9')
+	})
+	if end >= 0 {
+		v = v[:end]
+	}
+	v = strings.TrimRight(v, ".")
+	if v == "" {
+		return nil, false
+	}
+	var out []int
+	for _, part := range strings.Split(v, ".") {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
 func checkExtensionVersion(client *onec.Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	var ver onec.VersionInfo
 	if err := client.Get(ctx, "/version", &ver); err != nil {
-		// Version endpoint may not exist in older extensions — skip silently.
+		// NOT a silent skip. Returning without a word here is what made a failed
+		// probe indistinguishable from a healthy one: both produced a completely
+		// empty log, so "no mismatch was reported" was not evidence of a match,
+		// it was evidence of nothing.
+		slog.Error("Extension version NOT verified: /version did not answer. This is not a "+
+			"confirmation that the installed extension is the right one; the check did not "+
+			"run at all. Usual causes: the publication path is wrong, the credentials were "+
+			"refused, a web server answered instead of 1C, or 1C is not running.",
+			"required_at_least", expectedExtensionVersion, "error", err)
 		return
 	}
-	if ver.Version != expectedExtensionVersion {
-		slog.Error("Extension version mismatch",
-			"got", ver.Version, "expected", expectedExtensionVersion,
-			"hint", `Update: mcp-1c --install "path\to\db"`)
+
+	got := strings.TrimSpace(ver.Version)
+	if got == "" {
+		// An answer that carries no version is not a version mismatch. The old code
+		// let the zero value fall through to the comparison and reported got="",
+		// which reads as a measurement of the installed extension when in fact
+		// nothing was ever measured.
+		slog.Error("Extension version NOT verified: /version answered without a version. "+
+			"Something is listening at that address, but it is not the MCP extension this "+
+			"binary talks to.",
+			"required_at_least", expectedExtensionVersion)
+		return
 	}
+
+	order, ok := compareExtensionVersions(got, expectedExtensionVersion)
+	if !ok {
+		slog.Error("Extension version NOT verified: /version answered with something that is "+
+			"not a version number, so it cannot be ranked against what this binary requires.",
+			"got", got, "required_at_least", expectedExtensionVersion)
+		return
+	}
+
+	if order < 0 {
+		// The one genuine fault. Extension releases ADD endpoints the Go side calls
+		// (/subsystems arrived in ext 0.4.4), so below the floor an endpoint this
+		// binary uses may simply not be there.
+		//
+		// This is also the only outcome where --install is the remedy, so it is the
+		// only one that mentions it, and it says which version it would install:
+		// the advice used to be given for every difference including a NEWER
+		// extension, where following it would overwrite a working install with an
+		// older one.
+		slog.Error("Extension is OLDER than this build requires, so endpoints it calls may be "+
+			"missing and some tools will fail.",
+			"got", got, "required_at_least", expectedExtensionVersion,
+			"hint", `reinstall the bundled extension `+expectedExtensionVersion+
+				`: mcp-1c --install "path\to\db"`)
+		return
+	}
+
+	// order >= 0: every endpoint this binary calls exists in the installed
+	// extension, so there is no fault to report.
+	//
+	// A HIGHER number is a supported deployment, not a problem: the paid editions
+	// ship a further-along extension and pairing it with this binary is guaranteed
+	// to work. Comparing for EQUALITY is what turned that healthy configuration
+	// into an ERROR line on every start, which is the exact habit that teaches an
+	// operator to stop reading the log.
+	//
+	// Nothing here names an edition, and it must not: ВерсияGET returns one key
+	// holding a bare version string, and onec.VersionInfo has one field to receive
+	// it, so which product built the installed extension is not observable from
+	// this side. Ordering is the only thing the answer supports.
+	//
+	// INFO, not ERROR, and that is what makes silence meaningful. In pipe mode the
+	// handler sits at LevelError, so this line is filtered and a quiet log means
+	// exactly one thing: the probe ran and was satisfied. Every other outcome above
+	// is ERROR and survives the filter. On a terminal or under --debug the levels
+	// are not filtered and the confirmation is visible directly.
+	if order > 0 {
+		slog.Info("Extension version verified; it is newer than the one this build bundles, "+
+			"which is a supported combination.",
+			"got", got, "bundled", expectedExtensionVersion)
+		return
+	}
+	slog.Info("Extension version verified.", "got", got)
 }
