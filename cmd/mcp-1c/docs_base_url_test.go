@@ -153,8 +153,9 @@ func TestDocsMatchBaseURLBehaviour(t *testing.T) {
 	// colon can sit. It has to name both, because both really occur: for
 	// http://localhost:8080/base/hs/mcp-1c@v2 the colon that fires is the port
 	// colon and the path holds none, while http://us/er:passZZ@host/hs has no
-	// port and a colon in the path. onec.TestAmbiguousAtNamesTheColonThatFired
-	// measures that; this holds the paragraph to the same message.
+	// port and a colon in the path. That is measured in
+	// urlcred_message_truth_test.go:TestAmbiguousAtNamesTheColonThatFired; this
+	// holds the paragraph to the same message.
 	ambiguous := onec.ErrBaseURLAmbiguousAt.Error()
 	for _, must := range []string{"порт", "пут"} {
 		if !strings.Contains(ambiguous, must) {
