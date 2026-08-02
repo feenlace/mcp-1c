@@ -40,6 +40,11 @@ const (
 	doc1CSetup        = "../../docs/1c-setup.md"
 )
 
+// unparsableQuote is the fragment of ErrBaseURLUnparsable that getting-started.md
+// quotes verbatim. It is spelled out ONCE and compared against both sides, so the
+// documentation cannot quote one sentence while the binary prints another.
+const unparsableQuote = "адрес 1С отклонён: в нём есть ? или #, и разобрать его как адрес не получается"
+
 // baseURLDocClaim is one address the documentation shows, and the verdict it
 // tells the reader to expect.
 type baseURLDocClaim struct {
@@ -70,9 +75,9 @@ var baseURLDocClaims = []baseURLDocClaim{
 	{addr: `http://Admin:secret@сервер/база/hs/mcp-1c`, in: docReadme},
 	// Russian letters in the userinfo are refused whichever half they sit in.
 	{addr: `http://Админ:пароль@localhost:8080/hs/mcp-1c`, refusedBy: onec.ErrURLCredentialUnstrippable, in: docGettingStarted},
-	// Credentials AND a query string. The docs say following the message once is
-	// not enough, because this refusal is the credential one and the address is
-	// refused again, by a different sentinel, after the credentials come out.
+	// Credentials AND a query string. Two problems, one refusal, and it is the
+	// credential one. The docs say both are named in that single message, and the
+	// wording checks further down are what hold the message to it.
 	{addr: `http://Admin:secret@localhost:8080/hs/mcp-1c?debug=1`, refusedBy: onec.ErrURLCredentialUnstrippable, in: docGettingStarted},
 	// The fourth sentinel. Reaching it takes an address that BOTH carries a "?"
 	// or "#" and fails url.Parse, because an address with none of @ ? # is
@@ -132,6 +137,72 @@ func TestDocsMatchBaseURLBehaviour(t *testing.T) {
 	if !strings.Contains(onec.ErrBaseURLAmbiguousAt.Error(), "%40") {
 		t.Errorf("the docs give %%40 as the way out of an ambiguous @, but "+
 			"ErrBaseURLAmbiguousAt no longer names it: %q", onec.ErrBaseURLAmbiguousAt.Error())
+	}
+
+	// -----------------------------------------------------------------------
+	// Three paragraphs of getting-started.md are about the WORDING of a refusal
+	// rather than about which address is refused. Each rests on a property of ONE
+	// named message, and if that message loses the property the paragraph becomes
+	// a description of a program that is no longer shipped. Pinned per sentinel
+	// and by name, for the same reason the coverage loop at the bottom is: a
+	// check that lumped them together would let one message go unwatched behind
+	// another one's pass.
+	// -----------------------------------------------------------------------
+
+	// "Про двоеточие перед @". The docs say the message names TWO places the
+	// colon can sit. It has to name both, because both really occur: for
+	// http://localhost:8080/base/hs/mcp-1c@v2 the colon that fires is the port
+	// colon and the path holds none, while http://us/er:passZZ@host/hs has no
+	// port and a colon in the path. onec.TestAmbiguousAtNamesTheColonThatFired
+	// measures that; this holds the paragraph to the same message.
+	ambiguous := onec.ErrBaseURLAmbiguousAt.Error()
+	for _, must := range []string{"порт", "пут"} {
+		if !strings.Contains(ambiguous, must) {
+			t.Errorf("%s explains that the ambiguity message names both the port colon and the path "+
+				"colon, but the message no longer contains %q: %q", docGettingStarted, must, ambiguous)
+		}
+	}
+	if !strings.Contains(sources[docGettingStarted], "перед номером порта или в самом пути") {
+		t.Errorf("%s no longer tells the reader where the colon the message names actually sits",
+			docGettingStarted)
+	}
+
+	// "Если в адресе есть и учётные данные, и ?". The docs now tell the reader
+	// that one pass is enough BECAUSE both problems are named in one message.
+	// That is only true while the warning sits OUTSIDE the percent-encoding list:
+	// "? как %3F" is advice about the password, not about the address, and a bare
+	// substring check for "?" would have been satisfied by it.
+	unstrippable := onec.ErrURLCredentialUnstrippable.Error()
+	const encodingMarker = "закодируйте"
+	if cut := strings.Index(unstrippable, encodingMarker); cut < 0 {
+		t.Errorf("ErrURLCredentialUnstrippable no longer offers percent-encoding, so %s promises a "+
+			"remedy the binary does not give: %q", docGettingStarted, unstrippable)
+	} else {
+		for _, ch := range []string{"?", "#"} {
+			if !strings.Contains(unstrippable[:cut], ch) {
+				t.Errorf("%s tells the reader both problems are named in one message, but "+
+					"ErrURLCredentialUnstrippable names %s nowhere except inside the percent-encoding "+
+					"list, which is advice about the password: %q", docGettingStarted, ch, unstrippable)
+			}
+		}
+	}
+
+	// "Опечатка в адресе при запуске не ловится". The docs quote the fourth
+	// message verbatim and then state that it says nothing about spaces, because
+	// an address whose only problem is a space never reaches url.Parse. Both
+	// halves are pinned: the quote against the shipped text, and the claim
+	// against the shipped text.
+	unparsable := onec.ErrBaseURLUnparsable.Error()
+	if !strings.Contains(unparsable, unparsableQuote) {
+		t.Errorf("%s quotes %q as the fourth refusal, but the binary prints %q",
+			docGettingStarted, unparsableQuote, unparsable)
+	}
+	if !strings.Contains(sources[docGettingStarted], unparsableQuote) {
+		t.Errorf("%s no longer quotes the fourth refusal message verbatim", docGettingStarted)
+	}
+	if strings.Contains(unparsable, "пробел") {
+		t.Errorf("%s states that the fourth message says nothing about spaces, but it does: %q",
+			docGettingStarted, unparsable)
 	}
 
 	// Every file that states the required extension version must state THIS one.
@@ -240,6 +311,37 @@ func TestDocsBaseURLGuardCanFail(t *testing.T) {
 	if strings.Contains(onec.ErrBaseURLUnparsable.Error(), "%40") {
 		t.Error("ErrBaseURLUnparsable names %40, so the substring checks above prove nothing " +
 			"about which message carries the remedy")
+	}
+
+	// The "outside the percent-encoding list" split must be able to fail. This is
+	// the message as it shipped before the rewrite: it names "?" and "#" ONLY as
+	// characters that can be written %3F and %23 inside a password. A guard that
+	// accepted this shape would not have caught the defect it exists for.
+	const shippedBeforeRewrite = "адрес 1С содержит логин и пароль в форме, которую невозможно " +
+		"разобрать однозначно, поэтому он отклонён. Уберите логин и пароль из адреса и задайте их " +
+		"флагами --user и --password. Если они обязаны остаться в адресе, закодируйте служебные " +
+		"символы: @ как %40, / как %2F, ? как %3F, # как %23"
+	cut := strings.Index(shippedBeforeRewrite, "закодируйте")
+	if cut < 0 {
+		t.Error("the control message does not contain the encoding marker, so the split above is not " +
+			"being exercised")
+	} else if strings.Contains(shippedBeforeRewrite[:cut], "?") ||
+		strings.Contains(shippedBeforeRewrite[:cut], "#") {
+		t.Error("the split accepts the pre-rewrite message, whose only mention of ? and # is inside " +
+			"the encoding list, so it cannot tell a warning from an encoding offer")
+	}
+
+	// The "says nothing about spaces" check must be able to fire.
+	if !strings.Contains("Проверьте, что адрес записан целиком и без пробелов", "пробел") {
+		t.Error("the space check does not match the wording it exists to forbid, so it would pass " +
+			"against a message that blames spaces")
+	}
+
+	// The verbatim quote check must be able to miss: a fragment that is NOT in the
+	// shipped message has to be reported as absent.
+	if strings.Contains(onec.ErrBaseURLUnparsable.Error(), unparsableQuote+" никогда") {
+		t.Error("the quote comparison matches a fragment the message does not contain, so quoting a " +
+			"sentence the binary never prints would pass")
 	}
 	// Reading a file that is not there must fail loudly rather than compare "".
 	if _, err := os.ReadFile("../../docs/there-is-no-such-file.md"); err == nil {
