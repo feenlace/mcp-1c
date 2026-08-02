@@ -32,13 +32,25 @@ const (
 // a hint to the model and nothing more, and a value outside it arrives at the
 // handler unremarked.
 //
-// AND THE FAR SIDE WILL NOT CATCH IT EITHER. ЖурналРегистрацииPOST in
+// THE FAR SIDE NOW CATCHES IT TOO, AND THAT IS RECENT. ЖурналРегистрацииPOST in
 // extension/src/HTTPServices/MCPService/Ext/Module.bsl maps the level through a
-// Соответствие of these same four names and applies the filter only «Если
-// Уровень <> Неопределено», so an unmapped level is dropped without a word and
-// the whole log comes back as though it had been filtered. The answer to a
-// question nobody could honour must not look like the answer to the question
-// that was asked.
+// Соответствие of these same four names; a name that is not in it answers 400
+// «unknown level: …» and names the four that are.
+//
+// It did not always. The version this paragraph was first written against
+// applied the filter only «Если Уровень <> Неопределено», so an unmapped level
+// was dropped without a word and the whole log came back as though it had been
+// filtered, and the paragraph said the far side would not catch it either. The
+// extension commit that changed this left the sentence behind, which is how a
+// comment about another file goes wrong: nothing recompiles prose. The claim is
+// now pinned by TestExtensionRefusesAnUnmappedLevel, which walks the shipped
+// module and fails if the refusal goes away again.
+//
+// The check here is NOT thereby redundant. The two refusals are different
+// answers to the caller: this one costs no round trip, names the tool's own
+// schema, and still stands if the installed extension is older than the one this
+// binary bundles, which is a supported pairing. The answer to a question nobody
+// could honour must not look like the answer to the question that was asked.
 var eventLogLevels = []string{"Ошибка", "Предупреждение", "Информация", "Примечание"}
 
 // EventLogTool returns the MCP tool definition for get_event_log.

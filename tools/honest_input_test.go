@@ -32,9 +32,13 @@ import (
 //     filter as the control that the answer does change when the filter is
 //     honoured.
 //   - an argument whose VALUE is outside a constraint the tool's own schema
-//     declares. get_event_log declares an enum for level and checked nothing,
-//     and ЖурналРегистрацииPOST in the extension drops an unmapped level
+//     declares. get_event_log declared an enum for level and checked nothing,
+//     and ЖурналРегистрацииPOST in the extension dropped an unmapped level
 //     silently, so the whole log came back as though it had been filtered.
+//     The extension refuses it now as well (400 «unknown level: …»), which was
+//     a later commit on the same branch as this one; both halves are wanted,
+//     because only this half costs no round trip and only this half still holds
+//     against an older extension, which is a supported pairing.
 //
 // The rule is one rule for both, and these tests are what keeps it one rule
 // rather than ten tools' taste.

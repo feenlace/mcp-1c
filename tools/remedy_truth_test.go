@@ -187,3 +187,62 @@ func TestRemedyQueryRejectedNamesTheParameterCause(t *testing.T) {
 		t.Errorf("query advice leaked onto another tool's failure:\n%s", other)
 	}
 }
+
+// TestExtensionRefusesAnUnmappedLevel grounds the claim tools/eventlog.go makes
+// about the far side.
+//
+// The paragraph there used to say the extension drops an unmapped level without
+// a word. That was true when it was written and a later commit to the shipped
+// module made it false, silently, because nothing recompiles prose about another
+// file. The repair is the one this file already applies to the sibling claim: a
+// walk that FAILS when the statement stops holding.
+func TestExtensionRefusesAnUnmappedLevel(t *testing.T) {
+	src, err := os.ReadFile(bslModule)
+	if err != nil {
+		t.Fatalf("reading the shipped extension module: %v", err)
+	}
+	lines := strings.Split(string(src), "\n")
+
+	start, end := -1, -1
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(strings.TrimSpace(l), "Функция ЖурналРегистрацииPOST"):
+			start = i
+		case start >= 0 && end < 0 && strings.TrimSpace(l) == "КонецФункции":
+			end = i
+		}
+	}
+	if start < 0 || end < 0 {
+		t.Fatal("ЖурналРегистрацииPOST was not found in the shipped module; the claim in " +
+			"tools/eventlog.go cannot be checked and must not be trusted")
+	}
+	body := strings.Join(lines[start:end+1], "\n")
+
+	// The four names the Go side declares must be the four the module maps, or
+	// "a name outside the enum" means different things on the two sides.
+	for _, level := range eventLogLevels {
+		if !strings.Contains(body, `СоответствиеУровней.Вставить("`+level+`"`) {
+			t.Errorf("the module does not map %q, which get_event_log declares in its enum",
+				level)
+		}
+	}
+
+	// And an unmapped one must be REFUSED rather than skipped.
+	if !strings.Contains(body, `Возврат ОтветОшибка(400, "unknown level: "`) {
+		t.Error("the module no longer answers 400 for a level it cannot map; tools/eventlog.go " +
+			"says it does, and an unmapped level silently dropped returns the whole log as " +
+			"though it had been filtered")
+	}
+	if strings.Contains(body, "Уровень <> Неопределено") {
+		t.Error("the module is back to applying the level filter only when it mapped, which is " +
+			"the silent drop tools/eventlog.go used to describe and no longer does")
+	}
+
+	// CONTROL: the walk is looking at real text. Without this every assertion
+	// above passes on an empty body.
+	if !strings.Contains(body, "ВыгрузитьЖурналРегистрации(") {
+		t.Fatal("the extracted function body does not contain the log dump call, so the walk " +
+			"is not reading ЖурналРегистрацииPOST")
+	}
+	t.Logf("walked %d lines of ЖурналРегистрацииPOST", end-start+1)
+}
