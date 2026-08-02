@@ -28,6 +28,21 @@ var version = "dev"
 const expectedExtensionVersion = "0.4.6"
 
 func main() {
+	// realStderr is fd 2 as the process was launched with, captured before any
+	// line below can reassign os.Stderr.
+	//
+	// The pipe-mode redirect further down replaces os.Stderr for the whole
+	// process, and every message written after it lands wherever the redirect
+	// points: the log file, or os.DevNull when no log file could be opened at
+	// all. That is correct for what the redirect exists to contain, which is
+	// third-party library noise arriving during a live session (Issue #14). It
+	// is wrong for a startup refusal, which is this process's last act before
+	// os.Exit: there is no session to protect, nothing can restart-loop on a
+	// message from a process that is refusing to start, and the person who typed
+	// the command is the only reader who can act on it. Keeping the original
+	// handle is what lets reportStartupFailure reach that reader.
+	realStderr := os.Stderr
+
 	log.SetOutput(os.Stderr)
 	// MCP clients treat every stderr line as [error], so suppress INFO/WARN.
 	// Only ERROR and above reach stderr, where [error] label is appropriate.
@@ -202,10 +217,15 @@ func main() {
 	// Отказ там убрал бы эти вызовы. Здесь же значение пришло от человека, и
 	// человеку есть что с ним сделать.
 	//
-	// Сообщение не содержит ни одного байта значения: оно уходит в stderr, а
-	// шаблон отчёта об ошибке просит приложить именно этот вывод.
+	// Сообщение не содержит ни одного байта значения: оно уходит и в настоящий
+	// stderr, и в файл журнала, а шаблон отчёта об ошибке просит приложить
+	// именно этот вывод.
+	//
+	// Доставку выполняет reportStartupFailure, а не Fprintln по os.Stderr:
+	// к этому месту os.Stderr в режиме канала уже не файловый дескриптор 2, и
+	// написанное туда сообщение пользователь не увидит вовсе.
 	if err := onec.CheckURLCredentialResidue(cfg.BaseURL); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		reportStartupFailure(realStderr, err)
 		os.Exit(1)
 	}
 
@@ -247,6 +267,30 @@ func main() {
 	}
 }
 
+// reportStartupFailure delivers a message that must reach a human, on a path
+// where os.Stderr may no longer be file descriptor 2.
+//
+// BOTH channels, deliberately, and the two readers are different people. fd 2 is
+// what an MCP client surfaces to the user who launched the server, and it is the
+// ONLY channel that still exists when no log file could be opened: in that
+// configuration os.Stderr is os.DevNull, so a message written there is not
+// misfiled, it is destroyed, and exit 1 becomes recoverable from nothing at all.
+// The log is where the bug report template tells the user to look, it survives a
+// client that swallows stderr, and it is what a later reader has. Dropping
+// either one loses a real reader.
+//
+// The duplicate is suppressed when the two are the same handle, which is the
+// terminal and --debug case, so nobody reads the refusal twice.
+//
+// NEVER fd 1. Stdout carries the JSON-RPC stream, and a byte of prose in front
+// of the first frame breaks the transport for every client that reads it.
+func reportStartupFailure(realStderr *os.File, err error) {
+	fmt.Fprintln(realStderr, err)
+	if os.Stderr != realStderr {
+		fmt.Fprintln(os.Stderr, err)
+	}
+}
+
 // logRollAtBytes caps a log file's carried-over history. Below it the file is
 // APPENDED to (see openLogFile); at or above it the next process to open the file
 // starts it over, so the disk cost stays bounded without a rotation scheme and
@@ -255,8 +299,16 @@ const logRollAtBytes = 8 << 20 // 8 MiB
 
 // logTarget is the log file a run actually got, plus what it asked for. requested
 // and cause are set ONLY when the requested directory could not be used, so a
-// non-nil cause is the signal to report the substitution — into the file itself,
-// which is the only place a stdio-mode process can report anything.
+// non-nil cause is the signal to report the substitution, into the file itself.
+//
+// The file is where the substitution is reported because a substitution is a
+// detail of a run that is otherwise proceeding normally, and a live stdio session
+// is exactly what the redirect exists to keep quiet. It is NOT, as this comment
+// used to claim, "the only place a stdio-mode process can report anything": the
+// process still holds file descriptor 2, and main keeps it in realStderr for the
+// case where a message has to reach a person rather than a log. Believing the
+// stronger claim is what let a startup refusal ship as exit 1 with zero bytes on
+// both descriptors.
 type logTarget struct {
 	file      *os.File
 	path      string
