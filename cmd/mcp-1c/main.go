@@ -250,7 +250,19 @@ func main() {
 		var err error
 		dumpIndex, err = openServeIndexLocal(serveBuildCtx, *dumpDir, *cacheDir, *reindex)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "loading dump from %s: %v\n", *dumpDir, err)
+			// UNREACHABLE TODAY, and kept anyway. openServeIndexLocal returns an
+			// error only by handing back dump.NewIndex's, and NewIndex has exactly
+			// three return statements, every one of them "return idx, nil". So no
+			// input reaches this branch, which is why there is no runtime test for
+			// it: such a test could not fail, and a test that cannot fail reads as
+			// evidence while proving nothing.
+			//
+			// Discarding the error instead would be worse. The signature returns
+			// one, the day NewIndex grows a failing path this branch starts firing,
+			// and a raw Fprintf here would write to a descriptor that is no longer
+			// fd 2 and lose the message exactly when it finally matters. Delivery
+			// is correct now, so the trap is disarmed before it is armed.
+			reportStartupFailure(realStderr, fmt.Errorf("loading dump from %s: %w", *dumpDir, err))
 			os.Exit(1)
 		}
 		defer dumpIndex.Close()
@@ -264,7 +276,13 @@ func main() {
 	// (the deferred dumpIndex.Close() waits on the index's Done()).
 	serveBuildCancel()
 	if runErr != nil {
-		fmt.Fprintf(os.Stderr, "mcp-1c error: %v\n", runErr)
+		// Reached by any byte on stdin the JSON-RPC transport cannot decode, so
+		// this is an everyday exit, not an exotic one. Same delivery as the startup
+		// refusal and for the same reason: os.Stderr has been the log file since the
+		// redirect, and a process that is exiting has no session left to protect, so
+		// the one reader who can act on this must get it on the descriptor they are
+		// actually watching.
+		reportStartupFailure(realStderr, fmt.Errorf("mcp-1c error: %w", runErr))
 		os.Exit(1)
 	}
 }
