@@ -90,7 +90,7 @@ func NewSearchCodeHandler(index *dump.Index) mcp.ToolHandler {
 	return withIndexProtectionNotice(index, WithToolErrors(headingSearch, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input searchCodeInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
+			return nil, InvalidParams(argumentDecodeError(err))
 		}
 		if input.Query == "" {
 			return nil, fmt.Errorf("query is required")

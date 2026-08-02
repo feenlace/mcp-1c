@@ -86,7 +86,7 @@ func NewEventLogHandler(client *onec.Client) mcp.ToolHandler {
 	return WithToolErrors(headingEventLog, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var body onec.EventLogRequest
 		if err := json.Unmarshal(req.Params.Arguments, &body); err != nil {
-			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
+			return nil, InvalidParams(argumentDecodeError(err))
 		}
 		// Operational, not InvalidParams: this is a VALUE the caller chose, and
 		// a caller can only correct a value from text it can read. Same class

@@ -145,7 +145,7 @@ func NewMetadataHandler(client *onec.Client) mcp.ToolHandler {
 		var input metadataInput
 		if req.Params.Arguments != nil {
 			if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-				return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
+				return nil, InvalidParams(argumentDecodeError(err))
 			}
 		}
 

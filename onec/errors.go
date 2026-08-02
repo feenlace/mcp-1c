@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/feenlace/mcp-1c/internal/jsonshape"
 )
 
 // Тела ответа, которые может нести не 200.
@@ -199,6 +201,43 @@ func (e *TransportError) Error() string {
 }
 
 func (e *TransportError) Unwrap() error { return e.Err }
+
+// DecodeError — ответ 1С получен с кодом 200, но разобрать его не удалось.
+//
+// Существует ради ОДНОГО: рассказать о неудаче словами JSON, а не словами Go.
+// Прежде это место возвращало fmt.Errorf("decoding 1C response: %w", err), и
+// текст encoding/json доезжал до модели целиком, вместе с именем типа Go:
+// «json: cannot unmarshal array into Go value of type map[string][]string» и
+// «json: cannot unmarshal object into Go value of type []string». Модель не
+// писала этот код, не видит его и переименование типа ничего для неё не меняет,
+// поэтому имя типа Go это не диагностика, а шум, который выглядит диагностикой.
+// Полезно ей другое: какое поле пришло не той формы и какая форма ожидалась.
+//
+// Err сохраняется целиком: наружу через Error() он не идёт, но errors.Is и
+// errors.As по нему продолжают работать, и вызывающий внутри модуля ничего не
+// теряет.
+type DecodeError struct {
+	Endpoint string
+	Err      error
+}
+
+func (e *DecodeError) Error() string {
+	field, want, got, ok := jsonshape.TypeMismatch(e.Err)
+	switch {
+	case ok && field != "":
+		return fmt.Sprintf("ответ 1С разобрать не удалось: в поле %q пришло %s, а ожидалась %s",
+			field, got, want)
+	case ok:
+		return fmt.Sprintf("ответ 1С разобрать не удалось: пришёл %s, а ожидался %s", got, want)
+	default:
+		// Остальные ошибки encoding/json на разборе имени типа Go не печатают:
+		// SyntaxError говорит о смещении, а обрыв потока о конце ввода. Их текст
+		// сохраняется как есть, потому что он и есть диагностика.
+		return fmt.Sprintf("ответ 1С разобрать не удалось: %v", e.Err)
+	}
+}
+
+func (e *DecodeError) Unwrap() error { return e.Err }
 
 // RequestError — запрос не удалось даже собрать: адрес, полученный из --base и
 // имени метода, не является корректным URL.

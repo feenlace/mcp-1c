@@ -71,7 +71,7 @@ func NewQueryHandler(client *onec.Client) mcp.ToolHandler {
 	return WithToolErrors(headingQuery, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input queryInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
+			return nil, InvalidParams(argumentDecodeError(err))
 		}
 		if input.Query == "" {
 			return nil, fmt.Errorf("query is required")

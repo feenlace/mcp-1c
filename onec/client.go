@@ -301,7 +301,7 @@ func (c *Client) do(req *http.Request, endpoint string, result any) error {
 	if counter.read > c.maxResponseSize {
 		return c.errResponseTooLarge()
 	}
-	return fmt.Errorf("decoding 1C response: %w", decodeErr)
+	return &DecodeError{Endpoint: endpoint, Err: decodeErr}
 }
 
 // statusError строит *StatusError по ответу, отличному от 200.

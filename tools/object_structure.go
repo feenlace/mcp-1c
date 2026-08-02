@@ -62,7 +62,7 @@ func NewObjectStructureHandlerWithSource(client *onec.Client, sub onec.Subsystem
 	return WithToolErrors(headingObject, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input objectInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
+			return nil, InvalidParams(argumentDecodeError(err))
 		}
 		if input.ObjectType == "" || input.ObjectName == "" {
 			return nil, fmt.Errorf("object_type and object_name are required")

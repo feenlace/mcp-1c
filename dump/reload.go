@@ -165,7 +165,13 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	sigAfter, err := GenSig(idx.dir)
 	if err != nil {
 		rep.Elapsed = time.Since(start)
-		return rep, fmt.Errorf("dump: reading the dump directory %s: %w", idx.dir, err)
+		// The directory is NOT interpolated here. GenSig wraps an *fs.PathError,
+		// which already carries the path it failed on, so naming it again printed
+		// the same absolute server path twice in one sentence the model reads:
+		// "dump: reading the dump directory <path>: computing dump signature:
+		// open <path>: permission denied". One occurrence is the diagnostic; the
+		// second is noise that reads as two different failures.
+		return rep, fmt.Errorf("dump: reading the dump directory: %w", err)
 	}
 	rep.SigAfter = sigAfter
 

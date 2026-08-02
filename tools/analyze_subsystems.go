@@ -83,7 +83,7 @@ func NewAnalyzeSubsystemsHandlerWithSource(client *onec.Client, src onec.Subsyst
 	return WithToolErrors(headingSubsystems, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input analyzeSubsystemsInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
+			return nil, InvalidParams(argumentDecodeError(err))
 		}
 
 		action := strings.TrimSpace(input.Action)
