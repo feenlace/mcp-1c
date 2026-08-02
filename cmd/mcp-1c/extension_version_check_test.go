@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -92,7 +93,7 @@ func captureProbeLogAgainst(t *testing.T, baseURL string) string {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	checkExtensionVersion(onec.NewClient(baseURL, "", ""))
+	checkExtensionVersion(context.Background(), onec.NewClient(baseURL, "", ""))
 	return out.String()
 }
 

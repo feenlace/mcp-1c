@@ -236,8 +236,6 @@ func main() {
 		onec.WithRequestTimeout(cfg.RequestTimeout),
 	)
 
-	go checkExtensionVersion(client)
-
 	// serveBuildCtx bounds any background generation build kicked off by
 	// openServeIndexLocal so a build still in flight when serving ends cannot wedge
 	// process exit. It is cancelled explicitly right after s.Run returns (and via the
@@ -295,12 +293,65 @@ func main() {
 		// Index prepares in the background. ModuleCount is available after Ready().
 	}
 
+	// The extension version probe runs CONCURRENTLY with serving and is SEQUENCED
+	// against the end of it. Both halves are the point.
+	//
+	// Concurrent, because synchronous would put a network round trip, up to the
+	// probe's own three second deadline, in front of the MCP initialize handshake.
+	// Keeping that handshake immediate is why the dump index builds in the
+	// background at all (issue #30), and an unreachable 1C must not be able to
+	// stall a client's first call.
+	//
+	// Sequenced, because a bare `go checkExtensionVersion(client)` is what made
+	// the probe's silence meaningless. Nothing ordered that goroutine against the
+	// end of the process, so a session that ended before the round trip finished
+	// left a log byte for byte identical to a healthy run: measured on the real
+	// binary against a loopback responder, stdin at EOF gave a 12 ms lifetime, an
+	// empty log and ZERO requests on the wire. "No fault was reported" then meant
+	// either "checked and fine" or "never checked", which is the exact defect the
+	// probe was rewritten to remove one level up.
+	//
+	// It is started HERE rather than beside the client so that no exit between the
+	// two can skip the wait below.
+	versionCtx, versionCancel := context.WithCancel(context.Background())
+	defer versionCancel()
+	versionDone := make(chan struct{})
+	go func() {
+		defer close(versionDone)
+		checkExtensionVersion(versionCtx, client)
+	}()
+
 	s := server.New(version, client, dumpIndex)
 
 	runErr := s.Run(context.Background(), &mcp.StdioTransport{})
 	// Serving has ended: stop any background build now so it cannot wedge shutdown
 	// (the deferred dumpIndex.Close() waits on the index's Done()).
 	serveBuildCancel()
+
+	// Collect the probe's verdict before this process can end.
+	//
+	// A GRACE, not an immediate cancellation and not an unbounded wait. Cancelling
+	// the moment serving stops is enough to make the log honest, but it also
+	// throws away the answer: measured, the goroutine had not even reached the
+	// wire on a short session, so every such run reported "did not finish" for a
+	// 1C that was about to answer, and an ERROR line nobody can act on is how a
+	// log stops being read. Waiting for the probe's own three second deadline
+	// instead would put that on shutdown, where a supervisor may be waiting to
+	// restart. So: wait a little, then cut it short and say so.
+	//
+	// The window is not a guess. Against a loopback responder the whole /version
+	// round trip is 1.19 ms at worst over 40 runs and a refused connection turns
+	// around in 0.27 ms, so versionProbeGrace is some eight hundred times the work
+	// it waits on, and it elapses only when 1C accepted the connection and then
+	// went quiet.
+	select {
+	case <-versionDone:
+	case <-time.After(versionProbeGrace):
+		versionCancel()
+		<-versionDone
+	}
+	versionCancel()
+
 	if runErr != nil {
 		// Reached by any byte on stdin the JSON-RPC transport cannot decode, so
 		// this is an everyday exit, not an exotic one. Same delivery as the startup
@@ -571,12 +622,40 @@ func versionComponents(v string) ([]int, bool) {
 	return out, true
 }
 
-func checkExtensionVersion(client *onec.Client) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+// versionProbeGrace is how long the end of a session waits for the extension
+// version probe before cutting it short. See the wait in main for what the
+// number rests on.
+const versionProbeGrace = time.Second
+
+// checkExtensionVersion reports EXACTLY ONE verdict per call, on every path, and
+// returns only after it has been logged. That is what lets main treat the return
+// as the end of the check.
+//
+// ctx belongs to the caller and is cancelled when serving ends; the three second
+// deadline is this function's own and bounds a 1C that accepts the connection and
+// then says nothing.
+func checkExtensionVersion(ctx context.Context, client *onec.Client) {
+	sessionEnded := ctx.Done()
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
 	var ver onec.VersionInfo
 	if err := client.Get(ctx, "/version", &ver); err != nil {
+		// The session ending first is a DIFFERENT outcome and gets its own words.
+		// Reusing the line below would swap one false statement for another: it
+		// names a wrong publication path, refused credentials, a web server in
+		// the way or a stopped 1C, and none of those is what happened when the
+		// reader's own client disconnected before the round trip finished.
+		select {
+		case <-sessionEnded:
+			slog.Error("Extension version NOT verified: the session ended before /version "+
+				"answered, so the check did not finish. This says nothing about the installed "+
+				"extension either way. It is ordinary for a very short session; if it repeats "+
+				"on sessions that do real work, 1C is answering slowly.",
+				"required_at_least", expectedExtensionVersion, "deadline", 3*time.Second)
+			return
+		default:
+		}
 		// NOT a silent skip. Returning without a word here is what made a failed
 		// probe indistinguishable from a healthy one: both produced a completely
 		// empty log, so "no mismatch was reported" was not evidence of a match,
@@ -647,6 +726,15 @@ func checkExtensionVersion(client *onec.Client) {
 	// exactly one thing: the probe ran and was satisfied. Every other outcome above
 	// is ERROR and survives the filter. On a terminal or under --debug the levels
 	// are not filtered and the confirmation is visible directly.
+	//
+	// THAT SENTENCE IS ONLY TRUE BECAUSE MAIN WAITS. It was written while the probe
+	// was launched with a bare `go`, and then a quiet log also meant "the process
+	// ended before the round trip", which on a short session is what it usually
+	// meant: measured on the real binary, stdin at EOF gave a 12 ms lifetime, an
+	// empty log and zero requests on the wire. Silence discriminates only while
+	// every path out of main collects this goroutine first, which is asserted by
+	// TestVersionProbe_VerdictSurvivesASessionThatEndsFirst against the request
+	// count, not against the log.
 	if order > 0 {
 		slog.Info("Extension version verified; it is newer than the one this build bundles, "+
 			"which is a supported combination.",
