@@ -114,9 +114,20 @@ func filterNoise(tree map[string][]string) {
 // NewMetadataHandler returns a ToolHandler that fetches the metadata tree from 1C.
 func NewMetadataHandler(client *onec.Client) mcp.ToolHandler {
 	return WithToolErrors(headingMetadata, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// The decode error is CHECKED, and that is the whole of this branch's
+		// job. It used to be discarded, and the argument this tool takes is the
+		// one that decides what the answer contains: {"filter":123} failed to
+		// decode, left Filter at "", and produced the unfiltered summary, BYTE
+		// IDENTICAL to a call that passed no filter at all. A caller could not
+		// tell the answer to its question from the answer to a different one.
+		//
+		// The nil guard stays: no arguments at all is a legitimate call (the
+		// filter is optional), while json.Unmarshal of a nil slice is an error.
 		var input metadataInput
 		if req.Params.Arguments != nil {
-			json.Unmarshal(req.Params.Arguments, &input) //nolint:errcheck
+			if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
+				return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
+			}
 		}
 
 		var tree map[string][]string

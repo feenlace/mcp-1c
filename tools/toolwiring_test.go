@@ -146,6 +146,16 @@ func operationalSites() []operationalSite {
 			heading: headingEventLog, wants: []string{oops},
 		},
 		{
+			// The 1C server this row builds would ANSWER, and that is the point:
+			// the refusal has to happen before the call, because the extension
+			// drops an unmapped level without a word and the log comes back
+			// looking filtered.
+			name: "eventlog level outside the declared enum", site: `eventlog.go "неизвестный уровень важности"`,
+			build:   func(t *testing.T) mcp.ToolHandler { return NewEventLogHandler(envelope1C(t, 500, oops)) },
+			args:    `{"level":"Критическая"}`,
+			heading: headingEventLog, wants: []string{"Критическая", "Ошибка", "Примечание"},
+		},
+		{
 			name: "form required args", site: `form.go "object_type and object_name are required"`,
 			build: func(t *testing.T) mcp.ToolHandler {
 				return NewFormStructureHandler(envelope1C(t, 500, oops), "")
@@ -336,6 +346,9 @@ func protocolSites() []protocolSite {
 			`not json`, jsonrpc.CodeInvalidParams},
 		{"eventlog decode", `eventlog.go "parsing input"`,
 			func(t *testing.T) mcp.ToolHandler { return NewEventLogHandler(envelope1C(t, 500, oops)) },
+			`not json`, jsonrpc.CodeInvalidParams},
+		{"metadata decode", `metadata.go "parsing input"`,
+			func(t *testing.T) mcp.ToolHandler { return NewMetadataHandler(envelope1C(t, 500, oops)) },
 			`not json`, jsonrpc.CodeInvalidParams},
 		{"form decode", `form.go "parsing input"`,
 			func(t *testing.T) mcp.ToolHandler { return NewFormStructureHandler(envelope1C(t, 500, oops), "") },
