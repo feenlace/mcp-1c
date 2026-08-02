@@ -95,7 +95,7 @@ func TestFormatMetadataTree_UnknownCategory(t *testing.T) {
 		"НовыйТип":    {"ОбъектНовогоТипа", "ЕщеОдинОбъект"},
 	}
 
-	result := formatMetadataTree(tree, nil)
+	result := formatMetadataTree(tree, nil, "")
 
 	// Known category should be rendered.
 	if !strings.Contains(result, "## Справочники") {
@@ -125,7 +125,7 @@ func TestFormatMetadataTree_Order(t *testing.T) {
 		"Роли":                 {"Администратор"},
 	}
 
-	result := formatMetadataTree(tree, nil)
+	result := formatMetadataTree(tree, nil, "")
 
 	// Known categories must appear before unknown ones.
 	idxSpravochniki := strings.Index(result, "## Справочники")
@@ -161,7 +161,7 @@ func TestFormatMetadataTree_DefinedTypes(t *testing.T) {
 		"ОпределяемыеТипы": {"ЗначениеДоступа", "СуммаДокумента"},
 	}
 
-	result := formatMetadataTree(tree, nil)
+	result := formatMetadataTree(tree, nil, "")
 
 	if !strings.Contains(result, "## Определяемые типы") {
 		t.Errorf("expected 'Определяемые типы' section title, got:\n%s", result)
@@ -263,7 +263,7 @@ func TestMetadataHandler_NoWarningsIsByteIdentical(t *testing.T) {
 	if got, want := formatMetadataSummary(tree, nil), formatMetadataSummary(tree, []string{}); got != want {
 		t.Errorf("empty warnings must render identically to nil:\n%q\nvs\n%q", got, want)
 	}
-	if strings.Contains(formatMetadataTree(tree, nil), "Диагностика") {
+	if strings.Contains(formatMetadataTree(tree, nil, ""), "Диагностика") {
 		t.Error("a clean tree must not emit a diagnostics line")
 	}
 }
