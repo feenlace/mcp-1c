@@ -138,9 +138,9 @@ func (c *Client) Get(ctx context.Context, endpoint string, result any) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+endpoint, nil)
 	if err != nil {
-		return fmt.Errorf("creating request: %w", ScrubbedURLError(err))
+		return &RequestError{Base: c.displayBase, Endpoint: endpoint, Err: ScrubbedURLError(err)}
 	}
-	return c.do(req, result)
+	return c.do(req, endpoint, result)
 }
 
 // Post performs a POST request to a 1C endpoint with a JSON body and decodes the JSON response.
@@ -155,14 +155,18 @@ func (c *Client) Post(ctx context.Context, endpoint string, body any, result any
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+endpoint, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("creating request: %w", ScrubbedURLError(err))
+		return &RequestError{Base: c.displayBase, Endpoint: endpoint, Err: ScrubbedURLError(err)}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.do(req, result)
+	return c.do(req, endpoint, result)
 }
 
 // do executes the request, checks the status, and decodes the JSON response.
-func (c *Client) do(req *http.Request, result any) error {
+//
+// endpoint приходит сюда параметром, а не вынимается из req: адрес запроса это
+// уже BaseURL+endpoint, и обратно имя метода из него не достать, не зная, какая
+// часть пути принадлежит публикации базы.
+func (c *Client) do(req *http.Request, endpoint string, result any) error {
 	// sendAuth покрывает случай пустого логина; «c.User != \"\"» сохраняет прежнее
 	// поведение для вызывающего, который присвоил экспортируемые поля уже после
 	// создания клиента. Ни одного из двух условий по отдельности недостаточно.
@@ -177,13 +181,12 @@ func (c *Client) do(req *http.Request, result any) error {
 		// только пароль, логин печатается целиком. После разделения на границе
 		// в адресе учётных данных уже нет, но вызывающий мог присвоить BaseURL
 		// напрямую, поэтому очистка остаётся.
-		return fmt.Errorf("executing request to 1C: %w", ScrubbedURLError(err))
+		return &TransportError{Base: c.displayBase, Endpoint: endpoint, Err: ScrubbedURLError(err)}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("1C returned status %d: %s", resp.StatusCode, string(body))
+		return c.statusError(resp, endpoint)
 	}
 
 	// Лимит размера ответа защищает от OOM на неожиданно больших ответах.
@@ -208,6 +211,39 @@ func (c *Client) do(req *http.Request, result any) error {
 		return c.errResponseTooLarge()
 	}
 	return fmt.Errorf("decoding 1C response: %w", decodeErr)
+}
+
+// statusError строит *StatusError по ответу, отличному от 200.
+//
+// Читается на один байт больше потолка: это и есть признак того, что тело
+// длиннее, и он честнее, чем сравнение с потолком после чтения ровно потолка.
+// Хвост недобитой руны отбрасывается ЗДЕСЬ, до разбора конверта, потому что
+// иначе он доехал бы и до json.Unmarshal, и до RawBody.
+//
+// Класс тела решается разбором, а не заголовком Content-Type: заголовок ставит
+// та сторона, а конверт расширения либо разбирается, либо нет.
+func (c *Client) statusError(resp *http.Response, endpoint string) *StatusError {
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes+1))
+	truncated := len(raw) > maxErrorBodyBytes
+	if truncated {
+		raw = raw[:maxErrorBodyBytes]
+	}
+	raw = trimPartialRune(raw)
+
+	e := &StatusError{
+		StatusCode:  resp.StatusCode,
+		Endpoint:    endpoint,
+		Base:        c.displayBase,
+		BodyKind:    BodyKindForeign,
+		RawBody:     string(raw),
+		ContentType: resp.Header.Get("Content-Type"),
+		BodyBytes:   len(raw),
+		Truncated:   truncated,
+	}
+	if detail, ok := extensionEnvelopeDetail(raw); ok {
+		e.BodyKind, e.Detail = BodyKindExtension, detail
+	}
+	return e
 }
 
 // errResponseTooLarge returns a Russian, user-facing error explaining that the

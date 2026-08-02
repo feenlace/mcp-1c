@@ -231,36 +231,109 @@ func TestNewFormStructureHandler_FailedCallNoteDoesNotLeakAPassword(t *testing.T
 // of printing an upstream message: a 1C error body is arbitrary text, and a
 // multi-line one would break out of the blockquote and turn one note into
 // several lines of unattributed remote content.
+//
+// THE PROPERTY IS UNCHANGED; THE EVIDENCE FOR IT MOVED. Until onec started
+// classifying a non 200 body, this test proved the property by feeding a
+// multi-line body and finding it folded onto the note line. onec now decides
+// whether a body is the extension's own envelope, and a body that is not one is
+// never shown at all, so on the old fixture there is no longer anything to fold.
+// Both arms below therefore assert that the note is exactly ONE blockquote line,
+// and each names what its own body does:
+//
+//   - a foreign body contributes NOTHING to the answer, which is what a body of
+//     unknown origin has to do;
+//   - an extension envelope with the same line breaks in its diagnostic IS shown
+//     and IS folded, which is what keeps the first arm from passing because
+//     nothing is ever printed.
 func TestNewFormStructureHandler_FailedCallNoteStaysOneLine(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("строка один\nстрока два\n\nстрока три\n"))
-	}))
-	t.Cleanup(srv.Close)
+	const (
+		l1 = "строка один"
+		l2 = "строка два"
+		l3 = "строка три"
+	)
+	multiline := l1 + "\n" + l2 + "\n\n" + l3 + "\n"
+	// Premise for both arms: the diagnostic 1C is made to produce really does
+	// carry line breaks, so a single note line below is a fold rather than text
+	// that never had any. It is checked on the diagnostic and not on the request
+	// body, because the envelope arm ships those breaks JSON encoded.
+	if !strings.Contains(multiline, "\n") {
+		t.Fatalf("premise broken: the fixture diagnostic carries no line break: %q", multiline)
+	}
 
-	dumpDir := t.TempDir()
-	writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента", sampleFormXML())
+	arms := []struct {
+		name string
+		// body is what the fake 1C answers with, alongside a 500.
+		body string
+		// folded is the text the note must carry, or "" when the body must not
+		// reach the answer at all.
+		folded string
+	}{
+		{
+			name:   "foreign body is not shown",
+			body:   multiline,
+			folded: "",
+		},
+		{
+			name:   "extension envelope is shown and folded",
+			body:   `{"error":` + mustJSONString(t, multiline) + `}`,
+			folded: l1 + " " + l2 + " " + l3,
+		},
+	}
 
-	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+	for _, arm := range arms {
+		t.Run(arm.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(arm.body))
+			}))
+			t.Cleanup(srv.Close)
+
+			dumpDir := t.TempDir()
+			writeDumpForm(t, dumpDir, "Documents", "РеализацияТоваровУслуг", "ФормаДокумента", sampleFormXML())
+
+			result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			text := resultText(t, result)
+
+			var noteLines []string
+			for _, line := range strings.Split(text, "\n") {
+				if strings.HasPrefix(line, "> "+oneCNotReachedMarker) {
+					noteLines = append(noteLines, line)
+				}
+			}
+			if len(noteLines) != 1 {
+				t.Fatalf("premise broken: the failed-call note is not exactly one blockquote line (%d found):\n%s",
+					len(noteLines), text)
+			}
+			noteLine := noteLines[0]
+
+			if arm.folded == "" {
+				for _, fragment := range []string{l1, l2, l3} {
+					if strings.Contains(text, fragment) {
+						t.Errorf("a body of unknown origin reached the answer, fragment %q:\n%s", fragment, text)
+					}
+				}
+				return
+			}
+			if !strings.Contains(noteLine, arm.folded) {
+				t.Errorf("the multi-line diagnostic must be folded into the single note line, got:\n%s", noteLine)
+			}
+		})
+	}
+}
+
+// mustJSONString quotes s as a JSON string, so a fixture envelope is built by
+// encoding/json rather than by hand escaping, which is how the malformed shape
+// this suite also covers came to exist in the first place.
+func mustJSONString(t *testing.T, s string) string {
+	t.Helper()
+	b, err := json.Marshal(s)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("marshalling the fixture string: %v", err)
 	}
-	text := resultText(t, result)
-
-	var noteLine string
-	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "> "+oneCNotReachedMarker) {
-			noteLine = line
-		}
-	}
-	if noteLine == "" {
-		t.Fatalf("premise broken: the failed-call note is not a blockquote line of its own:\n%s", text)
-	}
-	// Premise: the upstream body really did carry line breaks.
-	if !strings.Contains(noteLine, "строка один строка два строка три") {
-		t.Errorf("the multi-line upstream body must be folded into the single note line, got:\n%s",
-			noteLine)
-	}
+	return string(b)
 }
 
 // TestNewFormStructureHandler_ReachedServiceIsNotReportedAsFailed is the negative
