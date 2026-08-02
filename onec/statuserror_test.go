@@ -109,12 +109,19 @@ func TestStatusError_MalformedEnvelopeDegradesNeverDiscards(t *testing.T) {
 // parses but carries no diagnostic must not be announced as one.
 func TestStatusError_EnvelopeShapesThatAreNotDiagnostics(t *testing.T) {
 	for name, body := range map[string]string{
-		"empty object":       `{}`,
-		"empty error value":  `{"error":""}`,
-		"error is a number":  `{"error":42}`,
-		"error is an object": `{"error":{"text":"boom"}}`,
-		"json array":         `["error"]`,
-		"other key":          `{"message":"boom"}`,
+		"empty object":      `{}`,
+		"empty error value": `{"error":""}`,
+		// A value that is all whitespace carries no diagnostic either, and it
+		// used to be admitted: three spaces are not the empty string, so the
+		// envelope was announced as the extension's own and Detail became "   ",
+		// which is the empty block this classification exists to avoid.
+		"error is three spaces":        `{"error":"   "}`,
+		"error is a tab and a newline": `{"error":"\t\n"}`,
+		"error is a no-break space":    `{"error":"\u00a0"}`,
+		"error is a number":            `{"error":42}`,
+		"error is an object":           `{"error":{"text":"boom"}}`,
+		"json array":                   `["error"]`,
+		"other key":                    `{"message":"boom"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := statusServer(t, http.StatusBadRequest, "application/json", body)
