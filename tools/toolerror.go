@@ -550,9 +550,15 @@ const queryMarker = "<<?>>"
 // blockquote note. TestEveryFarSideCapIsNamed is what makes the number
 // falsifiable instead of merely written down.
 //
-// The read cap in onec bounds what is read off the socket (65536 bytes) and says
-// nothing about what is printed; the success path cap (128 MiB) is about a
-// different channel entirely. Without this constant an extension envelope could
+// THE COUNT IS ABOUT ONE CHANNEL, the text the MODEL is shown, and the caps that
+// are not in it are listed here so the next reader does not have to decide
+// whether a fourth one belongs. The read cap in onec bounds what is read off the
+// socket (65536 bytes) and says nothing about what is printed; the success path
+// cap (128 MiB) is about a different channel entirely; and cmd/mcp-1c
+// maxVersionTextBytes bounds the /version answer on its way into the OPERATOR's
+// log, in bytes rather than runes, on a channel the model never reads.
+// TestEveryFarSideCapIsNamed scans tools and onec, which is the same scope.
+// Without this constant an extension envelope could
 // put 65536 bytes of arbitrary text into a tool result. It is counted in RUNES
 // because the payload is Cyrillic and a byte cap would cut mid rune.
 const maxDetailRunes = 1200

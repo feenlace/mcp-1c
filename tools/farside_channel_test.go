@@ -155,6 +155,13 @@ func TestStatusErrorTextCarriesNoUnreducedHeader(t *testing.T) {
 // 300 inside compactErrorText. So the property asserted here is not "there are
 // three", which is a number in prose; it is "no rune cap is an anonymous
 // literal", which is the property that makes counting them possible at all.
+//
+// SCOPE, stated so the count is not read wider than it is: the channel is what
+// the MODEL is shown, and the directories walked below are the two that build it.
+// cmd/mcp-1c maxVersionTextBytes is a cap on far side text too, and is
+// deliberately not here: it bounds the /version answer on its way into the
+// operator's log, in bytes rather than runes, and nothing the model reads passes
+// through it.
 func TestEveryFarSideCapIsNamed(t *testing.T) {
 	named := map[string]int{
 		"tools.maxDetailRunes":     maxDetailRunes,
