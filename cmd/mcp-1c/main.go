@@ -191,6 +191,24 @@ func main() {
 		cfg.RequestTimeout = time.Duration(*requestTimeout) * time.Second
 	}
 
+	// Отказ выносится ЗДЕСЬ, на границе флага, и только здесь.
+	//
+	// Проверяется cfg.BaseURL, а не *baseURL: адрес мог прийти из переменной
+	// окружения, и проверка сырого флага пропустила бы его.
+	//
+	// Почему не внутри onec.NewClient: тот же конструктор вызывают с
+	// внутренними схемами вида proxy://<база> и poll://local, которых никто не
+	// вводил руками и которые никакой разбор адреса подтвердить не может.
+	// Отказ там убрал бы эти вызовы. Здесь же значение пришло от человека, и
+	// человеку есть что с ним сделать.
+	//
+	// Сообщение не содержит ни одного байта значения: оно уходит в stderr, а
+	// шаблон отчёта об ошибке просит приложить именно этот вывод.
+	if err := onec.CheckURLCredentialResidue(cfg.BaseURL); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	client := onec.NewClient(cfg.BaseURL, cfg.User, cfg.Password,
 		onec.WithMaxResponseSize(cfg.MaxResponseSizeMiB),
 		onec.WithRequestTimeout(cfg.RequestTimeout),

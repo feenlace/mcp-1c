@@ -28,6 +28,9 @@ const mib = 1 << 20
 
 // Client is an HTTP client for communicating with 1C:Enterprise.
 type Client struct {
+	// BaseURL никогда не содержит учётных данных: NewClient снимает их с адреса
+	// при создании (см. urlcred.go). Это поле читают и печатают, поэтому пароль
+	// в нём означал бы пароль в тексте ошибки, в логе и в отчёте об ошибке.
 	BaseURL    string
 	User       string
 	Password   string
@@ -36,6 +39,25 @@ type Client struct {
 	// maxResponseSize — максимальный размер ответа 1С в байтах.
 	// Ответ крупнее этого значения отбрасывается с понятной ошибкой.
 	maxResponseSize int64
+
+	// displayBase — «схема://хост» для показа человеку и модели. Собран только
+	// из Scheme и Host, поэтому не может нести ни учётных данных, ни строки
+	// запроса, ни пути. Вычисляется здесь, потому что здесь единственное место,
+	// где адрес ещё разобран; читают его типизированные ошибки onec.
+	displayBase string
+
+	// sendAuth решает, отправлять ли Basic. Именно он, а не «User != \"\"»:
+	// адрес http://:pw@host имеет ПУСТОЙ логин и сегодня аутентифицируется,
+	// потому что net/http сам поднимает req.URL.User в заголовок
+	// (/usr/local/go/src/net/http/client.go). Проверка по User молча лишила бы
+	// такую базу аутентификации.
+	sendAuth bool
+
+	// baseErr — отказ, вынесенный при разборе адреса. Он проваливает КАЖДЫЙ
+	// вызов и не содержит ни одного байта значения. Отказ живёт здесь, а не в
+	// виде паники или os.Exit, потому что NewClient вызывают и с внутренними
+	// схемами (proxy://, poll://), которые никто не вводил руками.
+	baseErr error
 }
 
 // Option настраивает Client при создании через NewClient.
@@ -71,18 +93,37 @@ func (c *Client) MaxResponseSize() int64 {
 }
 
 // NewClient creates a client for 1C HTTP service.
-// When user is non-empty, basic auth is added to every request.
+//
+// Учётные данные берутся из ДВУХ источников, и порядок между ними тот же, что и
+// раньше: флаги --user и --password побеждают, потому что SetBasicAuth ставит
+// заголовок до отправки, и подъём userinfo средствами net/http в этом случае
+// никогда не срабатывал.
+//
+// Адрес разбирается ЗДЕСЬ, на входе, а не в местах печати. Разбор в месте
+// печати не помог бы: пароль остался бы в поле BaseURL, и следующий читатель
+// этого поля потёк бы снова. Адрес, из которого учётные данные нельзя отделить
+// однозначно, НЕ отвергается броском: NewClient обязан пережить внутренние
+// схемы платных редакций, поэтому отказ запоминается в baseErr и проваливает
+// каждый вызов. Отказ ПОЛЬЗОВАТЕЛЮ выносит граница флага в cmd/mcp-1c.
+//
 // Без опций используются значения по умолчанию: лимит ответа
 // DefaultMaxResponseSizeMiB и таймаут DefaultRequestTimeout.
 func NewClient(baseURL, user, password string, opts ...Option) *Client {
+	res, err := SplitURLCredentials(baseURL)
 	c := &Client{
-		BaseURL:  baseURL,
-		User:     user,
-		Password: password,
+		BaseURL:     res.Base,
+		displayBase: res.Display,
+		baseErr:     err,
 		HTTPClient: &http.Client{
 			Timeout: DefaultRequestTimeout,
 		},
 		maxResponseSize: int64(DefaultMaxResponseSizeMiB) * mib,
+	}
+	switch {
+	case user != "":
+		c.User, c.Password, c.sendAuth = user, password, true
+	case res.HadUserinfo:
+		c.User, c.Password, c.sendAuth = res.User, res.Password, true
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -92,15 +133,21 @@ func NewClient(baseURL, user, password string, opts ...Option) *Client {
 
 // Get performs a GET request to a 1C endpoint and decodes the JSON response.
 func (c *Client) Get(ctx context.Context, endpoint string, result any) error {
+	if c.baseErr != nil {
+		return c.baseErr
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+endpoint, nil)
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return fmt.Errorf("creating request: %w", ScrubbedURLError(err))
 	}
 	return c.do(req, result)
 }
 
 // Post performs a POST request to a 1C endpoint with a JSON body and decodes the JSON response.
 func (c *Client) Post(ctx context.Context, endpoint string, body any, result any) error {
+	if c.baseErr != nil {
+		return c.baseErr
+	}
 	data, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshaling request body: %w", err)
@@ -108,7 +155,7 @@ func (c *Client) Post(ctx context.Context, endpoint string, body any, result any
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+endpoint, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return fmt.Errorf("creating request: %w", ScrubbedURLError(err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return c.do(req, result)
@@ -116,14 +163,21 @@ func (c *Client) Post(ctx context.Context, endpoint string, body any, result any
 
 // do executes the request, checks the status, and decodes the JSON response.
 func (c *Client) do(req *http.Request, result any) error {
-	if c.User != "" {
+	// sendAuth покрывает случай пустого логина; «c.User != \"\"» сохраняет прежнее
+	// поведение для вызывающего, который присвоил экспортируемые поля уже после
+	// создания клиента. Ни одного из двух условий по отдельности недостаточно.
+	if c.sendAuth || c.User != "" {
 		req.SetBasicAuth(c.User, c.Password)
 	}
 	req.Close = true // close connection after each request (avoids 1C session limit)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("executing request to 1C: %w", err)
+		// http.Client строит СВОЙ *url.Error из адреса запроса и маскирует в нём
+		// только пароль, логин печатается целиком. После разделения на границе
+		// в адресе учётных данных уже нет, но вызывающий мог присвоить BaseURL
+		// напрямую, поэтому очистка остаётся.
+		return fmt.Errorf("executing request to 1C: %w", ScrubbedURLError(err))
 	}
 	defer resp.Body.Close()
 
