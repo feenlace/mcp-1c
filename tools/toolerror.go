@@ -185,11 +185,26 @@ const (
 //
 // The BODY is never repeated; see remedyForeignBody.
 //
+// lineStatusForeign IS ONLY TRUE OF A BODY THAT WAS READ WHOLE, and that is what
+// lineStatusForeignTruncated exists for. Both halves of its sentence break under
+// the read cap: «не похоже на ответ расширения» is an inference the cut makes
+// unsound, because a cut envelope does not parse no matter who sent it, and
+// «длина тела в байтах» is the one thing BodyBytes is not once Truncated is set
+// (see onec.StatusError.BodyBytes, which says so at the field). Measured on a
+// real listener: an 80 013 byte envelope, valid JSON on the wire, arrived here
+// as foreign with 65 535 bytes read and was announced as a body 65 535 bytes
+// long that does not look like an extension answer. Neither statement was true.
+//
 // Customer-facing RU: no тире.
 const (
 	lineStatusExtension = "❌ 1С ответила кодом HTTP %d и вернула текст ошибки."
 	lineStatusForeign   = "❌ Ответ пришёл с кодом HTTP %d, но его тело не похоже на ответ расширения MCP " +
 		"(длина тела в байтах: %d)."
+	// lineStatusForeignTruncated carries NO byte figure: bodyTruncatedNotice
+	// carries the only number the cut leaves true, and repeating a number whose
+	// meaning changed is how the wrong one gets read as a body length.
+	lineStatusForeignTruncated = "❌ Ответ пришёл с кодом HTTP %d, но тело прочитано не целиком, " +
+		"поэтому по нему нельзя определить, ответ это расширения MCP или чужой."
 	// lineStatusRedirect отвечает за коды, по которым onec.Client намеренно не
 	// пошёл. Он не показывает адрес назначения: его выбрала та сторона, а
 	// заголовок Location в этой ветке ничем не ограничен и не проверен.
@@ -295,8 +310,17 @@ const queryMarkerHint = "Позицию, на которой разбор ост
 // exception cannot arrive as one.
 //
 // The remedy now states both causes and orders the checks so that the one which
-// distinguishes them comes first: an answer to /version separates «the request
-// never arrived» from «it arrived and the handler threw».
+// distinguishes them comes first: an answer to get_configuration_info separates
+// «the request never arrived» from «it arrived and the handler threw». That tool
+// calls /configuration (configuration_info.go); the comment here used to name
+// /version, which is the STARTUP check in cmd/mcp-1c/main.go and is not a call
+// the model can make, so the sentence prescribed a step nobody reading it could
+// take.
+//
+// IT IS NOT SHOWN FOR A BODY THE READ CAP CUT. Both of its causes are claims
+// about a body that was read whole; a cut body has a third possibility, that it
+// was the extension's own envelope and did not fit, and the two named here
+// exclude it. remedyForeignBodyTruncated is what ships instead.
 //
 // Customer-facing RU: no тире.
 const remedyForeignBody = "Так отвечает либо промежуточное звено (веб-сервер, прокси или сама " +
@@ -314,6 +338,45 @@ const remedyForeignBody = "Так отвечает либо промежуточ
 	"выполнение запроса требуют разных прав, и нехватка любого из них прерывает уже начатый " +
 	"обработчик.\n" +
 	"5. Адрес в `--base`: он должен указывать на публикацию базы, а не на корень веб-сервера.\n"
+
+// remedyForeignBodyTruncated is shown when the read cap cut the body, and it
+// ASSERTS NO CAUSE, because the cut is what removed the evidence a cause would
+// rest on.
+//
+// The classification the renderer receives is «the bytes I have did not parse as
+// an envelope», and once those bytes are a prefix that statement is true of an
+// extension answer too: the closing brace of {"error":…} is the last thing a
+// prefix keeps. So the class here is a fact about the READ, not about the far
+// side, and every sentence remedyForeignBody spends on «which of these two
+// intermediaries answered» is spent on a question this branch cannot pose.
+//
+// NO SALVAGE IS ATTEMPTED, and that is a decision rather than an omission. A cut
+// body that begins {"error":" could be echoed as far as the cut, and it would
+// look like a recovered diagnostic; nothing about a prefix establishes who wrote
+// it, and a proxy can send those ten bytes as easily as the extension can. The
+// whole reason this branch describes the body instead of showing it is that its
+// author cannot be established, and a prefix does not establish one.
+//
+// The checks are ordered by what they can settle. The first is the only one that
+// separates the two worlds, so the two that follow are conditioned on its answer
+// rather than listed flat; the last is about the STATUS CODE, which the cut does
+// not touch.
+//
+// Customer-facing RU: no тире.
+const remedyForeignBodyTruncated = "Обрезанный конверт расширения не разбирается ни при каком " +
+	"содержимом, поэтому по прочитанному нельзя сказать, чей это ответ: так выглядит и ответ " +
+	"расширения MCP, который не поместился, и страница промежуточного звена (веб-сервер, прокси или " +
+	"сама платформа 1С). Тело не показано, потому что подтвердить его источник нельзя.\n\n" +
+	"Проверьте:\n" +
+	"1. Отвечает ли расширение вообще: вызовите get_configuration_info. Это единственная проверка, " +
+	"которая разделяет два случая, поэтому она первая.\n" +
+	"2. Если get_configuration_info отвечает, публикация и учётные данные в порядке, и дело в самой " +
+	"операции. Полный текст ошибки ищите в журнале регистрации 1С: сюда дошло только начало тела.\n" +
+	"3. Если get_configuration_info не отвечает, проверьте публикацию: в `default.vrd` нужен элемент " +
+	"`<httpServices publishExtensionsByDefault=\"true\"/>` либо явный " +
+	"`<service name=\"MCPService\" rootUrl=\"mcp-1c\"/>`.\n" +
+	"4. Код ответа: при 401 и 403 запрос отклонён на проверке доступа и до кода расширения не " +
+	"доходит. Отклонить может и веб-сервер, и сама платформа 1С.\n"
 
 // remedyRedirect объясняет ровно то, что произошло: onec.Client переходит по
 // перенаправлению только в пределах адреса из `--base` (см. onec/client.go,
@@ -367,6 +430,22 @@ const queryReadOnlyReassurance = "Запрос только читает дан�
 // Truncation is announced, never silent. A cut nobody mentions is read as the
 // whole text, and a model acting on the whole of a fragment is the failure this
 // prevents.
+//
+// THAT SENTENCE WAS FALSE OF THE CODE UNDER IT AND THIS IS HOW. bodyTruncatedNotice
+// was added on the BodyKindExtension branch only, and cutting a JSON envelope is
+// precisely what stops it parsing, so a cut body classifies as foreign and left
+// down a branch that returned before the notice. The notice therefore sat in the
+// one branch a cut practically cannot reach while the branch it always reaches
+// said nothing. It is now added on both, because «every branch that can produce
+// a cut announces it» is the property, and «the branch whose name mentions
+// truncation» is not.
+//
+// The extension branch is NOT dead: an envelope whose closing brace lands exactly
+// on the cap, followed by anything at all, is read whole, parses, and still has
+// Truncated set. 1С's HTTP service appends a trailing newline (onec/client.go
+// says so at the success path), which is exactly «anything at all».
+// TestTruncatedExtensionEnvelopeIsReachable builds that body and drives it, so
+// the reachability is measured rather than argued.
 //
 // Customer-facing RU: no тире.
 const (
@@ -462,7 +541,22 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 		// The body is not attributable, so it is described and not shown. The
 		// header is not attributable either, and until this commit it was shown
 		// verbatim; now it is reduced first and framed when it is shown at all.
-		p.add(fmt.Sprintf(lineStatusForeign, se.StatusCode, se.BodyBytes))
+		//
+		// A CUT BODY IS A WEAKER STATEMENT AND GETS ITS OWN TEXT. This branch is
+		// where a truncated body actually lands, because the cut is what stops
+		// the envelope parsing, so the class says what the READ produced and not
+		// what the far side sent. Both the line and the remedy are swapped, not
+		// just the line: keeping remedyForeignBody here would leave the answer
+		// asserting a cause under a sentence that has just said the cause is
+		// undetermined.
+		remedy := remedyForeignBody
+		if se.Truncated {
+			p.add(fmt.Sprintf(lineStatusForeignTruncated, se.StatusCode))
+			p.add(fmt.Sprintf(bodyTruncatedNotice, se.BodyBytes))
+			remedy = remedyForeignBodyTruncated
+		} else {
+			p.add(fmt.Sprintf(lineStatusForeign, se.StatusCode, se.BodyBytes))
+		}
 		switch ct := contentTypeForDisplay(se.ContentType); {
 		case ct != "":
 			p.add(untrustedHeaderNotice)
@@ -472,7 +566,7 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 			// the whole of the diagnostic without carrying any of the bytes.
 			p.add(lineForeignContentTypeUnusable)
 		}
-		p.add(remedyForeignBody)
+		p.add(remedy)
 		return
 	}
 

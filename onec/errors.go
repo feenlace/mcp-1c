@@ -20,9 +20,16 @@ import (
 const (
 	// BodyKindExtension — тело разобралось как конверт расширения {"error":"…"}.
 	BodyKindExtension = "extension"
-	// BodyKindForeign — тело конвертом расширения не является. Источник по нему
-	// не определить: это может быть страница веб-сервера, прокси или самой
+	// BodyKindForeign — тело НЕ РАЗОБРАЛОСЬ как конверт расширения. Источник по
+	// нему не определить: это может быть страница веб-сервера, прокси или самой
 	// платформы, поэтому наружу оно не отдаётся.
+	//
+	// Формулировка «не разобралось», а не «конвертом не является», выбрана после
+	// измерения: при Truncated == true сюда попадает и настоящий конверт
+	// расширения, потому что закрывающая скобка {"error":…} это последнее, что
+	// теряет обрезанное начало. То есть этот класс сам по себе о той стороне
+	// ничего не утверждает, и место показа обязано смотреть на Truncated прежде,
+	// чем называть причину (см. tools.remedyForeignBodyTruncated).
 	BodyKindForeign = "foreign"
 )
 
@@ -81,6 +88,15 @@ func (e *StatusError) Error() string {
 	if e.Base != "" {
 		fmt.Fprintf(&b, " on %s", e.Base)
 	}
+	// Обрезка называется ДО ветвления по классу, потому что её производят обе
+	// ветви, а называла её только одна. Ветвь расширения выходила отсюда сразу
+	// за Detail, и факт обрезки терялся ровно на том канале, который
+	// tools/form.go formServiceCallFailedNote кладёт модели в успешный ответ.
+	// Ветвь достижима: конверт, чья закрывающая скобка попала точно на потолок,
+	// прочитан целиком, разобрался и всё равно несёт Truncated.
+	if e.Truncated {
+		b.WriteString(" (body truncated at the read cap)")
+	}
 	if e.BodyKind == BodyKindExtension {
 		fmt.Fprintf(&b, ": %s", e.Detail)
 		return b.String()
@@ -100,12 +116,15 @@ func (e *StatusError) Error() string {
 	if ct == "" && e.ContentType != "" {
 		ct = contentTypeUnusable
 	}
-	fmt.Fprintf(&b, ": response body is not an MCP extension envelope (content-type %q, %d bytes read",
-		ct, e.BodyBytes)
+	// «did not parse», а не «is not», когда тело обрезано: обрезанный конверт не
+	// разбирается ни при каком содержимом, поэтому утверждать по прочитанному,
+	// что конвертом оно не является, нечем. Без обрезки прочитано всё тело, и
+	// утверждение остаётся прежним, слово в слово.
+	what := "is not an MCP extension envelope"
 	if e.Truncated {
-		b.WriteString(", truncated")
+		what = "did not parse as an MCP extension envelope"
 	}
-	b.WriteString(")")
+	fmt.Fprintf(&b, ": response body %s (content-type %q, %d bytes read)", what, ct, e.BodyBytes)
 	return b.String()
 }
 
