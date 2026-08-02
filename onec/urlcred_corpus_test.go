@@ -237,10 +237,52 @@ func corpusTable() []corpusRow {
 		},
 
 		// ---- '@' and '?' outside the authority ---------------------------
+		//
+		// An '@' is legal in an RFC 3986 path and 1С infobase and service names
+		// really contain one. It is refused only where it could ALSO be read as
+		// the userinfo delimiter of a credential, and a credential needs a ':'
+		// to hold a password. Where there is no colon before it, there is
+		// nothing secret for the kept base to carry, so it is accepted.
 		{
 			ID: "at-in-path", In: `http://1c.corp.local/hs/mcp-1c@v2`,
-			Note:   "legal RFC path, refused BY POLICY; the cost of closing L2",
+			Note: "no userinfo and no colon before the '@': there is no credential to lose",
+			Base: `http://1c.corp.local/hs/mcp-1c@v2`, Display: `http://1c.corp.local`,
+		},
+		{
+			ID: "at-in-path-service-name", In: `http://1c.corp.local/hs/mcp@1c`,
+			Base: `http://1c.corp.local/hs/mcp@1c`, Display: `http://1c.corp.local`,
+		},
+		{
+			ID: "at-in-path-ipv6-no-port", In: `http://[::1]/hs/x@y`,
+			Note: "the brackets are not a userinfo colon; without a port there is nothing ambiguous",
+			Base: `http://[::1]/hs/x@y`, Display: `http://[::1]`,
+		},
+		{
+			ID: "at-in-path-explicit-port", In: `http://1c.corp.local:8080/hs/mcp-1c@v2`,
+			Note: "STATED RESIDUAL: host:8080 and the user:1234 of L2-hostport are the same shape, " +
+				"so an explicit port plus an '@' in the path is refused; %40 is the way through",
 			Refuse: true,
+		},
+		{
+			ID: "at-in-path-with-cred", In: `http://admin:secret@host/hs/mcp-1c@v2`,
+			Note: "userinfo AND an '@' further along: which '@' the administrator meant is not decidable, " +
+				"so the ambiguity rule applies",
+			Refuse: true, Secrets: []string{"secret"},
+		},
+
+		// ---- %40 in the path means the same thing in either alphabet ------
+		{
+			ID: "pct-40-in-path-ascii", In: `http://admin:secret@1c.corp.local/base/%40x/hs`,
+			Note: "the twin of the row below; both must be accepted or the encoding means two things",
+			Base: `http://1c.corp.local/base/%40x/hs`, User: "admin", Password: "secret",
+			HadUserinfo: true, Display: `http://1c.corp.local`, Secrets: []string{"secret"},
+		},
+		{
+			ID: "pct-40-in-path-cyrillic", In: `http://admin:secret@1c.corp.local/база/%40x/hs`,
+			Note: "MEASURED normalisation: raw Cyrillic fails url.validEncoded, so EscapedPath() rebuilds " +
+				"the path from the decoded Path and %40 comes back as '@'; the address is still accepted",
+			Base: `http://1c.corp.local/%D0%B1%D0%B0%D0%B7%D0%B0/@x/hs`, User: "admin", Password: "secret",
+			HadUserinfo: true, Display: `http://1c.corp.local`, Secrets: []string{"secret"},
 		},
 		{
 			ID: "at-in-query", In: `http://1c.corp.local/odata/X?$filter=a@b`,

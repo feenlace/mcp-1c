@@ -35,8 +35,120 @@ func TestCorpusSecretsAreReal(t *testing.T) {
 		}
 	}
 	// The counter-check: a table that degenerated to nothing must fail here too.
-	if n := len(corpusTable()); n != 47 {
-		t.Fatalf("the corpus has %d rows, want 47: the table itself changed", n)
+	if n := len(corpusTable()); n != 53 {
+		t.Fatalf("the corpus has %d rows, want 53: the table itself changed", n)
+	}
+}
+
+// TestPercentFortyMeansOneThingInEitherAlphabet is the property the '@' check
+// broke: whether "%40" in a path is read as an encoded '@' or as a delimiter
+// must not depend on whether the REST of the path is ASCII.
+//
+// It depended on it. url.URL.EscapedPath() returns RawPath only when RawPath
+// passes validEncoded; raw Cyrillic bytes fail that test, so EscapedPath()
+// rebuilt the path from the decoded Path, and rebuilding turns "%40" back into
+// '@' because '@' needs no escaping in a path. The measurement, not the theory:
+// for the Cyrillic address EscapedPath() returned "/%D0%B1%D0%B0%D0%B7%D0%B0/@x/hs"
+// and for its ASCII twin it returned "/base/%40x/hs".
+func TestPercentFortyMeansOneThingInEitherAlphabet(t *testing.T) {
+	const (
+		ascii    = `http://admin:secret@1c.corp.local/base/%40x/hs`
+		cyrillic = `http://admin:secret@1c.corp.local/база/%40x/hs`
+	)
+
+	// PREMISE, measured rather than assumed: the two really do differ inside
+	// net/url. Without this the test could pass because nothing was different.
+	ua, err := url.Parse(ascii)
+	if err != nil {
+		t.Fatalf("premise broken: %v", err)
+	}
+	uc, err := url.Parse(cyrillic)
+	if err != nil {
+		t.Fatalf("premise broken: %v", err)
+	}
+	if !strings.Contains(uc.EscapedPath(), "@") || strings.Contains(ua.EscapedPath(), "@") {
+		t.Fatalf("premise broken: EscapedPath is no longer asymmetric (ascii=%q cyrillic=%q); "+
+			"this test is measuring nothing", ua.EscapedPath(), uc.EscapedPath())
+	}
+	t.Logf("premise holds: EscapedPath ascii=%q cyrillic=%q", ua.EscapedPath(), uc.EscapedPath())
+
+	errA := CheckURLCredentialResidue(ascii)
+	errC := CheckURLCredentialResidue(cyrillic)
+	if (errA == nil) != (errC == nil) {
+		t.Errorf("the same address in two alphabets got two verdicts: ascii=%v cyrillic=%v", errA, errC)
+	}
+	if errA != nil {
+		t.Errorf("the ASCII address is refused: %v", errA)
+	}
+	if errC != nil {
+		t.Errorf("the Cyrillic address is refused: %v", errC)
+	}
+}
+
+// TestRefusalAdviceIsNotSelfContradicting is the honesty check on the messages.
+//
+// For each refusal it takes an address the splitter really rejects, applies the
+// encoding that refusal's own message tells the administrator to use, and
+// requires the result to be ACCEPTED. A message that advises the spelling which
+// caused the refusal fails here. That is exactly what shipped: the '@' check ran
+// on EscapedPath(), so writing '@' as "%40" in a Cyrillic path produced the
+// refusal whose text advised writing '@' as "%40".
+//
+// The premise of every row is asserted first: if the "refused" address is not
+// refused, the row is testing nothing.
+func TestRefusalAdviceIsNotSelfContradicting(t *testing.T) {
+	cases := []struct {
+		name    string
+		refused string
+		advised string
+	}{
+		// The exact self contradiction that shipped: '@' in a Cyrillic path was
+		// refused, and the refusal advised writing '@' as "%40", which was also
+		// refused.
+		{"@ in a Cyrillic path", `http://admin:secret@host/база/@x/hs`, `http://admin:secret@host/база/%40x/hs`},
+		{"@ in a path, colon in the authority", `http://user:1234/passZ@host/hs`, `http://user:1234/passZ%40host/hs`},
+		{"@ in a path, colon in the path", `http://us/er:passZZ@host/hs`, `http://us/er:passZZ%40host/hs`},
+		{"@ in a path with an explicit port", `http://1c.corp.local:8080/hs/mcp-1c@v2`, `http://1c.corp.local:8080/hs/mcp-1c%40v2`},
+		{"@ in a path beside a credential", `http://admin:secret@host/hs/mcp-1c@v2`, `http://admin:secret@host/hs/mcp-1c%40v2`},
+		{"@ in a password", `http://admin:p@ss/w0rd@1c.corp.local/hs`, `http://admin:p%40ss%2Fw0rd@1c.corp.local/hs`},
+		{"? in a password", `http://user:pa?ss@host/hs`, `http://user:pa%3Fss@host/hs`},
+		{"# in a password", `http://user:pa#ss@host/hs`, `http://user:pa%23ss@host/hs`},
+		{"/ in a password", `http://user:pa/ss@host/hs`, `http://user:pa%2Fss@host/hs`},
+	}
+	for _, c := range cases {
+		if err := CheckURLCredentialResidue(c.refused); err == nil {
+			t.Errorf("[%s] PREMISE BROKEN: %q is not refused, so its advice is not being tested",
+				c.name, c.refused)
+			continue
+		}
+		if err := CheckURLCredentialResidue(c.advised); err != nil {
+			t.Errorf("[%s] the refusal advises the spelling %q, and that spelling is REFUSED too: %v",
+				c.name, c.advised, err)
+		}
+	}
+}
+
+// TestRefusalMessageMatchesItsCause pins that an address with no userinfo is not
+// refused with a sentence that says it carries a login and a password.
+func TestRefusalMessageMatchesItsCause(t *testing.T) {
+	for _, in := range []string{
+		`http://user:1234/passZ@host/hs`,
+		`http://us/er:passZZ@host/hs`,
+		`http://1c.corp.local:8080/hs/mcp-1c@v2`,
+	} {
+		u, perr := url.Parse(in)
+		if perr != nil || u.User != nil {
+			t.Fatalf("premise broken for %q: parse err=%v user=%v", in, perr, u.User)
+		}
+		err := CheckURLCredentialResidue(in)
+		if err == nil {
+			t.Errorf("%q is no longer refused; this row is testing nothing", in)
+			continue
+		}
+		if err == ErrURLCredentialUnstrippable {
+			t.Errorf("%q has no userinfo (url.Parse reports user=<nil>) yet is refused with "+
+				"the message that says the address contains a login and a password", in)
+		}
 	}
 }
 
@@ -79,6 +191,7 @@ func TestRefusalMessagesHaveNoDashes(t *testing.T) {
 		"ErrURLCredentialUnstrippable": ErrURLCredentialUnstrippable.Error(),
 		"ErrBaseURLHasQueryOrFragment": ErrBaseURLHasQueryOrFragment.Error(),
 		"ErrBaseURLUnparsable":         ErrBaseURLUnparsable.Error(),
+		"ErrBaseURLAmbiguousAt":        ErrBaseURLAmbiguousAt.Error(),
 	}
 	for name, m := range msgs {
 		if bad := dashViolations(m); len(bad) > 0 {
