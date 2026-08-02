@@ -298,14 +298,17 @@ const queryMarkerHint = "Позицию, на которой разбор ост
 // which the platform answers with a page of its own and the body is foreign by
 // exactly the same test. Grounded in the extension's own source rather than
 // argued: ЖурналРегистрацииPOST calls ВыгрузитьЖурналРегистрации OUTSIDE every
-// Попытка it opens, so a rights failure there raises after some sixty lines of
-// extension code have already run, and the advice sent the operator to check a
-// publication that had already worked. Verified with
+// Попытка it opens, so a rights failure there raises only after the handler has
+// parsed the body and validated every filter it was given, and the advice sent
+// the operator to check a publication that had already worked.
 //
-//	/usr/bin/awk 'NR>=873 && NR<=959 && (/Попытка/ || /КонецПопытки/ ||
-//	  /ВыгрузитьЖурналРегистрации/)' <the module>
-//
-// which shows every Попытка closed before the call. ОтветОшибка is the only
+// That property is measured, not restated here. It is what
+// TestEventLogRightsFailureRaisesInsideTheExtension (remedy_truth_test.go) walks
+// the function to check, and it fails if the call ever moves inside a Попытка.
+// This paragraph used to carry an awk command over a line range instead, plus a
+// count of the lines that run before the call. One commit to the extension
+// falsified both at once, silently, because a line range still prints something
+// plausible after the code it addressed has moved. ОтветОшибка is the only
 // thing in that module that produces the {"error":…} envelope, so a raised
 // exception cannot arrive as one.
 //
