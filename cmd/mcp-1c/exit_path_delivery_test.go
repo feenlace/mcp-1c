@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -56,10 +57,54 @@ func runChildWithStdin(t *testing.T, stdin []byte, args ...string) refusalRun {
 	return refusalRun{exit: code, stdout: out.Bytes(), stderr: errb.Bytes()}
 }
 
+// assertStdoutIsProtocolOnly checks the property fd 1 actually has to hold: it
+// carries the JSON-RPC stream, so every line on it must be a protocol frame and
+// no line may be prose.
+//
+// Asserting instead that fd 1 is EMPTY looks stricter and is wrong. A server
+// that lives long enough emits notifications/tools/list_changed and
+// notifications/prompts/list_changed unprompted, which are valid frames; an
+// emptiness check passes today only because these children reach EOF first, and
+// would fail spuriously the day one of them is scheduled a little differently.
+// A test that fails for a correct reason is as expensive as one that passes for
+// a wrong one.
+func assertStdoutIsProtocolOnly(t *testing.T, stdout []byte) {
+	t.Helper()
+	for _, line := range bytes.Split(bytes.TrimRight(stdout, "\n"), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		if !json.Valid(line) {
+			t.Errorf("fd 1 carries the JSON-RPC stream and received a line that is not a frame; "+
+				"a byte of prose in front of a frame breaks the transport for every client that "+
+				"reads it: %q", line)
+		}
+	}
+}
+
 // malformedFrame is a byte sequence the JSON-RPC transport cannot decode. It is
 // the input that makes s.Run return an error, which is how the serve-failure
 // exit is reached. No network and no 1C involved.
 var malformedFrame = []byte("this is not json\n")
+
+// TestAssertStdoutHelperFiresOnProse is the control for the guard above. Every
+// stdout assertion in this package routes through that helper, so if it could
+// not fail, none of them would be evidence of anything.
+func TestAssertStdoutHelperFiresOnProse(t *testing.T) {
+	fake := &testing.T{}
+	assertStdoutIsProtocolOnly(fake, []byte("mcp-1c error: boom\n"))
+	if !fake.Failed() {
+		t.Error("the stdout guard accepted a line of prose, so it cannot fail")
+	}
+	// And it must NOT fire on a real frame, or it would reject correct output
+	// and the assertions would be failing for the wrong reason.
+	clean := &testing.T{}
+	assertStdoutIsProtocolOnly(clean,
+		[]byte(`{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}`+"\n"))
+	if clean.Failed() {
+		t.Error("the stdout guard rejected a valid JSON-RPC frame")
+	}
+}
 
 // TestServeFailureReachesTheUserInPipeMode is the reachable half of the defect.
 //
@@ -87,12 +132,9 @@ func TestServeFailureReachesTheUserInPipeMode(t *testing.T) {
 			filepath.Join(cacheDir, "stderr.log"), len(logged), logged)
 	}
 
-	// fd 1 carries the JSON-RPC stream. A fix that moved the message there would
-	// be worse than the defect it repaired.
-	if len(run.stdout) != 0 {
-		t.Errorf("the serve-failure path wrote %d bytes to fd 1, where the JSON-RPC stream "+
-			"lives: %q", len(run.stdout), run.stdout)
-	}
+	// A fix that moved the message onto fd 1 would be worse than the defect it
+	// repaired.
+	assertStdoutIsProtocolOnly(t, run.stdout)
 }
 
 // TestServeFailurePositiveControl proves the redirect is what silences fd 2 in

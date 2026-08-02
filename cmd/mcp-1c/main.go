@@ -247,6 +247,32 @@ func main() {
 
 	var dumpIndex *dump.Index
 	if *dumpDir != "" {
+		// Say it HERE, synchronously, before serving starts.
+		//
+		// The build that discovers the same fault runs in a background goroutine
+		// and nothing sequences it against the end of the process, so its report is
+		// not guaranteed to be written at all: measured over repeated starts it goes
+		// missing outright, and on the serve-failure exit os.Exit skips the deferred
+		// dumpIndex.Close that would otherwise wait for it. A diagnosis an operator
+		// receives only most of the time is not a diagnosis.
+		//
+		// NOT fatal, deliberately. The tools that need the dump already answer with
+		// an error naming this path, nothing else depends on it, and an unreadable
+		// path is also what a not-yet-mounted share looks like, so refusing to start
+		// would turn a degraded server into a restart loop. Exit stays 0.
+		//
+		// slog rather than a write to a descriptor: it is already pointed at the
+		// right place for the launch mode, which is fd 2 on a terminal where the
+		// person who typed the flag is watching, and the log file under a pipe,
+		// where writing to fd 2 mid-session is the very thing the redirect exists
+		// to prevent. ERROR because the pipe-mode handler keeps nothing below it.
+		if err := dumpPathFault(*dumpDir); err != nil {
+			slog.Error("--dump does not point at a usable directory, so search_code and "+
+				"code_read will report a build error for the whole run. Every other tool is "+
+				"unaffected and the server is starting normally. Correct the path and restart.",
+				"dump", *dumpDir, "error", err)
+		}
+
 		var err error
 		dumpIndex, err = openServeIndexLocal(serveBuildCtx, *dumpDir, *cacheDir, *reindex)
 		if err != nil {
@@ -455,6 +481,25 @@ func reportLogFallback(t *logTarget) {
 		"a fallback file instead. Make that directory writable, or point --cache-dir "+
 		"(MCP_1C_CACHE_DIR) somewhere this user can write.",
 		"requested", t.requested, "using", t.path, "error", t.cause)
+}
+
+// dumpPathFault reports why dumpDir cannot be a DumpConfigToFiles directory, or
+// nil when it can be one.
+//
+// It answers the cheap question only: does the path exist and is it a directory.
+// Whether the contents are a valid dump is settled by the index build, which is
+// asynchronous for a reason (a large dump must not delay the MCP initialize
+// handshake). A stat costs microseconds and cannot delay anything, which is what
+// makes it safe to do before serving starts.
+func dumpPathFault(dumpDir string) error {
+	st, err := os.Stat(dumpDir)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("%s is not a directory", dumpDir)
+	}
+	return nil
 }
 
 // compareExtensionVersions orders two dotted numeric extension versions,
