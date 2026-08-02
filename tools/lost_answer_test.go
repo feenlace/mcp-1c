@@ -189,6 +189,7 @@ func TestClusterTwoStringsCarryNoDash(t *testing.T) {
 		remedyUnreachable,
 		remedyRedirect,
 		remedyQueryRejected,
+		remedyQueryBodyRejected,
 	}
 	for i, s := range shipped {
 		for _, r := range s {

@@ -281,6 +281,78 @@ const remedyQueryRejected = "Проверьте:\n" +
 	"запроса, и переписывать его бесполезно. Тогда дело в правах доступа, блокировках или " +
 	"состоянии базы, а это за пределами того, что видит этот инструмент.\n"
 
+// queryBodyFaultPrefixes are the answers ЗапросPOST gives BEFORE it has a query
+// to talk about: the body did not parse, it was not an object, it carried no
+// query key, or limit was not a number. Prefixes rather than whole strings
+// because the first one appends ОписаниеОшибки() after its colon.
+//
+// remedyQueryRejected is the wrong advice for every one of them, and the reason
+// this list is needed AT ALL is recent: those bodies used to escape as HTTP 500
+// text/plain, which never reached this renderer as an extension envelope. The
+// commit that turned them into 400 {"error":…} routed them into a checklist
+// written for a query 1С looked at and refused.
+//
+// KEYED ON THE FAR SIDE'S TEXT, deliberately and within a bound. It picks
+// between two pieces of text this repository wrote and nothing else: no branch
+// shows more of the answer, spends more, or trusts it further, so a responder
+// forging "query is required" swaps one static checklist for another. The risk
+// worth guarding is staleness, and
+// TestQueryBodyFaultSetMatchesTheShippedModule walks ЗапросPOST and fails on a
+// literal 400 that is in neither bucket.
+var queryBodyFaultPrefixes = []string{
+	"request body is not valid JSON:",
+	"request body must be a JSON object",
+	"query is required",
+	"limit must be a number",
+}
+
+// isQueryBodyFault reports whether the extension refused the REQUEST rather than
+// the query in it.
+func isQueryBodyFault(detail string) bool {
+	d := strings.TrimSpace(detail)
+	if d == "" {
+		return false
+	}
+	for _, p := range queryBodyFaultPrefixes {
+		if strings.HasPrefix(d, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// remedyQueryBodyRejected is what a body fault gets instead.
+//
+// It asserts what this side can actually establish. NewQueryHandler builds the
+// body itself, refuses an empty query before any request is made, and sends the
+// trimmed text, so "there was no query in the body" is not something the caller
+// can have caused and not something rewriting the query can fix: what arrived is
+// not what was sent.
+//
+// The mechanism named first is the one that is grounded rather than imagined.
+// net/http redirectBehavior answers a 301, 302 or 303 by repeating the request
+// as GET with includeBody false, so a POST body is dropped outright, and
+// onec.Client follows a redirect that stays inside the configured origin. A web
+// server that normalises a path with a redirect therefore delivers /query with
+// no body at all, which is exactly "query is required".
+//
+// Customer-facing RU: no тире.
+const remedyQueryBodyRejected = "Так отвечает расширение, когда в теле запроса нет пригодного " +
+	"текста запроса. Отправляет тело этот инструмент, пустой запрос он отклоняет у себя и до 1С " +
+	"не доводит, поэтому переписывать запрос бесполезно: до расширения доехало не то, что было " +
+	"отправлено.\n\n" +
+	"Проверьте:\n" +
+	"1. Перенаправления на пути к публикации. По кодам 301, 302 и 303 запрос повторяется методом " +
+	"GET и тело POST при этом теряется целиком, а перенаправление в пределах адреса из `--base` " +
+	"клиент проходит молча. Так выглядит веб-сервер, который поправляет путь: лишний слэш, " +
+	"регистр, добавленный или убранный завершающий слэш.\n" +
+	"2. Значение `--base`: запишите в него конечный адрес публикации, тот, на который веб-сервер " +
+	"уводит, чтобы перенаправления не было вовсе.\n" +
+	"3. Промежуточные звенья: прокси, брандмауэр приложений или шлюз могут обрезать тело POST " +
+	"или изменить его.\n" +
+	"4. Текст ошибки выше. «query is required» означает, что тело дошло без запроса, остальные " +
+	"три означают, что оно дошло изменённым.\n"
+
 // Customer-facing RU: no тире.
 const queryMarkerHint = "Позицию, на которой разбор остановился, 1С отмечает вставкой `<<?>>`.\n"
 
@@ -587,8 +659,14 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 		p.add(queryMarkerHint)
 	}
 	if heading == headingQuery {
+		// True on both branches and for the same reason: a body fault is refused
+		// before Выполнить is reached, and a query rejection is refused by it.
 		p.add(queryReadOnlyReassurance)
-		p.add(remedyQueryRejected)
+		if isQueryBodyFault(se.Detail) {
+			p.add(remedyQueryBodyRejected)
+		} else {
+			p.add(remedyQueryRejected)
+		}
 	}
 }
 
