@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -115,7 +117,8 @@ func NewClient(baseURL, user, password string, opts ...Option) *Client {
 		displayBase: res.Display,
 		baseErr:     err,
 		HTTPClient: &http.Client{
-			Timeout: DefaultRequestTimeout,
+			Timeout:       DefaultRequestTimeout,
+			CheckRedirect: checkRedirectSameOrigin,
 		},
 		maxResponseSize: int64(DefaultMaxResponseSizeMiB) * mib,
 	}
@@ -129,6 +132,94 @@ func NewClient(baseURL, user, password string, opts ...Option) *Client {
 		opt(c)
 	}
 	return c
+}
+
+// maxRedirects — сколько переходов внутри настроенного адреса клиент проходит,
+// прежде чем остановиться.
+//
+// Число взято не с потолка: столько же разрешает собственный
+// defaultCheckRedirect в net/http (/usr/local/go/src/net/http/client.go:503-508).
+// Свой потолок нужен именно потому, что CheckRedirect его ЗАМЕНЯЕТ: без этой
+// строки публикация, которая перенаправляет сама на себя, крутилась бы до
+// таймаута запроса.
+const maxRedirects = 10
+
+// checkRedirectSameOrigin — политика перехода по 30x для запросов к 1С.
+//
+// ПРАВИЛО: переход выполняется ТОЛЬКО в пределах того же источника (та же
+// схема, тот же хост, тот же порт), что и адрес из --base. Всё остальное не
+// выполняется, и наружу отдаётся сам ответ 30x, пришедший с настроенного
+// адреса.
+//
+// ПОЧЕМУ НЕ ПОЛИТИКА ПО УМОЛЧАНИЮ. net/http снимает заголовок Authorization
+// только при смене ИМЕНИ ХОСТА: shouldCopyHeaderOnRedirect
+// (/usr/local/go/src/net/http/client.go:1005-1022) сравнивает
+// idnaASCIIFromURL(initial) с idnaASCIIFromURL(dest) через isDomainOrSubdomain,
+// и ни схема, ни порт в это сравнение не входят. Измерено на двух слушателях
+// 127.0.0.1: пароль доезжал и до другого порта того же хоста, и до http после
+// https. Значит по умолчанию учётные данные уходят на адрес, которого
+// администратор не задавал.
+//
+// ПОЧЕМУ НЕ ПРОСТО СНЯТЬ ЗАГОЛОВОК. Тело ответа с чужого адреса вернулось бы
+// как ответ 1С и было бы показано модели с формулировкой «Текст ниже пришёл от
+// 1С». Отказ от перехода закрывает и утечку, и подлог источника.
+//
+// ПОЧЕМУ ПЕРЕХОД ВНУТРИ ИСТОЧНИКА ОСТАЁТСЯ. Это адрес, который администратор
+// задал сам, и туда учётные данные и так уходят первым же запросом. Так
+// продолжает работать нормализация пути на стороне веб-сервера. Ни один
+// перехода 30x код этого репозитория не ждёт: в исходниках, в документации и в
+// расширении нет ни одной ветки, которая читала бы Location.
+//
+// ПОЧЕМУ ErrUseLastResponse, А НЕ СВОЯ ОШИБКА. Любая другая ошибка из
+// CheckRedirect подставляется в *url.Error, и net/http кладёт в его поле URL
+// СЫРОЕ значение заголовка Location (/usr/local/go/src/net/http/client.go:725,
+// `ue.(*url.Error).URL = loc`), минуя stripPassword. То есть строка, которую
+// выбрала та сторона, попала бы в текст ошибки, который читает модель.
+// ErrUseLastResponse (там же, :704) возвращает последний ответ и nil, и ни
+// одного байта чужого адреса наружу не выносит.
+func checkRedirectSameOrigin(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 || len(via) >= maxRedirects {
+		return http.ErrUseLastResponse
+	}
+	if !sameOrigin(via[0].URL, req.URL) {
+		return http.ErrUseLastResponse
+	}
+	return nil
+}
+
+// sameOrigin сравнивает схему, хост и порт двух адресов.
+//
+// Порт сравнивается ПОСЛЕ подстановки значения по умолчанию, иначе
+// http://host и http://host:80 считались бы разными источниками. Хост
+// сравнивается без учёта регистра, потому что имена хостов регистронезависимы;
+// Hostname() снимает скобки у IPv6 одинаково с обеих сторон.
+func sameOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	as, bs := strings.ToLower(a.Scheme), strings.ToLower(b.Scheme)
+	if as != bs {
+		return false
+	}
+	if !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	return portOrDefault(as, a.Port()) == portOrDefault(bs, b.Port())
+}
+
+// portOrDefault возвращает порт адреса, подставляя значение по умолчанию для
+// схем, у которых оно есть.
+func portOrDefault(scheme, port string) string {
+	if port != "" {
+		return port
+	}
+	switch scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	}
+	return ""
 }
 
 // Get performs a GET request to a 1C endpoint and decodes the JSON response.

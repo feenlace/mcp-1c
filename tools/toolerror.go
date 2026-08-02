@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"unicode/utf8"
 
@@ -141,7 +142,11 @@ const (
 	lineStatusExtension = "❌ 1С ответила кодом HTTP %d и вернула текст ошибки."
 	lineStatusForeign   = "❌ Ответ пришёл с кодом HTTP %d, но его тело не похоже на ответ расширения MCP " +
 		"(длина тела в байтах: %d)."
-	lineTransport = "❌ Ответ от 1С не получен: обращение к %s не состоялось."
+	// lineStatusRedirect отвечает за коды, по которым onec.Client намеренно не
+	// пошёл. Он не показывает адрес назначения: его выбрала та сторона, а
+	// заголовок Location в этой ветке ничем не ограничен и не проверен.
+	lineStatusRedirect = "❌ Ответ пришёл с кодом HTTP %d: это перенаправление на другой адрес."
+	lineTransport      = "❌ Ответ от 1С не получен: обращение к %s не состоялось."
 	// lineTransportNoBase is the same statement for an address that has no host
 	// to name: displayBase is built from Scheme and Host only, so a value net/url
 	// parses without a host leaves it empty, and printing an empty slot would
@@ -229,6 +234,20 @@ const remedyForeignBody = "Так отвечает промежуточное з
 	"либо явный `<service name=\"MCPService\" rootUrl=\"mcp-1c\"/>`.\n" +
 	"2. Учётные данные: коды 401 и 403 означают, что до обработчика расширения запрос не дошёл.\n" +
 	"3. Адрес в `--base`: он должен указывать на публикацию базы, а не на корень веб-сервера.\n"
+
+// remedyRedirect объясняет ровно то, что произошло: onec.Client переходит по
+// перенаправлению только в пределах адреса из `--base` (см. onec/client.go,
+// checkRedirectSameOrigin), поэтому ответ 30x доехал сюда как ответ, а не как
+// начало второго запроса. Адрес назначения не назван намеренно, по той же
+// причине, по которой не показывается тело: его выбрала та сторона.
+//
+// Customer-facing RU: no тире.
+const remedyRedirect = "Клиент по перенаправлению не пошёл. Переход выполняется только в пределах адреса " +
+	"из `--base`, иначе логин и пароль ушли бы на хост или порт, которого никто не задавал. " +
+	"Адрес назначения не показан: его выбрала та сторона.\n\n" +
+	"Проверьте:\n" +
+	"1. Значение `--base`: запишите в него конечный адрес публикации, а не тот, с которого веб-сервер уводит.\n" +
+	"2. Схему адреса: если веб-сервер переводит http в https, укажите в `--base` сразу https.\n"
 
 // Customer-facing RU: no тире.
 const remedyUnreachable = "Проверьте:\n" +
@@ -325,6 +344,16 @@ func renderFailure(heading string, err error) string {
 
 // renderStatusError handles the one class that can carry text from the far side.
 func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
+	// A redirect status is the one non-200 that means "the client refused to go
+	// on", not "the publication answered badly", so the publication remedy would
+	// send the operator looking in the wrong place. Nothing from the far side is
+	// shown here at all: neither the body nor the Location header.
+	if isRedirectStatus(se.StatusCode) {
+		p.add(fmt.Sprintf(lineStatusRedirect, se.StatusCode))
+		p.add(remedyRedirect)
+		return
+	}
+
 	if se.BodyKind != onec.BodyKindExtension {
 		// The body is not attributable, so it is described and not shown. The
 		// header is not attributable either, and until this commit it was shown
@@ -361,6 +390,19 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 		p.add(queryReadOnlyReassurance)
 		p.add(remedyQueryRejected)
 	}
+}
+
+// isRedirectStatus reports whether the status is one net/http would have
+// followed. The set is taken from redirectBehavior
+// (/usr/local/go/src/net/http/client.go:512-538) rather than from the 3xx range,
+// so 304 and 300, which net/http does not follow, keep the ordinary rendering.
+func isRedirectStatus(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
 }
 
 // contentTypeForDisplay reduces the far side's Content-Type to the one fact this
