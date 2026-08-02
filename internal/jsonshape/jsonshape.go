@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 )
 
 // Kind names a JSON type in the words JSON uses for it. The set is exactly the
@@ -64,7 +65,34 @@ func TypeMismatch(err error) (field, wantJSONType, gotJSONType string, ok bool) 
 	if !errors.As(err, &ute) {
 		return "", "", "", false
 	}
-	return ute.Field, jsonKindOf(ute.Type), gotKind(ute.Value), true
+	return callerFieldName(ute.Field), jsonKindOf(ute.Type), gotKind(ute.Value), true
+}
+
+// callerFieldName reduces the decoder's field path to the key the CALLER wrote.
+//
+// json.UnmarshalTypeError.Field is documented as «the full path from root node
+// to the field, include embedded struct», and the emphasis is the trap: for a
+// promoted field the path carries the name of the EMBEDDED GO TYPE, which no
+// caller has ever seen. Measured on the built binary, not read off the doc:
+// execute_query given {"query":[1,2]} produced the field path
+// "queryLimitInput.query", because tools.queryInput embeds tools.queryLimitInput
+// and encoding/json promotes its fields. The first repair of this defect class
+// missed it, and a regexp guard over frames missed it too, because
+// "queryLimitInput" looks like nothing in particular; the real binary is what
+// found it.
+//
+// Taking the last segment is correct rather than merely convenient HERE, and the
+// condition is checkable: a dot appears in this path only for an embedded
+// struct, since a genuinely nested JSON object would have to be a named struct
+// field, and no tool input type in this module has one (the only composite is a
+// map, and a map's values contribute no path at all, which is measured in
+// TestTypeMismatch). TestEveryDotComesFromEmbedding pins that condition, so if
+// somebody adds a nested input this stops being silently wrong.
+func callerFieldName(path string) string {
+	if i := strings.LastIndexByte(path, '.'); i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
 
 // gotKind normalises the decoder's description of what actually arrived.

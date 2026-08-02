@@ -137,3 +137,43 @@ func TestUnwrappedMismatchIsFound(t *testing.T) {
 		t.Error("a plain error was reported as a type mismatch")
 	}
 }
+
+// TestCallerFieldNameStripsTheEmbeddedGoType is the case the built binary found
+// and the in-package guard did not.
+func TestCallerFieldNameStripsTheEmbeddedGoType(t *testing.T) {
+	type embedded struct {
+		Query string `json:"query"`
+	}
+	type outer struct {
+		embedded
+		Extra string `json:"extra"`
+	}
+	var o outer
+	err := json.Unmarshal([]byte(`{"query":[1,2]}`), &o)
+	if err == nil {
+		t.Fatal("the fixture decoded cleanly")
+	}
+
+	// The control: the decoder really does put the Go type name in the path, or
+	// the strip below is removing something that was never there.
+	var ute *json.UnmarshalTypeError
+	if !errors.As(err, &ute) {
+		t.Fatalf("not a type mismatch: %v", err)
+	}
+	if !strings.Contains(ute.Field, ".") {
+		t.Fatalf("the decoder produced no dotted path (%q), so this test measures nothing "+
+			"about stripping one", ute.Field)
+	}
+	if !strings.Contains(ute.Field, "embedded") {
+		t.Fatalf("the decoder's path %q does not carry the embedded Go type name, so the "+
+			"defect under repair is not reproduced here", ute.Field)
+	}
+
+	field, _, _, ok := TypeMismatch(err)
+	if !ok {
+		t.Fatal("a genuine type mismatch was not recognised")
+	}
+	if field != "query" {
+		t.Errorf("field = %q, want %q; the caller wrote \"query\" and never saw the Go type", field, "query")
+	}
+}

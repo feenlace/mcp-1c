@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -38,7 +39,15 @@ import (
 // errors. Each alternative is present because something in this tree produced
 // it, not because it seemed plausible.
 var goInternals = regexp.MustCompile(
-	`Go value of type|Go struct field|map\[[a-z]|\[\]string|\btools\.[A-Za-z]|\bonec\.[A-Za-z]|\bdump\.[A-Za-z]|\*json\.`)
+	`Go value of type|Go struct field|map\[[a-z]|\[\]string|\btools\.[A-Za-z]|\bonec\.[A-Za-z]|` +
+		`\bdump\.[A-Za-z]|\*json\.|[A-Za-z]+Input\b|[A-Za-z]+Request\b`)
+
+// The last two alternatives were added AFTER the first repair shipped, because
+// the built binary answered execute_query {"query":[1,2]} with the field path
+// "queryLimitInput.query": encoding/json puts the name of an EMBEDDED Go type
+// into json.UnmarshalTypeError.Field, and the guard as first written matched
+// nothing in it. A regexp guard sees only what somebody thought to name, which
+// is why the real-binary drive is not optional.
 
 func TestNoGoInternalsReachTheModel(t *testing.T) {
 	// A body that decodes into something other than the tool's target shape, for
@@ -98,6 +107,7 @@ func TestNoGoInternalsReachTheModel(t *testing.T) {
 		"parsing input: json: cannot unmarshal number into Go struct field searchCodeInput.query of type string",
 		"decoding 1C response: json: cannot unmarshal array into Go value of type map[string][]string",
 		"decoding 1C response: json: cannot unmarshal object into Go value of type []string",
+		`аргумент "queryLimitInput.query" должен быть: строка, а получено: массив`,
 	} {
 		if !goInternals.MatchString(was) {
 			t.Errorf("the matcher does not fire on a string this repo actually shipped, "+
@@ -199,4 +209,51 @@ func handlerByName(t *testing.T, name string) mcp.ToolHandler {
 	}
 	t.Fatalf("no builder for %s", name)
 	return nil
+}
+
+// TestEveryDotComesFromEmbedding pins the condition jsonshape.callerFieldName
+// relies on: in this module a dot in a decoder field path can only be an
+// embedded Go type, never a nested JSON object, so taking the last segment
+// yields the key the caller wrote.
+//
+// If somebody gives a tool a genuinely nested input, the last segment stops
+// being the whole truth and this fails rather than quietly shortening a path the
+// caller does need.
+func TestEveryDotComesFromEmbedding(t *testing.T) {
+	types := []reflect.Type{
+		reflect.TypeOf(metadataInput{}),
+		reflect.TypeOf(searchCodeInput{}),
+		reflect.TypeOf(objectInput{}),
+		reflect.TypeOf(queryLimitInput{}),
+		reflect.TypeOf(queryInput{}),
+		reflect.TypeOf(formInput{}),
+		reflect.TypeOf(analyzeSubsystemsInput{}),
+		reflect.TypeOf(onec.EventLogRequest{}),
+	}
+	if len(types) == 0 {
+		t.Fatal("no input types listed, so the walk proves nothing")
+	}
+	checked := 0
+	for _, tp := range types {
+		for i := 0; i < tp.NumField(); i++ {
+			f := tp.Field(i)
+			checked++
+			if f.Anonymous {
+				continue // embedded: the case the strip handles
+			}
+			ft := f.Type
+			for ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct {
+				t.Errorf("%s.%s is a NAMED struct field, so a decode failure inside it would "+
+					"produce a dotted path whose first segment the caller did write; "+
+					"jsonshape.callerFieldName would shorten it wrongly", tp.Name(), f.Name)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("the walk inspected no fields at all")
+	}
+	t.Logf("input types: %d, fields inspected: %d", len(types), checked)
 }
