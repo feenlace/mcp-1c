@@ -139,7 +139,7 @@ URL в этом случае: `http://localhost/base/hs/mcp-1c`
 curl http://localhost/base/hs/mcp-1c/version
 ```
 
-Ожидаемый ответ: `{"version":"0.4.6"}`
+Ожидаемый ответ: `{"version":"0.4.7"}`
 
 ## Шаг 5. Настроить AI-клиент
 

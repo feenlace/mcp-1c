@@ -254,14 +254,20 @@ func TestIndexNotice_ReloadDumpCarriesItToo(t *testing.T) {
 }
 
 // TestIndexNotice_AFailingCallIsDecoratedToo pins the error path of the wrapper.
-// The SDK turns a handler error into a result with IsError and the error text as
-// its content, so it is user-visible output like any other, and a failing call on a
-// frozen cache is exactly when the reason matters.
 //
-// The handler is a stub rather than a real failing tool: the real failures that
-// coincide with an unprotected index are the ones where nothing opened at all, and
-// there is then no handler call left to decorate. The wrapper is what is under
-// test, so the wrapper is what is called.
+// The stub returns an error, which is what a handler NOT wrapped in WithToolErrors
+// does, so this exercises the wrapper's own error branch and nothing else. That is
+// also its limit, and the limit is why it does not guard the wiring: MEASURED by
+// removing WithToolErrors from NewSearchCodeHandler, this test stayed green while
+// five failures appeared elsewhere. Three are the search rows of
+// TestToolWiring_OperationalSitesAreToolResults, one is the search row of
+// TestToolWiring_ProtocolSitesStayProtocolErrors (an unwrapped *ProtocolError
+// carries no JSON-RPC code), and one is server's
+// TestSearchCodeFailureIsAToolResultNotAProtocolError over a real session.
+//
+// A failing call on a frozen cache is exactly when the reason matters, and it is
+// user-visible output only because WithToolErrors makes it so: the SDK treats a
+// raw handler's error as a protocol error the model never reads.
 func TestIndexNotice_AFailingCallIsDecoratedToo(t *testing.T) {
 	idx := noticeIndex(t, true)
 	sentinel := errors.New("поиск не выполнен")

@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -58,10 +59,10 @@ func NewObjectStructureHandler(client *onec.Client) mcp.ToolHandler {
 // fetched over HTTP with client.Get(ctx, "/object/<type>/<name>", ...),
 // byte-for-byte identical to the legacy live path.
 func NewObjectStructureHandlerWithSource(client *onec.Client, sub onec.SubsystemStructFunc) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return WithToolErrors(headingObject, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input objectInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, fmt.Errorf("parsing input: %w", err)
+			return nil, InvalidParams(argumentDecodeError(err))
 		}
 		if input.ObjectType == "" || input.ObjectName == "" {
 			return nil, fmt.Errorf("object_type and object_name are required")
@@ -70,6 +71,14 @@ func NewObjectStructureHandlerWithSource(client *onec.Client, sub onec.Subsystem
 		if sub != nil {
 			obj, handled, err := sub(ctx, input.ObjectType, input.ObjectName)
 			if handled {
+				// A RECOVERED PANIC IS A FAULT INSIDE THIS SERVER, not something
+				// the caller can act on, and it leaves by the same return as an
+				// ordinary source failure. Marking the whole branch would ship a
+				// readable dump error as an unreadable internal one; marking
+				// neither would invite the caller to retry the crash.
+				if errors.Is(err, errDumpSubsystemPanic) {
+					return nil, InternalError(err)
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -84,7 +93,7 @@ func NewObjectStructureHandlerWithSource(client *onec.Client, sub onec.Subsystem
 		}
 
 		return textResult(formatObjectStructure(&obj)), nil
-	}
+	})
 }
 
 // formatObjectStructure formats the object structure as markdown text.

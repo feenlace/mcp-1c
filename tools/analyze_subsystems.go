@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -79,10 +80,10 @@ func NewAnalyzeSubsystemsHandler(client *onec.Client) mcp.ToolHandler {
 // analysis and formatting are shared, so a source and the live extension that
 // yield the same forest yield identical output.
 func NewAnalyzeSubsystemsHandlerWithSource(client *onec.Client, src onec.SubsystemForestFunc) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return WithToolErrors(headingSubsystems, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input analyzeSubsystemsInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, fmt.Errorf("parsing input: %w", err)
+			return nil, InvalidParams(argumentDecodeError(err))
 		}
 
 		action := strings.TrimSpace(input.Action)
@@ -103,6 +104,14 @@ func NewAnalyzeSubsystemsHandlerWithSource(client *onec.Client, src onec.Subsyst
 		var forest onec.SubsystemForest
 		if src != nil {
 			f, err := src(ctx)
+			// A RECOVERED PANIC IS A FAULT INSIDE THIS SERVER, not something the
+			// caller can act on, and it leaves by the same return as an ordinary
+			// source failure. Marking the whole branch would ship a readable dump
+			// error as an unreadable internal one; marking neither would invite
+			// the caller to retry the crash.
+			if errors.Is(err, errDumpSubsystemPanic) {
+				return nil, InternalError(err)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -121,7 +130,7 @@ func NewAnalyzeSubsystemsHandlerWithSource(client *onec.Client, src onec.Subsyst
 		default: // intersections
 			return textResult(computeIntersections(forest, input.CrossBranchOnly)), nil
 		}
-	}
+	})
 }
 
 // subsystemRef identifies one subsystem that directly contains an object, along

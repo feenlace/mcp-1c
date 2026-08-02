@@ -126,7 +126,7 @@ curl http://localhost/base/hs/mcp-1c/version
 
 Ожидаемый ответ:
 ```json
-{"version":"0.4.6"}
+{"version":"0.4.7"}
 ```
 
 Если видите ответ — HTTP-сервис 1С работает, переходите к шагу 4.

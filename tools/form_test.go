@@ -619,14 +619,15 @@ func TestNewFormStructureHandler_UnknownFormNameIsHardError(t *testing.T) {
 		formXMLWithTitle("Реализация", "ПолеЭлемента"))
 
 	result, err := callFormHandler(t, srv.URL, dumpDir, "Document", "РеализацияТоваровУслуг", "ФормаСписка")
-	if err == nil {
-		t.Fatalf("expected an error for a form that is not in the dump, got result:\n%s",
-			resultText(t, result))
-	}
+	// It is still FATAL, and it is now fatal in the shape the caller can read:
+	// a result with IsError rather than a protocol error. What the message has to
+	// carry is unchanged, and it is the enumerated form names that make it
+	// actionable.
+	text := failureText(t, result, err)
 	for _, want := range []string{"ФормаСписка", "ФормаВыбора", "ФормаЭлемента"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error must name the requested form and list the available ones, missing %q: %v",
-				want, err)
+		if !strings.Contains(text, want) {
+			t.Errorf("the failure must name the requested form and list the available ones, missing %q:\n%s",
+				want, text)
 		}
 	}
 }

@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/feenlace/mcp-1c/dump"
 	"github.com/feenlace/mcp-1c/extension"
@@ -25,9 +28,24 @@ import (
 //	go build -ldflags "-X main.version=0.4.2-beta" ./cmd/mcp-1c
 var version = "dev"
 
-const expectedExtensionVersion = "0.4.6"
+const expectedExtensionVersion = "0.4.7"
 
 func main() {
+	// realStderr is fd 2 as the process was launched with, captured before any
+	// line below can reassign os.Stderr.
+	//
+	// The pipe-mode redirect further down replaces os.Stderr for the whole
+	// process, and every message written after it lands wherever the redirect
+	// points: the log file, or os.DevNull when no log file could be opened at
+	// all. That is correct for what the redirect exists to contain, which is
+	// third-party library noise arriving during a live session (Issue #14). It
+	// is wrong for a startup refusal, which is this process's last act before
+	// os.Exit: there is no session to protect, nothing can restart-loop on a
+	// message from a process that is refusing to start, and the person who typed
+	// the command is the only reader who can act on it. Keeping the original
+	// handle is what lets reportStartupFailure reach that reader.
+	realStderr := os.Stderr
+
 	log.SetOutput(os.Stderr)
 	// MCP clients treat every stderr line as [error], so suppress INFO/WARN.
 	// Only ERROR and above reach stderr, where [error] label is appropriate.
@@ -191,12 +209,33 @@ func main() {
 		cfg.RequestTimeout = time.Duration(*requestTimeout) * time.Second
 	}
 
+	// Отказ выносится ЗДЕСЬ, на границе флага, и только здесь.
+	//
+	// Проверяется cfg.BaseURL, а не *baseURL: адрес мог прийти из переменной
+	// окружения, и проверка сырого флага пропустила бы его.
+	//
+	// Почему не внутри onec.NewClient: тот же конструктор вызывают с
+	// внутренними схемами вида proxy://<база> и poll://local, которых никто не
+	// вводил руками и которые никакой разбор адреса подтвердить не может.
+	// Отказ там убрал бы эти вызовы. Здесь же значение пришло от человека, и
+	// человеку есть что с ним сделать.
+	//
+	// Сообщение не содержит ни одного байта значения: оно уходит и в настоящий
+	// stderr, и в файл журнала, а шаблон отчёта об ошибке просит приложить
+	// именно этот вывод.
+	//
+	// Доставку выполняет reportStartupFailure, а не Fprintln по os.Stderr:
+	// к этому месту os.Stderr в режиме канала уже не файловый дескриптор 2, и
+	// написанное туда сообщение пользователь не увидит вовсе.
+	if err := onec.CheckURLCredentialResidue(cfg.BaseURL); err != nil {
+		reportStartupFailure(realStderr, err)
+		os.Exit(1)
+	}
+
 	client := onec.NewClient(cfg.BaseURL, cfg.User, cfg.Password,
 		onec.WithMaxResponseSize(cfg.MaxResponseSizeMiB),
 		onec.WithRequestTimeout(cfg.RequestTimeout),
 	)
-
-	go checkExtensionVersion(client)
 
 	// serveBuildCtx bounds any background generation build kicked off by
 	// openServeIndexLocal so a build still in flight when serving ends cannot wedge
@@ -207,15 +246,81 @@ func main() {
 
 	var dumpIndex *dump.Index
 	if *dumpDir != "" {
+		// Say it HERE, synchronously, before serving starts.
+		//
+		// The build that discovers the same fault runs in a background goroutine
+		// and nothing sequences it against the end of the process, so its report is
+		// not guaranteed to be written at all: measured over repeated starts it goes
+		// missing outright, and on the serve-failure exit os.Exit skips the deferred
+		// dumpIndex.Close that would otherwise wait for it. A diagnosis an operator
+		// receives only most of the time is not a diagnosis.
+		//
+		// NOT fatal, deliberately. The tools that need the dump already answer with
+		// an error naming this path, nothing else depends on it, and an unreadable
+		// path is also what a not-yet-mounted share looks like, so refusing to start
+		// would turn a degraded server into a restart loop. Exit stays 0.
+		//
+		// slog rather than a write to a descriptor: it is already pointed at the
+		// right place for the launch mode, which is fd 2 on a terminal where the
+		// person who typed the flag is watching, and the log file under a pipe,
+		// where writing to fd 2 mid-session is the very thing the redirect exists
+		// to prevent. ERROR because the pipe-mode handler keeps nothing below it.
+		if err := dumpPathFault(*dumpDir); err != nil {
+			slog.Error("--dump does not point at a usable directory, so search_code and "+
+				"code_read will report a build error for the whole run. Every other tool is "+
+				"unaffected and the server is starting normally. Correct the path and restart.",
+				"dump", *dumpDir, "error", err)
+		}
+
 		var err error
 		dumpIndex, err = openServeIndexLocal(serveBuildCtx, *dumpDir, *cacheDir, *reindex)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "loading dump from %s: %v\n", *dumpDir, err)
+			// UNREACHABLE TODAY, and kept anyway. openServeIndexLocal returns an
+			// error only by handing back dump.NewIndex's, and NewIndex has exactly
+			// three return statements, every one of them "return idx, nil". So no
+			// input reaches this branch, which is why there is no runtime test for
+			// it: such a test could not fail, and a test that cannot fail reads as
+			// evidence while proving nothing.
+			//
+			// Discarding the error instead would be worse. The signature returns
+			// one, the day NewIndex grows a failing path this branch starts firing,
+			// and a raw Fprintf here would write to a descriptor that is no longer
+			// fd 2 and lose the message exactly when it finally matters. Delivery
+			// is correct now, so the trap is disarmed before it is armed.
+			reportStartupFailure(realStderr, fmt.Errorf("loading dump from %s: %w", *dumpDir, err))
 			os.Exit(1)
 		}
 		defer dumpIndex.Close()
 		// Index prepares in the background. ModuleCount is available after Ready().
 	}
+
+	// The extension version probe runs CONCURRENTLY with serving and is SEQUENCED
+	// against the end of it. Both halves are the point.
+	//
+	// Concurrent, because synchronous would put a network round trip, up to the
+	// probe's own three second deadline, in front of the MCP initialize handshake.
+	// Keeping that handshake immediate is why the dump index builds in the
+	// background at all (issue #30), and an unreachable 1C must not be able to
+	// stall a client's first call.
+	//
+	// Sequenced, because a bare `go checkExtensionVersion(client)` is what made
+	// the probe's silence meaningless. Nothing ordered that goroutine against the
+	// end of the process, so a session that ended before the round trip finished
+	// left a log byte for byte identical to a healthy run: measured on the real
+	// binary against a loopback responder, stdin at EOF gave a 12 ms lifetime, an
+	// empty log and ZERO requests on the wire. "No fault was reported" then meant
+	// either "checked and fine" or "never checked", which is the exact defect the
+	// probe was rewritten to remove one level up.
+	//
+	// It is started HERE rather than beside the client so that no exit between the
+	// two can skip the wait below.
+	versionCtx, versionCancel := context.WithCancel(context.Background())
+	defer versionCancel()
+	versionDone := make(chan struct{})
+	go func() {
+		defer close(versionDone)
+		checkExtensionVersion(versionCtx, client)
+	}()
 
 	s := server.New(version, client, dumpIndex)
 
@@ -223,9 +328,64 @@ func main() {
 	// Serving has ended: stop any background build now so it cannot wedge shutdown
 	// (the deferred dumpIndex.Close() waits on the index's Done()).
 	serveBuildCancel()
+
+	// Collect the probe's verdict before this process can end.
+	//
+	// A GRACE, not an immediate cancellation and not an unbounded wait. Cancelling
+	// the moment serving stops is enough to make the log honest, but it also
+	// throws away the answer: measured, the goroutine had not even reached the
+	// wire on a short session, so every such run reported "did not finish" for a
+	// 1C that was about to answer, and an ERROR line nobody can act on is how a
+	// log stops being read. Waiting for the probe's own three second deadline
+	// instead would put that on shutdown, where a supervisor may be waiting to
+	// restart. So: wait a little, then cut it short and say so.
+	//
+	// The window is not a guess. Against a loopback responder the whole /version
+	// round trip is 1.19 ms at worst over 40 runs and a refused connection turns
+	// around in 0.27 ms, so versionProbeGrace is some eight hundred times the work
+	// it waits on, and it elapses only when 1C accepted the connection and then
+	// went quiet.
+	select {
+	case <-versionDone:
+	case <-time.After(versionProbeGrace):
+		versionCancel()
+		<-versionDone
+	}
+	versionCancel()
+
 	if runErr != nil {
-		fmt.Fprintf(os.Stderr, "mcp-1c error: %v\n", runErr)
+		// Reached by any byte on stdin the JSON-RPC transport cannot decode, so
+		// this is an everyday exit, not an exotic one. Same delivery as the startup
+		// refusal and for the same reason: os.Stderr has been the log file since the
+		// redirect, and a process that is exiting has no session left to protect, so
+		// the one reader who can act on this must get it on the descriptor they are
+		// actually watching.
+		reportStartupFailure(realStderr, fmt.Errorf("mcp-1c error: %w", runErr))
 		os.Exit(1)
+	}
+}
+
+// reportStartupFailure delivers a message that must reach a human, on a path
+// where os.Stderr may no longer be file descriptor 2.
+//
+// BOTH channels, deliberately, and the two readers are different people. fd 2 is
+// what an MCP client surfaces to the user who launched the server, and it is the
+// ONLY channel that still exists when no log file could be opened: in that
+// configuration os.Stderr is os.DevNull, so a message written there is not
+// misfiled, it is destroyed, and exit 1 becomes recoverable from nothing at all.
+// The log is where the bug report template tells the user to look, it survives a
+// client that swallows stderr, and it is what a later reader has. Dropping
+// either one loses a real reader.
+//
+// The duplicate is suppressed when the two are the same handle, which is the
+// terminal and --debug case, so nobody reads the refusal twice.
+//
+// NEVER fd 1. Stdout carries the JSON-RPC stream, and a byte of prose in front
+// of the first frame breaks the transport for every client that reads it.
+func reportStartupFailure(realStderr *os.File, err error) {
+	fmt.Fprintln(realStderr, err)
+	if os.Stderr != realStderr {
+		fmt.Fprintln(os.Stderr, err)
 	}
 }
 
@@ -237,8 +397,16 @@ const logRollAtBytes = 8 << 20 // 8 MiB
 
 // logTarget is the log file a run actually got, plus what it asked for. requested
 // and cause are set ONLY when the requested directory could not be used, so a
-// non-nil cause is the signal to report the substitution — into the file itself,
-// which is the only place a stdio-mode process can report anything.
+// non-nil cause is the signal to report the substitution, into the file itself.
+//
+// The file is where the substitution is reported because a substitution is a
+// detail of a run that is otherwise proceeding normally, and a live stdio session
+// is exactly what the redirect exists to keep quiet. It is NOT, as this comment
+// used to claim, "the only place a stdio-mode process can report anything": the
+// process still holds file descriptor 2, and main keeps it in realStderr for the
+// case where a message has to reach a person rather than a log. Believing the
+// stronger claim is what let a startup refusal ship as exit 1 with zero bytes on
+// both descriptors.
 type logTarget struct {
 	file      *os.File
 	path      string
@@ -367,18 +535,272 @@ func reportLogFallback(t *logTarget) {
 		"requested", t.requested, "using", t.path, "error", t.cause)
 }
 
-func checkExtensionVersion(client *onec.Client) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+// dumpPathFault reports why dumpDir cannot be a DumpConfigToFiles directory, or
+// nil when it can be one.
+//
+// It answers the cheap question only: does the path exist and is it a directory.
+// Whether the contents are a valid dump is settled by the index build, which is
+// asynchronous for a reason (a large dump must not delay the MCP initialize
+// handshake). A stat costs microseconds and cannot delay anything, which is what
+// makes it safe to do before serving starts.
+func dumpPathFault(dumpDir string) error {
+	st, err := os.Stat(dumpDir)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("%s is not a directory", dumpDir)
+	}
+	return nil
+}
+
+// compareExtensionVersions orders two dotted numeric extension versions,
+// returning -1, 0 or 1, and ok=false when either side is not a version at all.
+//
+// Components are compared as NUMBERS. Lexicographic order gets 0.4.10 < 0.4.9
+// and 0.10.0 < 0.9.9 wrong, and those are ordinary version numbers, not corner
+// cases. A missing trailing component counts as zero, so 1.2.3 and 1.2.3.0 are
+// the same version.
+//
+// A suffix that is not part of the dotted number (a pre-release marker such as
+// the "-beta" in 0.5.0-beta) is trimmed rather than rejected: refusing to parse
+// it would turn a perfectly readable version into the "cannot tell" branch and
+// produce an alarm about a healthy extension. Ordering ignores the suffix, which
+// is imprecise between two pre-releases of one version and irrelevant here,
+// where the question is only whether the installed extension reaches a floor.
+func compareExtensionVersions(a, b string) (int, bool) {
+	an, aok := versionComponents(a)
+	bn, bok := versionComponents(b)
+	if !aok || !bok {
+		return 0, false
+	}
+	for i := 0; i < len(an) || i < len(bn); i++ {
+		var av, bv int
+		if i < len(an) {
+			av = an[i]
+		}
+		if i < len(bn) {
+			bv = bn[i]
+		}
+		if av != bv {
+			if av < bv {
+				return -1, true
+			}
+			return 1, true
+		}
+	}
+	return 0, true
+}
+
+// maxVersionTextBytes bounds the ONE value the /version probe takes from the far
+// side, both for parsing and for the log.
+//
+// It is not a style limit, it is a budget. The answer arrives under the client's
+// response cap, 128 MiB by default (config.DefaultMaxResponseSizeMiB), and both
+// things this code then does with the value scale with its length:
+//
+//   - versionComponents splits it into components and keeps an int per
+//     component. Measured on this repository before this bound: 1 MiB of "1."
+//     pairs allocated 28.1 MiB, 4 MiB allocated 129.9 MiB, 16 MiB allocated
+//     503.2 MiB, i.e. 28x to 32x, which puts a body at the cap in the gigabytes.
+//     This runs on the probe goroutine, where running out of memory does not fail
+//     one call, it takes the process down.
+//   - the value is echoed into the log as "got", and openAppendLog restarts a log
+//     file that has reached logRollAtBytes (8 MiB). One oversized answer would
+//     therefore make the NEXT start discard the operator's whole history.
+//
+// The number is set against what a version actually is. The longest this
+// repository produces or names are the extension's own 0.4.7 and platform builds
+// like 8.3.27.2130, eleven bytes; a pre-release suffix such as 0.5.0-beta adds a
+// few more. 128 bytes is an order of magnitude above the longest of those and
+// still one line in a log. A value over it is not shortened into a version, it is
+// REFUSED, which routes it to the "cannot be ranked" outcome that already exists
+// and already says the answer is not a version number.
+const maxVersionTextBytes = 128
+
+// versionComponents splits a dotted numeric version into its components,
+// stopping at the first character that cannot belong to one. It reports false
+// when there is no leading number at all, which is what an empty string, an
+// HTML page or a foreign JSON body produces, and when the value is longer than
+// maxVersionTextBytes, which no version is.
+//
+// The length is checked FIRST, before any allocation. Checking it after the split
+// would be checking it after the cost.
+func versionComponents(v string) ([]int, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" || len(v) > maxVersionTextBytes {
+		return nil, false
+	}
+	// Cut any pre-release / build suffix: keep the leading run of digits and dots.
+	end := strings.IndexFunc(v, func(r rune) bool {
+		return r != '.' && (r < '0' || r > '9')
+	})
+	if end >= 0 {
+		v = v[:end]
+	}
+	v = strings.TrimRight(v, ".")
+	if v == "" {
+		return nil, false
+	}
+	var out []int
+	for _, part := range strings.Split(v, ".") {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
+// versionForLog bounds a far-side value on its way into the log, and says so
+// when it cuts.
+//
+// The cut is ANNOUNCED and carries the full length. A silent cut is read as the
+// whole value, and "the extension answered 999…9" is a different diagnosis from
+// "the extension answered two megabytes of nines"; the second one names the
+// fault. slog quotes the attribute, so the value cannot forge a line either way.
+//
+// The tail of a rune split by the byte cap is dropped rather than written: a
+// half-rune reaches the reader as U+FFFD and looks like something the far side
+// sent.
+func versionForLog(v string) string {
+	if len(v) <= maxVersionTextBytes {
+		return v
+	}
+	cut := v[:maxVersionTextBytes]
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
+		cut = cut[:len(cut)-1]
+	}
+	return fmt.Sprintf("%s… (truncated, %d bytes in the answer)", cut, len(v))
+}
+
+// versionProbeGrace is how long the end of a session waits for the extension
+// version probe before cutting it short. See the wait in main for what the
+// number rests on.
+const versionProbeGrace = time.Second
+
+// checkExtensionVersion reports EXACTLY ONE verdict per call, on every path, and
+// returns only after it has been logged. That is what lets main treat the return
+// as the end of the check.
+//
+// ctx belongs to the caller and is cancelled when serving ends; the three second
+// deadline is this function's own and bounds a 1C that accepts the connection and
+// then says nothing.
+func checkExtensionVersion(ctx context.Context, client *onec.Client) {
+	sessionEnded := ctx.Done()
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
 	var ver onec.VersionInfo
 	if err := client.Get(ctx, "/version", &ver); err != nil {
-		// Version endpoint may not exist in older extensions — skip silently.
+		// The session ending first is a DIFFERENT outcome and gets its own words.
+		// Reusing the line below would swap one false statement for another: it
+		// names a wrong publication path, refused credentials, a web server in
+		// the way or a stopped 1C, and none of those is what happened when the
+		// reader's own client disconnected before the round trip finished.
+		select {
+		case <-sessionEnded:
+			slog.Error("Extension version NOT verified: the session ended before /version "+
+				"answered, so the check did not finish. This says nothing about the installed "+
+				"extension either way. It is ordinary for a very short session; if it repeats "+
+				"on sessions that do real work, 1C is answering slowly.",
+				"required_at_least", expectedExtensionVersion, "deadline", 3*time.Second)
+			return
+		default:
+		}
+		// NOT a silent skip. Returning without a word here is what made a failed
+		// probe indistinguishable from a healthy one: both produced a completely
+		// empty log, so "no mismatch was reported" was not evidence of a match,
+		// it was evidence of nothing.
+		slog.Error("Extension version NOT verified: /version did not answer. This is not a "+
+			"confirmation that the installed extension is the right one; the check did not "+
+			"run at all. Usual causes: the publication path is wrong, the credentials were "+
+			"refused, a web server answered instead of 1C, or 1C is not running.",
+			"required_at_least", expectedExtensionVersion, "error", err)
 		return
 	}
-	if ver.Version != expectedExtensionVersion {
-		slog.Error("Extension version mismatch",
-			"got", ver.Version, "expected", expectedExtensionVersion,
-			"hint", `Update: mcp-1c --install "path\to\db"`)
+
+	got := strings.TrimSpace(ver.Version)
+	// shown is what any line below may put in front of a reader. got stays whole
+	// for the comparison, which bounds itself; the LOG does not, and it is a file
+	// openAppendLog restarts once it reaches logRollAtBytes.
+	shown := versionForLog(got)
+	if got == "" {
+		// An answer that carries no version is not a version mismatch. The old code
+		// let the zero value fall through to the comparison and reported got="",
+		// which reads as a measurement of the installed extension when in fact
+		// nothing was ever measured.
+		slog.Error("Extension version NOT verified: /version answered without a version. "+
+			"Something is listening at that address, but it is not the MCP extension this "+
+			"binary talks to.",
+			"required_at_least", expectedExtensionVersion)
+		return
 	}
+
+	order, ok := compareExtensionVersions(got, expectedExtensionVersion)
+	if !ok {
+		slog.Error("Extension version NOT verified: /version answered with something that is "+
+			"not a version number, so it cannot be ranked against what this binary requires.",
+			"got", shown, "required_at_least", expectedExtensionVersion)
+		return
+	}
+
+	if order < 0 {
+		// The one genuine fault. Extension releases ADD endpoints the Go side calls
+		// (/subsystems arrived in ext 0.4.3), so below the floor an endpoint this
+		// binary uses may simply not be there.
+		//
+		// This is also the only outcome where --install is the remedy, so it is the
+		// only one that mentions it, and it says which version it would install:
+		// the advice used to be given for every difference including a NEWER
+		// extension, where following it would overwrite a working install with an
+		// older one.
+		slog.Error("Extension is OLDER than this build requires, so endpoints it calls may be "+
+			"missing and some tools will fail.",
+			"got", shown, "required_at_least", expectedExtensionVersion,
+			"hint", `reinstall the bundled extension `+expectedExtensionVersion+
+				`: mcp-1c --install "path\to\db"`)
+		return
+	}
+
+	// order >= 0: every endpoint this binary calls exists in the installed
+	// extension, so there is no fault to report.
+	//
+	// A HIGHER number is a supported deployment, not a problem: the paid editions
+	// ship a further-along extension and pairing it with this binary is guaranteed
+	// to work. Comparing for EQUALITY is what turned that healthy configuration
+	// into an ERROR line on every start, which is the exact habit that teaches an
+	// operator to stop reading the log.
+	//
+	// Nothing here names an edition, and it must not: ВерсияGET returns one key
+	// holding a bare version string, and onec.VersionInfo has one field to receive
+	// it, so which product built the installed extension is not observable from
+	// this side. Ordering is the only thing the answer supports.
+	//
+	// INFO, not ERROR, and that is what makes silence meaningful. In pipe mode the
+	// handler sits at LevelError, so this line is filtered and a quiet log means
+	// exactly one thing: the probe ran and was satisfied. Every other outcome above
+	// is ERROR and survives the filter. On a terminal or under --debug the levels
+	// are not filtered and the confirmation is visible directly.
+	//
+	// THAT SENTENCE IS ONLY TRUE BECAUSE MAIN WAITS. It was written while the probe
+	// was launched with a bare `go`, and then a quiet log also meant "the process
+	// ended before the round trip", which on a short session is what it usually
+	// meant: measured on the real binary, stdin at EOF gave a 12 ms lifetime, an
+	// empty log and zero requests on the wire. Silence discriminates only while
+	// every path out of main collects this goroutine first, which is asserted by
+	// TestVersionProbe_VerdictSurvivesASessionThatEndsFirst against the request
+	// count, not against the log.
+	if order > 0 {
+		slog.Info("Extension version verified; it is newer than the one this build bundles, "+
+			"which is a supported combination.",
+			"got", shown, "bundled", expectedExtensionVersion)
+		return
+	}
+	slog.Info("Extension version verified.", "got", shown)
 }

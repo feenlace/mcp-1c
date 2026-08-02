@@ -14,6 +14,15 @@ import (
 )
 
 // runHandlerText drives one ToolHandler and returns its rendered text payload.
+//
+// A FAILURE COMES BACK AS AN ERROR HERE EVEN THOUGH THE HANDLER NO LONGER RETURNS
+// ONE. An operational failure is now a result with IsError, so a helper that only
+// looked at err would hand a rendered failure back to every caller below as if it
+// were a successful answer, and each of the parity comparisons in this file would
+// start comparing two failures and passing. Converting it back into an error at
+// the helper keeps the meaning every call site was written with; the error's text
+// is the rendered failure, which is why the two tests that used to compare it to a
+// sentinel now look for the sentinel inside it.
 func runHandlerText(t *testing.T, h mcp.ToolHandler, name string, args map[string]any) (string, error) {
 	t.Helper()
 	raw, _ := json.Marshal(args)
@@ -26,7 +35,11 @@ func runHandlerText(t *testing.T, h mcp.ToolHandler, name string, args map[strin
 	if len(res.Content) == 0 {
 		t.Fatalf("handler %s returned no content", name)
 	}
-	return res.Content[0].(*mcp.TextContent).Text, nil
+	text := res.Content[0].(*mcp.TextContent).Text
+	if res.IsError {
+		return "", errors.New(text)
+	}
+	return text, nil
 }
 
 // ---- analyze_subsystems: nil source is byte-identical to today's live path ----
@@ -112,10 +125,16 @@ func TestAnalyzeSubsystemsWithSource_SourceBypassesHTTP(t *testing.T) {
 	mustNotContain(t, out, "КонтрагентыПрисоединенныеФайлы", "Справочник.Валюты") // sampleForest-only (would appear only via HTTP)
 }
 
-// TestAnalyzeSubsystemsWithSource_SourceError proves a source error is surfaced
-// verbatim and there is NO silent HTTP fallback (the client points at an
-// unreachable address; if the handler fell back to HTTP it would fail with a
-// connection error instead of the sentinel).
+// TestAnalyzeSubsystemsWithSource_SourceError proves the source error's own text
+// is surfaced and that there is NO silent HTTP fallback (the client points at an
+// unreachable address; if the handler fell back to HTTP the text would name a
+// connection failure instead of the sentinel).
+//
+// It used to demand byte equality with the sentinel. That was equality with the
+// whole ERROR, and the whole error is now a rendered failure under a heading, so
+// the assertion moved from "equals" to "carries" and gained the check that the
+// heading is the one this tool owns. The property is the same: the reason the
+// source gave is what the caller reads, and it is not a connection failure.
 func TestAnalyzeSubsystemsWithSource_SourceError(t *testing.T) {
 	client := onec.NewClient("http://127.0.0.1:0", "", "")
 	sentinel := "дамп недоступен, требуется первичная синхронизация"
@@ -125,8 +144,14 @@ func TestAnalyzeSubsystemsWithSource_SourceError(t *testing.T) {
 	h := NewAnalyzeSubsystemsHandlerWithSource(client, src)
 
 	_, err := runHandlerText(t, h, "analyze_subsystems", map[string]any{"action": "orphans"})
-	if err == nil || err.Error() != sentinel {
-		t.Errorf("expected verbatim source error %q, got %v", sentinel, err)
+	if err == nil {
+		t.Fatalf("expected the source error %q to be surfaced", sentinel)
+	}
+	if !strings.Contains(err.Error(), sentinel) {
+		t.Errorf("expected the source error %q to be surfaced, got:\n%s", sentinel, err)
+	}
+	if !strings.Contains(err.Error(), "## "+headingSubsystems) {
+		t.Errorf("the source failure is not rendered under the analyze_subsystems heading:\n%s", err)
 	}
 }
 
@@ -245,8 +270,12 @@ func TestObjectStructureWithSource_UnhandledFallsThroughToHTTP(t *testing.T) {
 	}
 }
 
-// TestObjectStructureWithSource_HandledError proves a handled source error is
-// surfaced verbatim with no HTTP fallback (unreachable client).
+// TestObjectStructureWithSource_HandledError proves a handled source error's own
+// text is surfaced with no HTTP fallback (unreachable client).
+//
+// Byte equality with the sentinel became "carries the sentinel" for the same
+// reason as in the analyze_subsystems case above: the whole error is now a
+// rendered failure under a heading, and the heading is asserted too.
 func TestObjectStructureWithSource_HandledError(t *testing.T) {
 	client := onec.NewClient("http://127.0.0.1:0", "", "")
 	sentinel := "подсистема Тест не найдена в дампе"
@@ -256,7 +285,13 @@ func TestObjectStructureWithSource_HandledError(t *testing.T) {
 	h := NewObjectStructureHandlerWithSource(client, sub)
 
 	_, err := runHandlerText(t, h, "get_object_structure", map[string]any{"object_type": "Subsystem", "object_name": "Тест"})
-	if err == nil || err.Error() != sentinel {
-		t.Errorf("expected verbatim source error %q, got %v", sentinel, err)
+	if err == nil {
+		t.Fatalf("expected the source error %q to be surfaced", sentinel)
+	}
+	if !strings.Contains(err.Error(), sentinel) {
+		t.Errorf("expected the source error %q to be surfaced, got:\n%s", sentinel, err)
+	}
+	if !strings.Contains(err.Error(), "## "+headingObject) {
+		t.Errorf("the source failure is not rendered under the get_object_structure heading:\n%s", err)
 	}
 }
