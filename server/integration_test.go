@@ -724,19 +724,46 @@ func TestIntegration_ObjectStructure_NotFound(t *testing.T) {
 	session, cleanup := setupIntegration(t)
 	defer cleanup()
 
-	_, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "get_object_structure",
 		Arguments: map[string]any{
 			"object_type": "Document",
 			"object_name": "НесуществующийДокумент",
 		},
 	})
-	if err == nil {
-		t.Fatal("expected error for non-existent object")
+	// A 404 from 1C is something the caller can act on, so it arrives as a tool
+	// result with IsError rather than as a protocol error it never sees. The
+	// status still has to be in the text: without it the caller cannot tell a
+	// missing object from an unreachable server.
+	text := toolFailureText(t, res, err)
+	if !strings.Contains(text, "404") {
+		t.Errorf("expected 404 in the failure, got:\n%s", text)
 	}
-	if !strings.Contains(err.Error(), "404") {
-		t.Errorf("expected 404 in error, got: %v", err)
+}
+
+// toolFailureText asserts the operational contract over a real session and
+// returns the rendered text.
+func toolFailureText(t *testing.T, res *mcp.CallToolResult, err error) string {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("an operational failure came back as a protocol error: %v", err)
 	}
+	if res == nil {
+		t.Fatal("neither a result nor an error came back")
+	}
+	if !res.IsError {
+		t.Fatal("the result does not carry IsError, so this was not reported as a failure at all")
+	}
+	var b strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
+	}
+	if b.Len() == 0 {
+		t.Fatal("the failure carries no text content")
+	}
+	return b.String()
 }
 
 func TestIntegration_FormStructure(t *testing.T) {
@@ -1006,13 +1033,13 @@ func TestIntegration_AnalyzeSubsystems(t *testing.T) {
 		t.Errorf("intersections cross-branch must exclude same-root Контрагенты, got:\n%s", text)
 	}
 
-	// unknown action returns a clean error.
-	_, err = session.CallTool(ctx, &mcp.CallToolParams{
+	// An unknown action returns a clean failure the caller can read.
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "analyze_subsystems",
 		Arguments: map[string]any{"action": "nope"},
 	})
-	if err == nil {
-		t.Fatal("expected error for unknown action")
+	if failText := toolFailureText(t, res, err); !strings.Contains(failText, "unknown action") {
+		t.Errorf("the failure does not name the rejected action:\n%s", failText)
 	}
 }
 

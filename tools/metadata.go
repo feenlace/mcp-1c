@@ -113,7 +113,7 @@ func filterNoise(tree map[string][]string) {
 
 // NewMetadataHandler returns a ToolHandler that fetches the metadata tree from 1C.
 func NewMetadataHandler(client *onec.Client) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return WithToolErrors(headingMetadata, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input metadataInput
 		if req.Params.Arguments != nil {
 			json.Unmarshal(req.Params.Arguments, &input) //nolint:errcheck
@@ -143,7 +143,7 @@ func NewMetadataHandler(client *onec.Client) mcp.ToolHandler {
 
 		// Without filter — return only category names and counts.
 		return textResult(formatMetadataSummary(tree, warnings)), nil
-	}
+	})
 }
 
 // writeMetadataWarnings emits a short RU diagnostics line when the 1C extension

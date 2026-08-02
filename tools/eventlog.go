@@ -54,10 +54,10 @@ func EventLogTool() *mcp.Tool {
 
 // NewEventLogHandler returns a ToolHandler that reads the 1C event log.
 func NewEventLogHandler(client *onec.Client) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return WithToolErrors(headingEventLog, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var body onec.EventLogRequest
 		if err := json.Unmarshal(req.Params.Arguments, &body); err != nil {
-			return nil, fmt.Errorf("parsing input: %w", err)
+			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
 		}
 		body.Limit = clampLimit(body.Limit, defaultEventLogLimit, maxEventLogLimit)
 
@@ -67,7 +67,7 @@ func NewEventLogHandler(client *onec.Client) mcp.ToolHandler {
 		}
 
 		return textResult(formatEventLog(&result)), nil
-	}
+	})
 }
 
 func formatEventLog(r *onec.EventLogResult) string {

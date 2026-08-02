@@ -37,10 +37,10 @@ func ValidateQueryTool() *mcp.Tool {
 
 // NewValidateQueryHandler returns a ToolHandler that validates a 1C query syntax.
 func NewValidateQueryHandler(client *onec.Client) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return WithToolErrors(headingValidateQuery, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input validateQueryInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, fmt.Errorf("parsing input: %w", err)
+			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
 		}
 		if input.Query == "" {
 			return nil, fmt.Errorf("query is required")
@@ -53,7 +53,7 @@ func NewValidateQueryHandler(client *onec.Client) mcp.ToolHandler {
 		}
 
 		return textResult(formatValidateResult(&result)), nil
-	}
+	})
 }
 
 func formatValidateResult(r *onec.ValidateQueryResult) string {

@@ -268,9 +268,11 @@ func TestObjectStructureHandler_MissingArgs(t *testing.T) {
 		},
 	}
 
-	_, err := handler(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected error for missing arguments")
+	res, err := handler(context.Background(), req)
+	// Raw registration validates nothing, so this check is the whole gate, and
+	// its verdict now reaches the caller as readable content.
+	if text := failureText(t, res, err); !strings.Contains(text, "object_type and object_name are required") {
+		t.Errorf("the failure does not name the missing arguments:\n%s", text)
 	}
 }
 

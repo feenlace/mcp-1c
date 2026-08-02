@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -103,10 +102,10 @@ type formInput struct {
 //     the consequence for form_name) or stand alone when the form is simply
 //     empty in the dump.
 func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return WithToolErrors(headingForm, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input formInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, fmt.Errorf("parsing input: %w", err)
+			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
 		}
 		if input.ObjectType == "" || input.ObjectName == "" {
 			return nil, fmt.Errorf("object_type and object_name are required")
@@ -233,7 +232,7 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 			text += formNameNoStructureNote(serviceNamedForm)
 		}
 		return textResult(text), nil
-	}
+	})
 }
 
 // formNameNeedsDumpNote is appended to the response body when the caller asked
@@ -347,28 +346,26 @@ func formServiceCallFailedNote(err error) string {
 		"и учётные данные.\n"
 }
 
-// urlUserInfoRe matches the credentials part of any URL inside a message, so it
-// can be removed before the message is shown.
+// compactErrorText prepares an upstream error message for ONE blockquote line in
+// a response body: it folds the message to a single line and caps its length.
 //
-// net/http redacts a password when it builds a *url.Error for a request it sent
-// (stripPassword in net/http/client.go), but that is only one of the paths a
-// message can arrive on and it leaves the user name in place. The one that
-// matters here is EARLIER: url.Parse rejects a userinfo it cannot decode and
-// quotes the whole URL it was given, credentials included, before any request is
-// made. A base URL of the form http://user:pass@host therefore reaches this note
-// verbatim unless it is stripped here.
-var urlUserInfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s"@]*@`)
-
-// compactErrorText prepares an upstream error message for a response body: it
-// removes any URL credentials, folds the message to a single line and caps its
-// length, so a note stays one blockquote line and carries nothing secret
-// whatever the upstream returned.
+// IT NO LONGER STRIPS CREDENTIALS, AND THE REGEX THAT DID IS GONE. The credential
+// is now removed at the boundary, in onec.NewClient, which splits it off the
+// address at construction, so no error built below this point has one to strip.
+// The regex was also wrong for the only case it existed for: its negated class
+// excluded `/`, whitespace and `"`, which are exactly the characters that make
+// url.Parse fail and quote the whole address, and that address is now refused at
+// the flag boundary instead.
+//
+// ITS SCOPE IS formServiceCallFailedNote AND NOTHING ELSE. It collapses every
+// newline, which is right for a blockquote line and wrong for anything with
+// structure: the shared failure renderer keeps its <<?>> marker lines and its
+// fences, so it does its own capping and does not come through here.
 func compactErrorText(err error) string {
 	if err == nil {
 		return "неизвестна"
 	}
-	text := urlUserInfoRe.ReplaceAllString(err.Error(), "${1}***@")
-	text = strings.Join(strings.Fields(text), " ")
+	text := strings.Join(strings.Fields(err.Error()), " ")
 	const maxErrorRunes = 300
 	runes := []rune(text)
 	if len(runes) > maxErrorRunes {

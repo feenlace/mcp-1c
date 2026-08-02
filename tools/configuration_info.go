@@ -24,14 +24,14 @@ func ConfigurationInfoTool() *mcp.Tool {
 
 // NewConfigurationInfoHandler returns a ToolHandler that fetches configuration info from 1C.
 func NewConfigurationInfoHandler(client *onec.Client) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return WithToolErrors(headingConfigInfo, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var info onec.ConfigurationInfo
 		if err := client.Get(ctx, "/configuration", &info); err != nil {
 			return nil, fmt.Errorf("fetching configuration info from 1C: %w", err)
 		}
 
 		return textResult(formatConfigurationInfo(&info)), nil
-	}
+	})
 }
 
 func formatConfigurationInfo(info *onec.ConfigurationInfo) string {

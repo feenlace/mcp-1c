@@ -102,16 +102,21 @@ func indexProtectionNotice(st dump.UnprotectedState) string {
 // the page could not swallow it (writeObjectWarnings). A wrapper has no return path
 // to miss, including ones added later.
 //
-// ERRORS ARE DECORATED TOO, AND THE NOTICE GOES FIRST ON THEM AS WELL. The MCP SDK
-// turns a handler error into a CallToolResult with IsError and the error text as its
-// content, so it is user-visible output like any other, and a failing call on a
-// frozen cache is exactly when the reason matters most. The notice used to be
-// appended AFTER the error text, which put it at the end of a message a client is
-// free to truncate: the invisible-warning defect again, in the one place where the
-// warning is the answer. The success path has always put it first, and the two are
-// the same statement about the same answer, so they must not sit in different places
-// depending on how the call went. Wrapping keeps the original error in the chain, so
-// errors.Is and errors.As on it keep working; only the order of the two halves moved.
+// ERRORS ARE DECORATED TOO, AND THE NOTICE GOES FIRST ON THEM AS WELL. A handler
+// error is turned into user-visible content by WithToolErrors, which converts it into
+// a CallToolResult with IsError; the SDK does NOT do this for a raw ToolHandler
+// (mcp/tool.go treats a returned error as a protocol error, and Server.callTool in
+// mcp/server.go returns it untouched). Because WithToolErrors runs INSIDE this
+// wrapper, an operational failure reaches prependNotice as a result and the notice
+// lands first by the same path a success takes, so the two halves of one statement
+// about one answer cannot drift. A marked protocol error still arrives here as an
+// error and is wrapped below, which keeps its code: the wire encoder resolves the
+// code with errors.As, so a %w wrap does not lose it.
+//
+// Remove that wrapper and this notice goes back into a JSON-RPC error message the
+// model never reads, at the end of a message a client is free to truncate. A failing
+// call on a frozen cache is exactly when the reason matters most. Wrapping keeps the
+// original error in the chain, so errors.Is and errors.As on it keep working.
 //
 // The state is read AFTER the handler runs, so a reload_dump call that swaps the
 // generation is described by the state it left behind rather than the one it found.

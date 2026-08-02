@@ -140,12 +140,12 @@ func TestQueryHandler_NonSelectRejected(t *testing.T) {
 				},
 			}
 
-			_, err := handler(context.Background(), req)
-			if err == nil {
-				t.Fatal("expected error for non-SELECT query")
-			}
-			if !strings.Contains(err.Error(), "SELECT") && !strings.Contains(err.Error(), "ВЫБРАТЬ") {
-				t.Errorf("expected error to mention SELECT or ВЫБРАТЬ, got: %v", err)
+			res, err := handler(context.Background(), req)
+			// The refusal is now a tool result with IsError. It still refuses,
+			// and it still says which keywords are allowed.
+			text := failureText(t, res, err)
+			if !strings.Contains(text, "SELECT") && !strings.Contains(text, "ВЫБРАТЬ") {
+				t.Errorf("expected the failure to mention SELECT or ВЫБРАТЬ, got:\n%s", text)
 			}
 			if httpCalled {
 				t.Error("HTTP call should not have been made for non-SELECT query")

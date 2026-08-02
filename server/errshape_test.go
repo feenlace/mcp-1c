@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -163,18 +167,23 @@ func failingQueryServer(t *testing.T, status int, body string) *httptest.Server 
 	return httptest.NewServer(mux)
 }
 
-// TestWireShape_OperationalErrorIsAProtocolErrorToday records the defect this
-// build exists to fix: a 1C-side failure that the model could act on leaves the
-// server as a JSON-RPC ERROR frame, not as a tool result, so an MCP client has
-// nothing to render into the conversation as tool output.
+// TestWireShape_OperationalErrorIsAToolResult IS THE INVERSION, and it is the
+// same test as before with its verdict turned round.
 //
-// The code is 0 rather than one of the JSON-RPC codes because the handler returns
-// a plain error: internal/jsonrpc2/messages.go toWireError builds a WireError with
-// only a Message when errors.As finds no *WireError in the chain.
+// WHAT IT USED TO PIN, kept here rather than deleted with the assertions. Under
+// the name TestWireShape_OperationalErrorIsAProtocolErrorToday, and green on the
+// unmodified tree, it asserted the exact opposite of every line below: CallTool
+// returned err != nil and res == nil, the frame carried an "error" member and no
+// "result" member, and the code was 0, because a plain handler error reaches
+// internal/jsonrpc2 toWireError with no *WireError in its chain. The message was
+// the raw Go chain, "executing query in 1C: 1C returned status 400...".
 //
-// THIS TEST IS INVERTED IN PHASE 4B. Proving it green in this direction now is
-// what stops the inverted version from passing vacuously.
-func TestWireShape_OperationalErrorIsAProtocolErrorToday(t *testing.T) {
+// That is the defect: a client had nothing to render into the conversation as
+// tool output, so the model never saw 1C's diagnostic at all. Deleting the old
+// test would have left the new one unable to say what changed; inverting it keeps
+// the measurement and moves the verdict. The old direction was PROVEN green
+// first, which is what stops this direction from passing vacuously.
+func TestWireShape_OperationalErrorIsAToolResult(t *testing.T) {
 	mock := failingQueryServer(t, http.StatusBadRequest, `{"error":"Поле не найдено \"Номенклатура\""}`)
 	client := onec.NewClient(mock.URL, "", "")
 	session, log, cleanup := connectLoggedSession(t, New("test", client, nil), mock.Close)
@@ -183,26 +192,76 @@ func TestWireShape_OperationalErrorIsAProtocolErrorToday(t *testing.T) {
 	res, err, frame := call(t, session, log, "execute_query",
 		map[string]any{"query": "ВЫБРАТЬ Номенклатура.Ссылка ИЗ Справочник.Номенклатура КАК Номенклатура"})
 
-	if err == nil {
-		t.Fatalf("CallTool returned no error; today a failed 1C call is a protocol error")
+	if err != nil {
+		t.Fatalf("CallTool returned an error; a failed 1C call must now be a tool result: %v", err)
 	}
-	if res != nil {
-		t.Errorf("CallTool returned a non-nil result alongside the error: %+v", res)
+	if res == nil {
+		t.Fatal("CallTool returned neither a result nor an error")
 	}
-	if frame.has("result") {
-		t.Errorf("frame carries a result member; today it must carry only an error: %s", frame.raw)
+	if frame.has("error") {
+		t.Errorf("frame carries an error member; it must carry only a result: %s", frame.raw)
 	}
-	if !frame.has("error") {
-		t.Fatalf("frame carries no error member: %s", frame.raw)
+	if !frame.has("result") {
+		t.Fatalf("frame carries no result member: %s", frame.raw)
 	}
-	we := frame.wireError(t)
-	if we.Code != 0 {
-		t.Errorf("error code = %d, want 0: a plain handler error carries no JSON-RPC code today (frame %s)", we.Code, frame.raw)
+	assertFrameIsError(t, frame)
+	text := frameText(t, frame)
+	if !strings.Contains(text, "Поле не найдено") {
+		t.Errorf("the 1C diagnostic did not reach the tool content:\n%s", text)
 	}
-	const wantPrefix = "executing query in 1C: 1C returned status 400"
-	if !strings.HasPrefix(we.Message, wantPrefix) {
-		t.Errorf("error message = %q, want it to start with %q", we.Message, wantPrefix)
+	if !strings.Contains(text, "## Запрос не выполнен") {
+		t.Errorf("the content is not under the execute_query heading:\n%s", text)
 	}
+	// The frame itself, so the evidence for this release's central claim is
+	// reproducible from the suite rather than retyped from a session somewhere.
+	t.Logf("OPERATIONAL FRAME: %s", frame.raw)
+}
+
+// assertFrameIsError checks isError THE ONLY CORRECT WAY.
+//
+// CallToolResult.IsError is `json:"isError,omitempty"`, so a false value does not
+// serialise as false, it VANISHES. "the key is not false" is therefore satisfied
+// by a frame that never set it, and the only honest assertion is "the key is
+// present and it is true".
+func assertFrameIsError(t *testing.T, frame wireResponse) {
+	t.Helper()
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(frame.object["result"], &result); err != nil {
+		t.Fatalf("result member is not an object: %s (%v)", frame.raw, err)
+	}
+	raw, ok := result["isError"]
+	if !ok {
+		t.Fatalf("result carries no isError key at all, and omitempty makes that indistinguishable "+
+			"from false: %s", frame.raw)
+	}
+	var isError bool
+	if err := json.Unmarshal(raw, &isError); err != nil {
+		t.Fatalf("isError is not a boolean: %s (%v)", frame.raw, err)
+	}
+	if !isError {
+		t.Fatalf("isError is false: %s", frame.raw)
+	}
+}
+
+// frameText returns the first text content block of a result frame.
+func frameText(t *testing.T, frame wireResponse) string {
+	t.Helper()
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(frame.object["result"], &result); err != nil {
+		t.Fatalf("result member is not a tool result: %s (%v)", frame.raw, err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatalf("result carries no content: %s", frame.raw)
+	}
+	if result.Content[0].Type != "text" {
+		t.Fatalf("first content block is %q, not text: %s", result.Content[0].Type, frame.raw)
+	}
+	return result.Content[0].Text
 }
 
 // TestWireShape_GenericToolRejectsMissingRequired pins the contrast that makes
@@ -270,35 +329,30 @@ func TestWireShape_RawRegistrationEnforcesNoSchema(t *testing.T) {
 	defer cleanup()
 
 	t.Run("required_is_not_enforced", func(t *testing.T) {
-		_, err, frame := call(t, session, log, "execute_query", map[string]any{})
-		if err == nil {
-			t.Fatalf("execute_query with no arguments returned no error at all")
+		_, _, frame := call(t, session, log, "execute_query", map[string]any{})
+		if frame.has("error") {
+			t.Fatalf("the SDK rejected the call before the handler: raw registration now enforces the "+
+				"declared schema, and the classification rationale that rests on it is void. frame %s", frame.raw)
 		}
-		we := frame.wireError(t)
-		if we.Code == jsonrpc.CodeInvalidParams {
-			t.Fatalf("the SDK rejected the call at -32602: raw registration now enforces the declared schema, "+
-				"and the classification rationale that rests on it is void. frame %s", frame.raw)
-		}
-		if we.Message != "query is required" {
-			t.Errorf("message = %q, want the handler's own %q: %s", we.Message, "query is required", frame.raw)
+		assertFrameIsError(t, frame)
+		if text := frameText(t, frame); !strings.Contains(text, "query is required") {
+			t.Errorf("content does not carry the handler's own sentence %q: %s", "query is required", text)
 		}
 	})
 
 	t.Run("enum_is_not_enforced", func(t *testing.T) {
-		_, err, frame := call(t, session, log, "search_code",
+		_, _, frame := call(t, session, log, "search_code",
 			map[string]any{"query": "x", "mode": "NOT_IN_ENUM"})
-		if err == nil {
-			t.Fatalf("search_code with a value outside the declared enum returned no error at all")
+		if frame.has("error") {
+			t.Fatalf("the SDK rejected the call before the handler: raw registration now enforces the "+
+				"declared enum. frame %s", frame.raw)
 		}
-		we := frame.wireError(t)
-		if we.Code == jsonrpc.CodeInvalidParams {
-			t.Fatalf("the SDK rejected the call at -32602: raw registration now enforces the declared enum. frame %s", frame.raw)
-		}
+		assertFrameIsError(t, frame)
 		// Contains, not equals: search_code is wrapped by withIndexProtectionNotice,
-		// which prepends a notice to the error text whenever the served generation
-		// is unprotected. The handler's sentence is what proves it ran either way.
-		if !strings.Contains(we.Message, `unknown mode: "NOT_IN_ENUM"`) {
-			t.Errorf("message = %q, want it to carry the handler's own unknown-mode sentence: %s", we.Message, frame.raw)
+		// which prepends a notice whenever the served generation is unprotected.
+		// The handler's sentence is what proves it ran either way.
+		if text := frameText(t, frame); !strings.Contains(text, `unknown mode: "NOT_IN_ENUM"`) {
+			t.Errorf("content does not carry the handler's own unknown-mode sentence: %s", text)
 		}
 	})
 
@@ -310,6 +364,284 @@ func TestWireShape_RawRegistrationEnforcesNoSchema(t *testing.T) {
 		if code := frame.wireError(t).Code; code != jsonrpc.CodeInvalidParams {
 			t.Fatalf("control failed: the generic tool answered %d rather than %d, so the two raw "+
 				"results above prove nothing about schema enforcement: %s", code, jsonrpc.CodeInvalidParams, frame.raw)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// The wire contract this release ships, measured over a real session.
+// ---------------------------------------------------------------------------
+
+// TestWireShape_ProtocolErrorsSurvive is the positive control for the inversion
+// above. Without it, a blanket conversion of every handler error into a tool
+// result would satisfy every other assertion in this file and nothing would say
+// so.
+//
+// Three shapes, three different reasons a request never became a valid tool
+// invocation: a body that is not a JSON object, a tool that does not exist, and a
+// generic tool whose declared schema really is enforced.
+func TestWireShape_ProtocolErrorsSurvive(t *testing.T) {
+	mock := failingQueryServer(t, http.StatusBadRequest, `{"error":"неважно"}`)
+	client := onec.NewClient(mock.URL, "", "")
+	session, log, cleanup := connectLoggedSession(t, New("test", client, nil), mock.Close)
+	defer cleanup()
+
+	t.Run("arguments are not a JSON object", func(t *testing.T) {
+		// The SDK does not validate a raw-registered schema (pinned above), so
+		// this reaches the handler and fails in its own json.Unmarshal, which is
+		// the site the InvalidParams mark is on.
+		log.reset()
+		_, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "execute_query", Arguments: json.RawMessage(`"not an object"`),
+		})
+		frame := soleResponse(t, log)
+		if err == nil {
+			t.Fatal("a body that is not a JSON object was accepted")
+		}
+		if frame.has("result") || !frame.has("error") {
+			t.Fatalf("a decode failure did not stay a protocol error: %s", frame.raw)
+		}
+		if code := frame.wireError(t).Code; code != jsonrpc.CodeInvalidParams {
+			t.Errorf("code = %d, want %d: %s", code, jsonrpc.CodeInvalidParams, frame.raw)
+		}
+		t.Logf("PROTOCOL FRAME: %s", frame.raw)
+	})
+
+	t.Run("unknown tool", func(t *testing.T) {
+		_, err, frame := call(t, session, log, "no_such_tool", map[string]any{})
+		if err == nil {
+			t.Fatal("an unknown tool name was accepted")
+		}
+		if frame.has("result") || !frame.has("error") {
+			t.Fatalf("an unknown tool did not stay a protocol error: %s", frame.raw)
+		}
+		we := frame.wireError(t)
+		if we.Code != jsonrpc.CodeInvalidParams {
+			t.Errorf("code = %d, want %d: %s", we.Code, jsonrpc.CodeInvalidParams, frame.raw)
+		}
+		if !strings.Contains(we.Message, "unknown tool") {
+			t.Errorf("message = %q, want it to name the missing tool", we.Message)
+		}
+	})
+
+	t.Run("generic tool schema", func(t *testing.T) {
+		_, err, frame := call(t, session, log, "bsl_syntax_help", map[string]any{})
+		if err == nil {
+			t.Fatal("the generic tool accepted a call with no arguments")
+		}
+		if frame.has("result") || !frame.has("error") {
+			t.Fatalf("the generic tool's schema rejection did not stay a protocol error: %s", frame.raw)
+		}
+		if code := frame.wireError(t).Code; code != jsonrpc.CodeInvalidParams {
+			t.Errorf("code = %d, want %d: %s", code, jsonrpc.CodeInvalidParams, frame.raw)
+		}
+	})
+}
+
+// TestWireShape_RequiredCheckIsNowOperational pins the asymmetry this release
+// SHIPS, so that it is a deliberate, visible state rather than an accident.
+//
+// The same mistake, a missing required argument, gets two different answers:
+// execute_query answers with a readable tool result, bsl_syntax_help answers
+// -32602. That difference is created by the REGISTRATION MECHANISM and not by
+// this build: raw registration validates nothing, so execute_query's own check is
+// the whole gate and its verdict is one the caller can act on. Both halves are
+// asserted in one session, so a silent revert of either goes red.
+func TestWireShape_RequiredCheckIsNowOperational(t *testing.T) {
+	mock := failingQueryServer(t, http.StatusBadRequest, `{}`)
+	client := onec.NewClient(mock.URL, "", "")
+	session, log, cleanup := connectLoggedSession(t, New("test", client, nil), mock.Close)
+	defer cleanup()
+
+	_, err, frame := call(t, session, log, "execute_query", map[string]any{})
+	if err != nil {
+		t.Fatalf("execute_query with no arguments returned a protocol error: %v", err)
+	}
+	if frame.has("error") {
+		t.Fatalf("execute_query answered with an error member: %s", frame.raw)
+	}
+	assertFrameIsError(t, frame)
+	if text := frameText(t, frame); !strings.Contains(text, "## Запрос не выполнен") {
+		t.Errorf("content is not under the execute_query heading:\n%s", text)
+	}
+
+	_, err, frame = call(t, session, log, "bsl_syntax_help", map[string]any{})
+	if err == nil {
+		t.Fatal("the generic tool no longer rejects a missing required argument, so the pair is gone")
+	}
+	if code := frame.wireError(t).Code; code != jsonrpc.CodeInvalidParams {
+		t.Errorf("the generic half answered %d, want %d: %s", code, jsonrpc.CodeInvalidParams, frame.raw)
+	}
+}
+
+// unprotectedIndexServer builds a server whose dump index is served out of a cache
+// nothing could claim, which is the state the index-protection notice describes.
+func unprotectedIndexServer(t *testing.T, freeze bool) *mcp.Server {
+	t.Helper()
+	dumpDir := t.TempDir()
+	for i := range 3 {
+		mkBSL(t, dumpDir, fmt.Sprintf("CommonModules/Модуль%02d/Ext/Module.bsl", i),
+			fmt.Sprintf("Процедура Тест%02d()\n    Сообщить(\"МаркерПоиска %02d\");\nКонецПроцедуры\n", i, i))
+	}
+	cacheDir := t.TempDir()
+
+	gen, err := dump.PrepareServeGeneration(context.Background(), dumpDir, cacheDir, false)
+	if err != nil {
+		t.Fatalf("warming the cache: %v", err)
+	}
+	gensig := gen.Gensig()
+	gen.Release()
+
+	if freeze {
+		freezeTree(t, cacheDir)
+	}
+	idx, err := dump.OpenGenerationReadOnly(dumpDir, cacheDir, gensig)
+	if err != nil {
+		t.Fatalf("opening the generation for serving: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	<-idx.Done()
+
+	// The state under test, asserted as a precondition. A test of "the notice is
+	// first" that ran against a protected index would pass by never firing.
+	if freeze && idx.UnprotectedReason() == "" {
+		t.Fatal("the frozen cache produced a protected index, so nothing below tests the notice")
+	}
+	if !freeze && idx.UnprotectedReason() != "" {
+		t.Fatalf("the writable cache produced an unprotected index: %q", idx.UnprotectedReason())
+	}
+
+	mock := failingQueryServer(t, http.StatusBadRequest, `{}`)
+	t.Cleanup(mock.Close)
+	return New("test", onec.NewClient(mock.URL, "", ""), idx)
+}
+
+// freezeTree clears every write bit under root, restores them afterwards, and
+// PROVES the freeze took: a chmod that silently failed would let every assertion
+// pass while exercising the ordinary protected path.
+func freezeTree(t *testing.T, root string) {
+	t.Helper()
+	type saved struct {
+		path string
+		mode fs.FileMode
+	}
+	var modes []saved
+	if err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, iErr := d.Info()
+		if iErr != nil {
+			return iErr
+		}
+		modes = append(modes, saved{p, info.Mode().Perm()})
+		return nil
+	}); err != nil {
+		t.Fatalf("walking %s before freezing it: %v", root, err)
+	}
+	t.Cleanup(func() {
+		for _, s := range modes {
+			_ = os.Chmod(s.path, s.mode)
+		}
+	})
+	for i := len(modes) - 1; i >= 0; i-- {
+		if err := os.Chmod(modes[i].path, modes[i].mode&^0o222); err != nil {
+			t.Fatalf("clearing write bits on %s: %v", modes[i].path, err)
+		}
+	}
+	if f, err := os.CreateTemp(root, ".control-"); err == nil {
+		name := f.Name()
+		_ = f.Close()
+		_ = os.Remove(name)
+		t.Fatalf("the control failed: %s is still writable after clearing its write bits", root)
+	}
+}
+
+// TestSearchCodeFailureIsAToolResultNotAProtocolError IS THE SESSION-LEVEL GUARD
+// ON THE DECORATOR IN NewSearchCodeHandler.
+//
+// The direct unit test of the notice wrapper, tools
+// TestIndexNotice_AFailingCallIsDecoratedToo, calls withIndexProtectionNotice with
+// a raw stub handler and asserts only on the Go error it returns, so it passes
+// whether or not the real constructor is decorated. MEASURED by removing
+// WithToolErrors from NewSearchCodeHandler: that test stayed green, while this
+// one and four rows of the per-site table in tools went red. This is the half
+// that runs over a real SESSION on the real registry, which is where a decorator
+// applied to something other than the handler that was actually registered would
+// still show up.
+func TestSearchCodeFailureIsAToolResultNotAProtocolError(t *testing.T) {
+	session, log, cleanup := connectLoggedSession(t, unprotectedIndexServer(t, true), func() {})
+	defer cleanup()
+
+	res, err, frame := call(t, session, log, "search_code",
+		map[string]any{"query": "МаркерПоиска", "mode": "НетТакогоРежима"})
+	if err != nil {
+		t.Fatalf("a failed search is still a protocol error, so WithToolErrors is not wired "+
+			"into NewSearchCodeHandler: %v", err)
+	}
+	if res == nil {
+		t.Fatal("neither a result nor an error came back")
+	}
+	assertFrameIsError(t, frame)
+	text := frameText(t, frame)
+	if !strings.HasPrefix(text, "> ВНИМАНИЕ") {
+		t.Errorf("the index-protection notice is not the first thing in the failure:\n%s", text)
+	}
+	if !strings.Contains(text, "## Поиск по выгрузке не выполнен") {
+		t.Errorf("the failure is not under the search_code heading:\n%s", text)
+	}
+}
+
+// TestSearchCode_NoticeStaysFirstOnAFailedCall pins the decorator NESTING ORDER.
+//
+// Both orders build and only one is correct. With the notice wrapper on the
+// OUTSIDE an operational failure reaches prependNotice as a RESULT and takes the
+// same path a success takes, so the notice lands first on both. With the wrapper
+// inside, the failure is still an error when the notice is applied, the notice
+// ends up BELOW the heading on failures while staying on top for successes, and
+// the two halves of one statement about one answer drift apart depending on how
+// the call went. That is exactly the defect the notice wrapper was written to
+// prevent.
+//
+// The negative control is in this same test: on a HEALTHY index the first line is
+// the heading and no notice appears, so a green result cannot mean "the notice is
+// always first because it is always there".
+func TestSearchCode_NoticeStaysFirstOnAFailedCall(t *testing.T) {
+	const noticeMarker = "индекс выгрузки отдаётся без защиты"
+
+	t.Run("unprotected index", func(t *testing.T) {
+		session, log, cleanup := connectLoggedSession(t, unprotectedIndexServer(t, true), func() {})
+		defer cleanup()
+
+		_, _, frame := call(t, session, log, "search_code",
+			map[string]any{"query": "МаркерПоиска", "mode": "НетТакогоРежима"})
+		text := frameText(t, frame)
+		first, _, _ := strings.Cut(text, "\n")
+		if !strings.Contains(first, noticeMarker) {
+			t.Errorf("the first line is %q, want the protection notice", first)
+		}
+		notice := strings.Index(text, noticeMarker)
+		heading := strings.Index(text, "## Поиск по выгрузке не выполнен")
+		if heading < 0 {
+			t.Fatalf("no heading in:\n%s", text)
+		}
+		if notice > heading {
+			t.Errorf("the notice sits BELOW the heading, which is the inverted nesting order:\n%s", text)
+		}
+	})
+
+	t.Run("healthy index negative control", func(t *testing.T) {
+		session, log, cleanup := connectLoggedSession(t, unprotectedIndexServer(t, false), func() {})
+		defer cleanup()
+
+		_, _, frame := call(t, session, log, "search_code",
+			map[string]any{"query": "МаркерПоиска", "mode": "НетТакогоРежима"})
+		text := frameText(t, frame)
+		if strings.Contains(text, noticeMarker) {
+			t.Errorf("a healthy index emitted the protection notice:\n%s", text)
+		}
+		if !strings.HasPrefix(text, "## Поиск по выгрузке не выполнен") {
+			t.Errorf("the failure does not open with the heading:\n%s", text)
 		}
 	})
 }

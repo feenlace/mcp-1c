@@ -218,7 +218,7 @@ func TestQueryPrefixParity_LeadingWhitespaceReachesTheExtension(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshalling arguments: %v", err)
 			}
-			_, handlerErr := handler(context.Background(), &mcp.CallToolRequest{
+			res, handlerErr := handler(context.Background(), &mcp.CallToolRequest{
 				Params: &mcp.CallToolParamsRaw{Name: "execute_query", Arguments: args},
 			})
 
@@ -230,13 +230,22 @@ func TestQueryPrefixParity_LeadingWhitespaceReachesTheExtension(t *testing.T) {
 				t.Fatalf("server called=%v, table says %v (handler err=%v)", gotCalled, r.reachesServer, handlerErr)
 			}
 			if !r.reachesServer {
-				if handlerErr == nil {
-					t.Fatal("the Go side let a non SELECT query through without an error")
+				// The refusal is a tool result with IsError now, not an error, so
+				// the control has to read the result. It must still refuse:
+				// trimming may not turn a rejected query into an accepted one.
+				text := failureText(t, res, handlerErr)
+				if !strings.Contains(text, "ВЫБРАТЬ") {
+					t.Errorf("the Go side refused, but not with the SELECT gate's own sentence:\n%s", text)
 				}
 				return
 			}
 			if handlerErr != nil {
 				t.Fatalf("unexpected handler error: %v", handlerErr)
+			}
+			// An accepted query must not come back as a failure either: without
+			// this, "reached the server" plus a rendered failure would pass.
+			if res != nil && res.IsError {
+				t.Fatalf("an accepted query answered with IsError:\n%s", resultText(t, res))
 			}
 			if !extensionWouldAccept(gotQuery) {
 				t.Errorf("the extension would answer 400 for the text it received: %q\n"+

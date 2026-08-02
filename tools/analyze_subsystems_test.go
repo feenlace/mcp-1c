@@ -469,33 +469,26 @@ func TestAnalyzeSubsystemsHandler_UnknownAction(t *testing.T) {
 	// Unknown action is rejected before any network call; a client pointed at an
 	// unreachable address proves the validation short-circuits the fetch.
 	client := onec.NewClient("http://127.0.0.1:0", "", "")
-	_, err := callAnalyze(t, client, map[string]any{"action": "bogus"})
-	if err == nil {
-		t.Fatal("expected error for unknown action")
-	}
-	if !strings.Contains(err.Error(), "unknown action") {
-		t.Errorf("expected 'unknown action' error, got: %v", err)
+	res, err := callAnalyze(t, client, map[string]any{"action": "bogus"})
+	// A rejected argument VALUE is now a tool result the caller can read, not a
+	// protocol error it never sees. The sentence it has to carry is unchanged.
+	if text := failureText(t, res, err); !strings.Contains(text, "unknown action") {
+		t.Errorf("expected 'unknown action' in the failure, got:\n%s", text)
 	}
 }
 
 func TestAnalyzeSubsystemsHandler_MissingAction(t *testing.T) {
 	client := onec.NewClient("http://127.0.0.1:0", "", "")
-	_, err := callAnalyze(t, client, map[string]any{})
-	if err == nil {
-		t.Fatal("expected error for missing action")
-	}
-	if !strings.Contains(err.Error(), "action is required") {
-		t.Errorf("expected 'action is required' error, got: %v", err)
+	res, err := callAnalyze(t, client, map[string]any{})
+	if text := failureText(t, res, err); !strings.Contains(text, "action is required") {
+		t.Errorf("expected 'action is required' in the failure, got:\n%s", text)
 	}
 }
 
 func TestAnalyzeSubsystemsHandler_ContainingRequiresObject(t *testing.T) {
 	client := onec.NewClient("http://127.0.0.1:0", "", "")
-	_, err := callAnalyze(t, client, map[string]any{"action": "containing"})
-	if err == nil {
-		t.Fatal("expected error for containing without object")
-	}
-	if !strings.Contains(err.Error(), "object parameter") {
-		t.Errorf("expected object-required error, got: %v", err)
+	res, err := callAnalyze(t, client, map[string]any{"action": "containing"})
+	if text := failureText(t, res, err); !strings.Contains(text, "object parameter") {
+		t.Errorf("expected the object-required sentence in the failure, got:\n%s", text)
 	}
 }

@@ -148,18 +148,18 @@ func TestNewReloadDumpHandler_ColdStartDoesNotPromiseSearchStillWorks(t *testing
 		t.Fatal("premise broken: search answers on an index that never loaded a dump")
 	}
 
-	_, err := callReloadHandler(t, index)
-	if err == nil {
-		t.Fatal("a reload on a not-yet-built index must fail")
-	}
-	if strings.Contains(err.Error(), reloadStillServesMarker) {
-		t.Errorf("the error promises that search still works, but nothing was ever loaded:\n%v", err)
+	res, err := callReloadHandler(t, index)
+	// The failure is a tool result with IsError now. What it must and must not
+	// claim is unchanged; only where the caller reads it moved.
+	text := failureText(t, res, err)
+	if strings.Contains(text, reloadStillServesMarker) {
+		t.Errorf("the failure promises that search still works, but nothing was ever loaded:\n%s", text)
 	}
 	// The caller still has to learn what state they are in, so the absence of
 	// the false claim is not enough on its own.
-	if !strings.Contains(err.Error(), "не отвечает") {
-		t.Errorf("the error never says search is unavailable, so the caller learns nothing "+
-			"about whether search works:\n%v", err)
+	if !strings.Contains(text, "не отвечает") {
+		t.Errorf("the failure never says search is unavailable, so the caller learns nothing "+
+			"about whether search works:\n%s", text)
 	}
 }
 
@@ -199,12 +199,10 @@ func TestNewReloadDumpHandler_WorkingIndexKeepsTheReassurance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = callReloadHandler(t, index)
-	if err == nil {
-		t.Fatal("premise broken: the reload of an emptied dump was expected to fail")
-	}
-	if !strings.Contains(err.Error(), reloadStillServesMarker) {
-		t.Errorf("the index is still serving, so the error must say so:\n%v", err)
+	res, err := callReloadHandler(t, index)
+	text := failureText(t, res, err)
+	if !strings.Contains(text, reloadStillServesMarker) {
+		t.Errorf("the index is still serving, so the failure must say so:\n%s", text)
 	}
 	// And the claim has to be true: prove the index really did keep serving.
 	if _, total, searchErr := index.Search(dump.SearchParams{Query: "маркерВыгрузки", Mode: dump.SearchModeSmart}); searchErr != nil || total == 0 {

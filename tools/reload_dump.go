@@ -57,14 +57,15 @@ func boolPtr(b bool) *bool { return &b }
 // state is read after the reload, so the notice describes the generation the call
 // leaves attached. See index_notice.go.
 func NewReloadDumpHandler(index *dump.Index) mcp.ToolHandler {
-	return withIndexProtectionNotice(index, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return withIndexProtectionNotice(index, WithToolErrors(headingReload, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		rep, err := index.Reload()
 		if err != nil {
-			return nil, fmt.Errorf("перезагрузка выгрузки не выполнена: %w.%s",
-				err, searchStateAfterFailedReload(index, err))
+			// The Russian prefix this used to carry is now the heading, so
+			// repeating it here would print the same sentence twice.
+			return nil, fmt.Errorf("%w.%s", err, searchStateAfterFailedReload(index, err))
 		}
 		return textResult(FormatReloadReport(rep, index.Dir())), nil
-	})
+	}))
 }
 
 // searchStateAfterFailedReload describes what the caller can still do, decided

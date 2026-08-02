@@ -68,10 +68,10 @@ const queryNotSelectMsg = "разрешены только запросы, на�
 
 // NewQueryHandler returns a ToolHandler that executes a read-only query in 1C.
 func NewQueryHandler(client *onec.Client) mcp.ToolHandler {
-	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return WithToolErrors(headingQuery, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var input queryInput
 		if err := json.Unmarshal(req.Params.Arguments, &input); err != nil {
-			return nil, fmt.Errorf("parsing input: %w", err)
+			return nil, InvalidParams(fmt.Errorf("parsing input: %w", err))
 		}
 		if input.Query == "" {
 			return nil, fmt.Errorf("query is required")
@@ -110,7 +110,7 @@ func NewQueryHandler(client *onec.Client) mcp.ToolHandler {
 		}
 
 		return textResult(formatQueryResult(&result)), nil
-	}
+	})
 }
 
 // formatQueryResult formats the query result as a markdown table.
