@@ -574,7 +574,7 @@ func TestRenderFailure_NoDashes(t *testing.T) {
 		untrustedHeaderNotice,
 		captionOnecError, captionCause, captionNetwork,
 		remedyQueryRejected, remedyQueryBodyRejected, remedyForeignBody, remedyForeignBodyTruncated,
-		remedyUnreachable,
+		remedyUnreachable, remedyEventLogNoRight,
 		queryMarkerHint, queryReadOnlyReassurance,
 		fmt.Sprintf(bodyTruncatedNotice, 65536),
 		fmt.Sprintf(detailTruncatedNotice, 1200, 5000),
@@ -587,6 +587,7 @@ func TestRenderFailure_NoDashes(t *testing.T) {
 		renderFailure(headingMetadata, &onec.StatusError{StatusCode: 401, BodyKind: onec.BodyKindForeign, ContentType: "text/html", BodyBytes: 99}),
 		renderFailure(headingMetadata, &onec.StatusError{StatusCode: 500, BodyKind: onec.BodyKindForeign, ContentType: "text/html", BodyBytes: 65535, Truncated: true}),
 		renderFailure(headingEventLog, &onec.TransportError{Base: "http://server", Endpoint: "/eventlog", Err: errors.New("connection refused")}),
+		renderFailure(headingEventLog, &onec.StatusError{StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: "нет права"}),
 		renderFailure(headingConfigInfo, &onec.RequestError{Base: "http://server", Endpoint: "/configuration", Err: errors.New("bad url")}),
 		renderFailure(headingSearch, errors.New("index is building")),
 	}

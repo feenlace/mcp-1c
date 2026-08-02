@@ -356,6 +356,43 @@ const remedyQueryBodyRejected = "Так отвечает расширение, �
 // Customer-facing RU: no тире.
 const queryMarkerHint = "Позицию, на которой разбор остановился, 1С отмечает вставкой `<<?>>`.\n"
 
+// remedyEventLogNoRight is shown for a 403 that the EXTENSION itself produced on
+// the event-log endpoint, and it exists because a bare 403 reads as «try
+// different arguments» when there are no arguments that work.
+//
+// BOTH producers of that status are rights matters and neither is a filter
+// matter, which is why one text is true for both. ЖурналРегистрацииPOST asks
+// ПравоДоступа("Администрирование", Метаданные) before it looks at the body at
+// all and answers 403 when the answer is false; further down it answers 403 when
+// the user filter cannot be resolved. Nothing the caller puts in the request
+// changes either, so the advice names the account and not the arguments.
+//
+// IT DOES NOT PROPOSE DROPPING THE FILTER, and that is the sentence with a
+// measurement behind it. Before the extension gained the check, infobase user
+// Demo on 1С 8.3.27 got 500 for {"limit":3} and 500 for {"limit":3,"user":"Demo"}
+// alike (2026-08-03): НайтиПоИмени resolves the caller's OWN name without the
+// right, so the older user-filter 403 fired only on someone else's name and a
+// call with no filter never reached it. Retrying with less filter was never a way
+// round the missing right.
+//
+// The class it is attached to is narrow on purpose: extension envelope only. A
+// FOREIGN 403 is a body whose author cannot be established, and asserting a cause
+// for it is the defect remedyForeignBody was rewritten to stop committing.
+//
+// Customer-facing RU: no тире.
+const remedyEventLogNoRight = "Это отказ по правам учётной записи, а не по отбору. Журнал " +
+	"регистрации читается только с правом Администрирование, и без него не выдаётся ни одна " +
+	"запись: в ответе нет ни записей, ни их количества.\n\n" +
+	"Проверьте:\n" +
+	"1. Учётную запись, под которой инструмент обращается к 1С: её задают флаги `--user` и " +
+	"`--password`, а если они не заданы, логин и пароль берутся из адреса в `--base`.\n" +
+	"2. Выдано ли этой учётной записи право Администрирование. Права выдаёт администратор " +
+	"информационной базы средствами самой 1С.\n" +
+	"3. Текст ошибки выше: тем же кодом отклоняется отбор по пользователю, имя которого " +
+	"разобрать не удалось.\n" +
+	"4. Повторять вызов без отбора бесполезно: без права журнал не читается ни с отбором, ни " +
+	"без него.\n"
+
 // remedyForeignBody deliberately does not show the body. On an on prem IIS a page
 // of that class carries physical paths and the account the pool runs under, and
 // the bug report template routes logs into a public issue. There is also no way
@@ -663,6 +700,12 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 	p.add(fenced(shown))
 	if strings.Contains(shown, queryMarker) {
 		p.add(queryMarkerHint)
+	}
+	// A 403 the extension itself built on this endpoint is a rights refusal, and
+	// the caller has to be told that the arguments are not the problem. Only this
+	// branch: a foreign 403 has no established author.
+	if heading == headingEventLog && se.StatusCode == 403 {
+		p.add(remedyEventLogNoRight)
 	}
 	if heading == headingQuery {
 		// True on both branches and for the same reason: a body fault is refused
