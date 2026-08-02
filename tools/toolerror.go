@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"unicode/utf8"
 
@@ -593,18 +592,16 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 	}
 }
 
-// isRedirectStatus reports whether the status is one net/http would have
-// followed. The set is taken from redirectBehavior
-// (/usr/local/go/src/net/http/client.go:512-538) rather than from the 3xx range,
-// so 304 and 300, which net/http does not follow, keep the ordinary rendering.
-func isRedirectStatus(code int) bool {
-	switch code {
-	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
-		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
-		return true
-	}
-	return false
-}
+// isRedirectStatus forwards to onec.IsRedirectStatus.
+//
+// THERE IS ONE IMPLEMENTATION AND THIS IS NOT IT, for the reason contentTypeForDisplay
+// below records: the decision this predicate drives, that nothing from the far
+// side is shown on a 30x, was being made in the renderer only, and
+// onec.StatusError.Error() is a second channel to the model that had no such
+// branch. A rule the far side can walk around by being read somewhere else is not
+// a rule, so it now lives beside the field it is about. This wrapper exists only
+// so the tests in this package keep naming what they have always named.
+func isRedirectStatus(code int) bool { return onec.IsRedirectStatus(code) }
 
 // contentTypeForDisplay forwards to onec.ContentTypeForDisplay.
 //

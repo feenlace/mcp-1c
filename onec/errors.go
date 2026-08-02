@@ -3,6 +3,7 @@ package onec
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"unicode/utf8"
 
@@ -77,6 +78,25 @@ type StatusError struct {
 	Truncated bool
 }
 
+// IsRedirectStatus сообщает, пошёл ли бы по такому коду net/http. Набор взят у
+// redirectBehavior (/usr/local/go/src/net/http/client.go), а не у диапазона 3xx,
+// поэтому 300 и 304, по которым net/http не идёт, остаются обычными ответами.
+//
+// ЖИВЁТ ЗДЕСЬ, РЯДОМ С ПОЛЕМ. Раньше предикат был только в отрисовщике отказа, и
+// решение «на перенаправлении не показывать с той стороны ничего» принимал тоже
+// только он. Error() такой ветви не имел, а Error() это второй канал к модели:
+// tools/form.go formServiceCallFailedNote берёт его текст и кладёт в ответ с
+// IsError = false. Ровно тот же довод, по которому сюда переехала
+// ContentTypeForDisplay.
+func IsRedirectStatus(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
+}
+
 func (e *StatusError) Error() string {
 	var b strings.Builder
 	// Первые слова оставлены прежними намеренно: по ним ищут в журналах, и
@@ -87,6 +107,26 @@ func (e *StatusError) Error() string {
 	}
 	if e.Base != "" {
 		fmt.Fprintf(&b, " on %s", e.Base)
+	}
+	// ПЕРЕНАПРАВЛЕНИЕ РЕШАЕТСЯ ПЕРВЫМ, и с той стороны отсюда не уходит ничего.
+	//
+	// Код 30x означает, что клиент отказался идти дальше, а не что ответила
+	// публикация: адрес назначения выбрала та сторона, и кто написал это тело,
+	// не установлено. Client.statusError класс тела определяет РАЗБОРОМ и на код
+	// не смотрит, поэтому тело 302 вида {"error":"…"} становилось
+	// BodyKindExtension, а Detail печатался тут дословно.
+	//
+	// Отрисовщик отказа это уже соблюдал (renderStatusError), а Error() нет, и
+	// разница была дырой ровно в том канале, о котором ниже сказано, что его
+	// наследуют ВСЕ читатели: tools/form.go formServiceCallFailedNote кладёт этот
+	// текст в ответ с IsError = false.
+	//
+	// Обрезка тут не называется намеренно: тело не описывается вовсе, поэтому
+	// сообщать, целиком ли его прочитали, не о чем.
+	if IsRedirectStatus(e.StatusCode) {
+		b.WriteString(": the client did not follow this redirect, and nothing from the response " +
+			"is shown because a redirect is not the publication answering")
+		return b.String()
 	}
 	// Обрезка называется ДО ветвления по классу, потому что её производят обе
 	// ветви, а называла её только одна. Ветвь расширения выходила отсюда сразу
@@ -112,6 +152,13 @@ func (e *StatusError) Error() string {
 	// модели целиком. Сокращение живёт здесь, у самого поля, потому что здесь
 	// единственная точка, которую наследуют ВСЕ читатели Error(): и этот ответ,
 	// и журнал, и кадр ошибки на проводе.
+	//
+	// «Наследуют ВСЕ читатели» было сказано про сокращение и оказалось неверным
+	// про функцию: отрисовщик отказа не показывал с той стороны НИЧЕГО при 30x, а
+	// Error() этой ветви не имел, и текст той стороны уходил читателям Error()
+	// мимо решения, которое уже было принято. Утверждение держится только пока
+	// каждое такое решение стоит ЗДЕСЬ. Ветвь перенаправления выше и есть
+	// приведение функции к тому, что говорит этот абзац.
 	ct := ContentTypeForDisplay(e.ContentType)
 	if ct == "" && e.ContentType != "" {
 		ct = contentTypeUnusable
