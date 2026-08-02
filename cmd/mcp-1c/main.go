@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/feenlace/mcp-1c/dump"
 	"github.com/feenlace/mcp-1c/extension"
@@ -591,13 +592,43 @@ func compareExtensionVersions(a, b string) (int, bool) {
 	return 0, true
 }
 
+// maxVersionTextBytes bounds the ONE value the /version probe takes from the far
+// side, both for parsing and for the log.
+//
+// It is not a style limit, it is a budget. The answer arrives under the client's
+// response cap, 128 MiB by default (config.DefaultMaxResponseSizeMiB), and both
+// things this code then does with the value scale with its length:
+//
+//   - versionComponents splits it into components and keeps an int per
+//     component. Measured on this repository before this bound: 1 MiB of "1."
+//     pairs allocated 28.1 MiB, 4 MiB allocated 129.9 MiB, 16 MiB allocated
+//     503.2 MiB, i.e. 28x to 32x, which puts a body at the cap in the gigabytes.
+//     This runs on the probe goroutine, where running out of memory does not fail
+//     one call, it takes the process down.
+//   - the value is echoed into the log as "got", and openAppendLog restarts a log
+//     file that has reached logRollAtBytes (8 MiB). One oversized answer would
+//     therefore make the NEXT start discard the operator's whole history.
+//
+// The number is set against what a version actually is. The longest this
+// repository produces or names are the extension's own 0.4.7 and platform builds
+// like 8.3.27.2130, eleven bytes; a pre-release suffix such as 0.5.0-beta adds a
+// few more. 128 bytes is an order of magnitude above the longest of those and
+// still one line in a log. A value over it is not shortened into a version, it is
+// REFUSED, which routes it to the "cannot be ranked" outcome that already exists
+// and already says the answer is not a version number.
+const maxVersionTextBytes = 128
+
 // versionComponents splits a dotted numeric version into its components,
 // stopping at the first character that cannot belong to one. It reports false
 // when there is no leading number at all, which is what an empty string, an
-// HTML page or a foreign JSON body produces.
+// HTML page or a foreign JSON body produces, and when the value is longer than
+// maxVersionTextBytes, which no version is.
+//
+// The length is checked FIRST, before any allocation. Checking it after the split
+// would be checking it after the cost.
 func versionComponents(v string) ([]int, bool) {
 	v = strings.TrimSpace(v)
-	if v == "" {
+	if v == "" || len(v) > maxVersionTextBytes {
 		return nil, false
 	}
 	// Cut any pre-release / build suffix: keep the leading run of digits and dots.
@@ -620,6 +651,32 @@ func versionComponents(v string) ([]int, bool) {
 		out = append(out, n)
 	}
 	return out, true
+}
+
+// versionForLog bounds a far-side value on its way into the log, and says so
+// when it cuts.
+//
+// The cut is ANNOUNCED and carries the full length. A silent cut is read as the
+// whole value, and "the extension answered 999…9" is a different diagnosis from
+// "the extension answered two megabytes of nines"; the second one names the
+// fault. slog quotes the attribute, so the value cannot forge a line either way.
+//
+// The tail of a rune split by the byte cap is dropped rather than written: a
+// half-rune reaches the reader as U+FFFD and looks like something the far side
+// sent.
+func versionForLog(v string) string {
+	if len(v) <= maxVersionTextBytes {
+		return v
+	}
+	cut := v[:maxVersionTextBytes]
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
+		cut = cut[:len(cut)-1]
+	}
+	return fmt.Sprintf("%s… (truncated, %d bytes in the answer)", cut, len(v))
 }
 
 // versionProbeGrace is how long the end of a session waits for the extension
@@ -669,6 +726,10 @@ func checkExtensionVersion(ctx context.Context, client *onec.Client) {
 	}
 
 	got := strings.TrimSpace(ver.Version)
+	// shown is what any line below may put in front of a reader. got stays whole
+	// for the comparison, which bounds itself; the LOG does not, and it is a file
+	// openAppendLog restarts once it reaches logRollAtBytes.
+	shown := versionForLog(got)
 	if got == "" {
 		// An answer that carries no version is not a version mismatch. The old code
 		// let the zero value fall through to the comparison and reported got="",
@@ -685,7 +746,7 @@ func checkExtensionVersion(ctx context.Context, client *onec.Client) {
 	if !ok {
 		slog.Error("Extension version NOT verified: /version answered with something that is "+
 			"not a version number, so it cannot be ranked against what this binary requires.",
-			"got", got, "required_at_least", expectedExtensionVersion)
+			"got", shown, "required_at_least", expectedExtensionVersion)
 		return
 	}
 
@@ -701,7 +762,7 @@ func checkExtensionVersion(ctx context.Context, client *onec.Client) {
 		// older one.
 		slog.Error("Extension is OLDER than this build requires, so endpoints it calls may be "+
 			"missing and some tools will fail.",
-			"got", got, "required_at_least", expectedExtensionVersion,
+			"got", shown, "required_at_least", expectedExtensionVersion,
 			"hint", `reinstall the bundled extension `+expectedExtensionVersion+
 				`: mcp-1c --install "path\to\db"`)
 		return
@@ -738,8 +799,8 @@ func checkExtensionVersion(ctx context.Context, client *onec.Client) {
 	if order > 0 {
 		slog.Info("Extension version verified; it is newer than the one this build bundles, "+
 			"which is a supported combination.",
-			"got", got, "bundled", expectedExtensionVersion)
+			"got", shown, "bundled", expectedExtensionVersion)
 		return
 	}
-	slog.Info("Extension version verified.", "got", got)
+	slog.Info("Extension version verified.", "got", shown)
 }
