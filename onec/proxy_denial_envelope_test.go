@@ -11,9 +11,16 @@ import (
 //
 // Конверт отказа приходит не от расширения 1С, а от шлюза, который стоит перед
 // публикацией (издание Advanced ходит через него). Тело у него того же рода, что
-// у конверта расширения: объект JSON, у которого ключ error несёт диагностику,
-// написанную НАШЕЙ стороной, а не веб-сервером и не прокси. Разница только в
-// том, что значением может быть не строка, а вложенный объект {"code","message"}.
+// у конверта расширения: объект JSON, у которого ключ error несёт диагностику.
+// Разница в том, что значением там не строка, а вложенный объект
+// {"code","message"}.
+//
+// СКАЗАНО ЭТО БЫЛО ИНАЧЕ, И ТА ФОРМУЛИРОВКА НЕ ДЕРЖАЛАСЬ. Здесь стояло, что
+// диагностику во вложенной форме написала НАША сторона, а не веб-сервер и не
+// прокси. Про издание Advanced это верно, про форму на проводе — нет: она ничем
+// не выделена, и брандмауэр приложений с балансировщиком шлют её точно так же.
+// Из неверной посылки следовал и вывод, который отрисовщик отказа делал вслух:
+// он подписывал такое тело именем 1С.
 //
 // До этих проверок extensionEnvelopeDetail требовала, чтобы значение ключа error
 // было ИМЕННО строкой, поэтому вложенная форма проваливалась в BodyKindForeign, и
@@ -23,6 +30,15 @@ import (
 // Проверки идут через настоящий Client и настоящий сервер, а не через
 // extensionEnvelopeDetail напрямую: терялась причина на проводе, и закреплять
 // надо именно провод.
+//
+// КЛАСС У ВЛОЖЕННОЙ ФОРМЫ СВОЙ, И ЭТО НЕ ОТКАТ РАСШИРЕНИЯ ПРЕДИКАТА. Причина
+// по-прежнему доезжает и до Detail, и до Error(): ровно это тут и закреплено.
+// Изменилось одно: вложенная форма больше не выдаёт себя за конверт расширения,
+// потому что её строит не расширение. Ту же форму шлют брандмауэр приложений,
+// балансировщик и облачный сервис, а в издании Community своего шлюза нет вовсе,
+// так что здесь такое тело не наше НИКОГДА (см. BodyKindDenial). Подпись под
+// текстом ставит отрисовщик отказа, и BodyKindDenial это то, по чему он узнаёт,
+// что подписывать нечем.
 
 // proxyDenialReasons — коды отказа, каждый из которых обязан дойти до читателя.
 // Список закреплён поимённо, чтобы регрессия не могла пройти молча: пропажа
@@ -51,9 +67,9 @@ func TestStatusError_ProxyDenialReasonSurvives_ObjectForm(t *testing.T) {
 			cl := NewClient(srv.URL, "", "")
 			se := statusErrorFrom(t, callGet(t, cl, "/metadata"))
 
-			if se.BodyKind != BodyKindExtension {
-				t.Fatalf("BodyKind = %q, want %q: конверт отказа шлюза это не чужое тело",
-					se.BodyKind, BodyKindExtension)
+			if se.BodyKind != BodyKindDenial {
+				t.Fatalf("BodyKind = %q, want %q: конверт отказа несёт диагностику и чужим телом "+
+					"не является", se.BodyKind, BodyKindDenial)
 			}
 			if !strings.Contains(se.Detail, c.reason) {
 				t.Errorf("Detail = %q, want it to carry the reason %q", se.Detail, c.reason)
@@ -87,8 +103,8 @@ func TestStatusError_ProxyDenialReasonSurvives_CodeOnly(t *testing.T) {
 			cl := NewClient(srv.URL, "", "")
 			se := statusErrorFrom(t, callGet(t, cl, "/query"))
 
-			if se.BodyKind != BodyKindExtension {
-				t.Fatalf("BodyKind = %q, want %q", se.BodyKind, BodyKindExtension)
+			if se.BodyKind != BodyKindDenial {
+				t.Fatalf("BodyKind = %q, want %q", se.BodyKind, BodyKindDenial)
 			}
 			if se.Detail != c.reason {
 				t.Errorf("Detail = %q, want exactly the reason %q", se.Detail, c.reason)
@@ -135,8 +151,8 @@ func TestStatusError_DenialMessageOnlyIsAnEnvelope(t *testing.T) {
 	cl := NewClient(srv.URL, "", "")
 	se := statusErrorFrom(t, callGet(t, cl, "/metadata"))
 
-	if se.BodyKind != BodyKindExtension {
-		t.Fatalf("BodyKind = %q, want %q", se.BodyKind, BodyKindExtension)
+	if se.BodyKind != BodyKindDenial {
+		t.Fatalf("BodyKind = %q, want %q", se.BodyKind, BodyKindDenial)
 	}
 	if se.Detail != "среда закрыта для этого пользователя" {
 		t.Errorf("Detail = %q, want the message verbatim", se.Detail)

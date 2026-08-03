@@ -331,8 +331,8 @@ func (c *Client) statusError(resp *http.Response, endpoint string) *StatusError 
 		BodyBytes:   len(raw),
 		Truncated:   truncated,
 	}
-	if detail, ok := extensionEnvelopeDetail(raw); ok {
-		e.BodyKind, e.Detail = BodyKindExtension, detail
+	if detail, kind, ok := extensionEnvelopeDetail(raw); ok {
+		e.BodyKind, e.Detail = kind, detail
 	}
 	return e
 }
