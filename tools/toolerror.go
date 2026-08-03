@@ -356,16 +356,55 @@ const remedyQueryBodyRejected = "Так отвечает расширение, �
 // Customer-facing RU: no тире.
 const queryMarkerHint = "Позицию, на которой разбор остановился, 1С отмечает вставкой `<<?>>`.\n"
 
+// eventLogRefusalStatus is the status ЖурналРегистрацииPOST answers with when
+// it refuses for a reason no argument can fix. It is named rather than written
+// as 403 at the branch because it is one half of a pin: the other half is the
+// module itself, and TestEventLogRefusalsAreAnsweredByTheirOwnCause reads the
+// status out of ЖурналРегистрацииPOST and drives the renderer with it, so moving
+// the refusal off this status in the module fails here instead of silently
+// disconnecting the remedy.
+const eventLogRefusalStatus = 403
+
+// THE HANDLER ANSWERS 403 TWICE AND THE TWO ARE DIFFERENT FAILURES.
+//
+// eventLogRightsRefusalPrefix is the gate at the top of ЖурналРегистрацииPOST:
+// ПравоДоступа("Администрирование", Метаданные) is false and the account may not
+// read the journal at all.
+//
+// eventLogUserFilterRefusalPrefix is the one further down, and it is reachable
+// ONLY AFTER the gate has passed, so a caller who reaches it HAS the right. The
+// module says exactly that at the branch and calls the rights cause «единственная
+// заведомо исключённая».
+//
+// Prefixes rather than whole strings because the module splits both diagnostics
+// across source lines and appends ОписаниеОшибки() to the second.
+const (
+	eventLogRightsRefusalPrefix     = "reading the event log requires the Администрирование right"
+	eventLogUserFilterRefusalPrefix = "user filter cannot be resolved"
+)
+
+// isEventLogRightsRefusal reports whether the extension refused because the
+// ACCOUNT may not read the journal.
+func isEventLogRightsRefusal(detail string) bool {
+	return strings.HasPrefix(strings.TrimSpace(detail), eventLogRightsRefusalPrefix)
+}
+
+// isEventLogUserFilterRefusal reports whether the extension refused because it
+// could not resolve the user FILTER, which only a caller with the right can
+// provoke.
+func isEventLogUserFilterRefusal(detail string) bool {
+	return strings.HasPrefix(strings.TrimSpace(detail), eventLogUserFilterRefusalPrefix)
+}
+
 // remedyEventLogNoRight is shown for a 403 that the EXTENSION itself produced on
 // the event-log endpoint, and it exists because a bare 403 reads as «try
 // different arguments» when there are no arguments that work.
 //
-// BOTH producers of that status are rights matters and neither is a filter
-// matter, which is why one text is true for both. ЖурналРегистрацииPOST asks
-// ПравоДоступа("Администрирование", Метаданные) before it looks at the body at
-// all and answers 403 when the answer is false; further down it answers 403 when
-// the user filter cannot be resolved. Nothing the caller puts in the request
-// changes either, so the advice names the account and not the arguments.
+// IT IS KEYED ON THE DIAGNOSTIC AND NOT ONLY ON THE STATUS, and that is the
+// repair rather than a detail. It used to be given to every extension 403 under
+// this heading, which meant the user filter refusal below got it too, and there
+// the text is false twice over: that caller HAS the right, and the filter is the
+// only thing that leads to that line at all.
 //
 // IT DOES NOT PROPOSE DROPPING THE FILTER, and that is the sentence with a
 // measurement behind it. Before the extension gained the check, infobase user
@@ -388,10 +427,31 @@ const remedyEventLogNoRight = "Это отказ по правам учётно�
 	"`--password`, а если они не заданы, логин и пароль берутся из адреса в `--base`.\n" +
 	"2. Выдано ли этой учётной записи право Администрирование. Права выдаёт администратор " +
 	"информационной базы средствами самой 1С.\n" +
-	"3. Текст ошибки выше: тем же кодом отклоняется отбор по пользователю, имя которого " +
-	"разобрать не удалось.\n" +
-	"4. Повторять вызов без отбора бесполезно: без права журнал не читается ни с отбором, ни " +
+	"3. Повторять вызов без отбора бесполезно: без права журнал не читается ни с отбором, ни " +
 	"без него.\n"
+
+// remedyEventLogUserFilterUnresolved is what the OTHER 403 on this endpoint
+// gets, and it exists because the text above is false on that path.
+//
+// ЖурналРегистрацииPOST answers it when НайтиПоИмени raised while resolving the
+// user filter. That line stands AFTER the rights gate, so every caller who
+// reaches it HAS the Администрирование right; the module records the same thing
+// at the branch and stopped naming the right there. It is also reachable only
+// when a user filter was given at all, so it is the one refusal on this endpoint
+// that a different argument really can avoid, which is the opposite of what the
+// rights text says.
+//
+// Customer-facing RU: no тире.
+const remedyEventLogUserFilterUnresolved = "Так расширение отвечает, когда поиск пользователя для " +
+	"отбора не состоялся. Право Администрирование у учётной записи есть: без него обработчик " +
+	"отказал бы раньше, другим текстом и ещё до того, как посмотрел на тело запроса. Причина тут " +
+	"в отборе, а не в правах.\n\n" +
+	"Проверьте:\n" +
+	"1. Значение `user` в запросе: только оно сюда и приводит, без него эта проверка не " +
+	"выполняется вовсе.\n" +
+	"2. Тот же вызов без `user`: журнал читается и без отбора, и этот отказ там не возникает.\n" +
+	"3. Текст ошибки выше: его вернул поиск в списке пользователей информационной базы, и он " +
+	"говорит, почему поиск не состоялся.\n"
 
 // remedyForeignBody deliberately does not show the body. On an on prem IIS a page
 // of that class carries physical paths and the account the pool runs under, and
@@ -701,11 +761,24 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 	if strings.Contains(shown, queryMarker) {
 		p.add(queryMarkerHint)
 	}
-	// A 403 the extension itself built on this endpoint is a rights refusal, and
-	// the caller has to be told that the arguments are not the problem. Only this
-	// branch: a foreign 403 has no established author.
-	if heading == headingEventLog && se.StatusCode == 403 {
-		p.add(remedyEventLogNoRight)
+	// A 403 the extension itself built on this endpoint gets the advice written
+	// for the refusal that produced it. THE STATUS ALONE DOES NOT SAY WHICH ONE:
+	// ЖурналРегистрацииPOST answers 403 twice, the rights gate at the top and the
+	// user filter further down, and the second is reachable only by a caller who
+	// passed the first. Keying on the status alone therefore told a caller who HAS
+	// the right that the right is missing.
+	//
+	// A detail that matches NEITHER gets no cause at all, on purpose. Both texts
+	// state where the caller stands relative to the gate, and a body this side
+	// cannot place cannot be given either statement. Only this branch in any case:
+	// a foreign 403 has no established author.
+	if heading == headingEventLog && se.StatusCode == eventLogRefusalStatus {
+		switch {
+		case isEventLogRightsRefusal(se.Detail):
+			p.add(remedyEventLogNoRight)
+		case isEventLogUserFilterRefusal(se.Detail):
+			p.add(remedyEventLogUserFilterUnresolved)
+		}
 	}
 	if heading == headingQuery {
 		// True on both branches and for the same reason: a body fault is refused

@@ -123,13 +123,19 @@ func TestEventLogRefusalBlamesTheAccountNotTheFilter(t *testing.T) {
 // TestEventLogRightsRemedyStaysOnItsOwnClass is the false-positive control.
 //
 // Advice that appears everywhere is not advice. A 400 under the same heading is
-// a value the caller CAN correct, and a 403 under another heading is a different
-// tool's rights problem with a different remedy.
+// a value the caller CAN correct, a 403 under another heading is a different
+// tool's rights problem with a different remedy, and the OTHER 403 this same
+// handler answers is a filter matter reached only by an account that has the
+// right.
+//
+// EVERY CASE VARIES ONE THING. Each rendering below is the rights refusal with a
+// single field changed, so a negative result is a property of that field and not
+// of a detail string that was never going to match anything.
 func TestEventLogRightsRemedyStaysOnItsOwnClass(t *testing.T) {
 	const marker = "Это отказ по правам учётной записи, а не по отбору"
 
 	sameHeadingOtherStatus := renderFailure(headingEventLog, &onec.StatusError{
-		StatusCode: 400, BodyKind: onec.BodyKindExtension, Detail: "limit must be a number",
+		StatusCode: 400, BodyKind: onec.BodyKindExtension, Detail: eventLogRightsRefusalPrefix,
 	})
 	if strings.Contains(sameHeadingOtherStatus, marker) {
 		t.Errorf("the rights remedy leaked onto a 400, which the caller can fix by editing a "+
@@ -137,10 +143,32 @@ func TestEventLogRightsRemedyStaysOnItsOwnClass(t *testing.T) {
 	}
 
 	otherHeadingSameStatus := renderFailure(headingMetadata, &onec.StatusError{
-		StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: "что угодно",
+		StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: eventLogRightsRefusalPrefix,
 	})
 	if strings.Contains(otherHeadingSameStatus, marker) {
 		t.Errorf("the rights remedy leaked onto another tool's 403:\n%s", otherHeadingSameStatus)
+	}
+
+	// The other 403 of the SAME handler. It stands after the rights gate, so the
+	// caller has the right, and this is the case the status-only key got wrong.
+	sameHeadingOtherCause := renderFailure(headingEventLog, &onec.StatusError{
+		StatusCode: 403, BodyKind: onec.BodyKindExtension,
+		Detail: eventLogUserFilterRefusalPrefix + ": Ошибка при вызове метода контекста",
+	})
+	if strings.Contains(sameHeadingOtherCause, marker) {
+		t.Errorf("the rights remedy leaked onto the user filter 403, which only an account WITH "+
+			"the right can reach:\n%s", sameHeadingOtherCause)
+	}
+
+	// A detail this side cannot place gets no cause at all. Both texts state
+	// where the caller stands relative to the gate, and that cannot be said about
+	// a body whose producer is unknown.
+	unclassified := renderFailure(headingEventLog, &onec.StatusError{
+		StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: "что угодно",
+	})
+	if strings.Contains(unclassified, marker) {
+		t.Errorf("the rights remedy is asserted for a 403 whose diagnostic matches neither "+
+			"refusal the handler can produce:\n%s", unclassified)
 	}
 
 	// A foreign 403 under the event-log heading is NOT the extension refusing:
@@ -155,7 +183,7 @@ func TestEventLogRightsRemedyStaysOnItsOwnClass(t *testing.T) {
 	// CONTROL: the marker is findable at all. Without this every check above is
 	// satisfied by a string that appears nowhere.
 	hit := renderFailure(headingEventLog, &onec.StatusError{
-		StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: "что угодно",
+		StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: eventLogRightsRefusalPrefix,
 	})
 	if !strings.Contains(hit, marker) {
 		t.Fatalf("CONTROL: the marker is absent from the class it belongs to, so the three "+
@@ -172,7 +200,7 @@ func TestEventLogRightsRemedyStaysOnItsOwnClass(t *testing.T) {
 // right, so an answer that proposes it sends the reader round a loop.
 func TestEventLogRightsRemedyDoesNotSuggestDroppingTheFilter(t *testing.T) {
 	text := renderFailure(headingEventLog, &onec.StatusError{
-		StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: "что угодно",
+		StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: eventLogRightsRefusalPrefix,
 	})
 	for _, wrong := range []string{"без отбора бесполезно"} {
 		if !strings.Contains(text, wrong) {
