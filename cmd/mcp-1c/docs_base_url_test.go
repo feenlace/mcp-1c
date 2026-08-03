@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -26,12 +27,22 @@ import (
 // the shipped module for the same reason and in the same shape, counts included:
 // a walk that finds nothing satisfies every "if they differ" check in it.
 //
-// WHAT THIS DOES NOT DO. It does not read the tables out of the markdown. A
-// parser for prose would itself be a thing that can quietly match nothing, and
-// the table wording is Russian sentences, not data. The addresses are listed
-// here and the test asserts each one is PRESENT in the file that documents it,
-// so deleting a row from the docs fails just as loudly as changing the code
-// under it.
+// IT DID NOT USED TO READ THE VERDICT, AND THAT WAS THE HOLE. The reasoning
+// written here was that a parser for prose is itself a thing that can quietly
+// match nothing, so the addresses were listed in Go and the file was only asked
+// whether each address was PRESENT in it. Presence is not agreement: measured, a
+// documented «Отклоняется» changed to «Принимается» left this test passing and
+// still reporting «checked 14 documented addresses (7 refusals)», because the
+// row was still there and the verdict lived in a Go table nobody compared it
+// with.
+//
+// The objection was right about the risk and wrong about the remedy. A parser
+// that matches nothing is caught the same way every other walk in this
+// repository is: by counting what it found and failing on a floor, and by a
+// positive control that drives it against input where it MUST report a
+// difference. Both are below. Only the FIRST WORD of the verdict cell is read;
+// the rest of the sentence stays prose and is not parsed, so the reader is not
+// holding the documentation to a shape.
 // ---------------------------------------------------------------------------
 
 const (
@@ -87,6 +98,73 @@ var baseURLDocClaims = []baseURLDocClaim{
 	// is why the docs tell the reader a bad address surfaces as a connection
 	// failure rather than as a startup refusal.
 	{addr: `http://localhost:8080/hs/mcp -1c`, in: docGettingStarted},
+}
+
+// verdictSection is the heading over the table of addresses and outcomes.
+const verdictSection = "### Какие адреса отклоняются при запуске"
+
+// docVerdict is one row of that table: an address and the outcome the reader is
+// told to expect.
+type docVerdict struct {
+	addr    string
+	refused bool
+	line    int
+}
+
+// parseBaseURLVerdictTable reads the table under verdictSection.
+//
+// It returns the rows and, separately, everything it could not read. Nothing is
+// swallowed: a row whose verdict is neither word is reported rather than
+// skipped, because a verdict this walk cannot read is a verdict nobody checks.
+// Problems are RETURNED rather than reported through testing.T so that the
+// positive control can drive this function against input that must produce them.
+func parseBaseURLVerdictTable(src string) (rows []docVerdict, problems []string) {
+	lines := strings.Split(src, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == verdictSection {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return nil, []string{"the section " + verdictSection + " is not in the file at all"}
+	}
+	inTable := false
+	for i := start + 1; i < len(lines); i++ {
+		s := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(s, "#") {
+			break
+		}
+		if !strings.HasPrefix(s, "|") {
+			if inTable {
+				break
+			}
+			continue
+		}
+		inTable = true
+		cells := strings.Split(strings.Trim(s, "|"), "|")
+		if len(cells) != 2 {
+			continue
+		}
+		addr := strings.Trim(strings.TrimSpace(cells[0]), "`")
+		verdict := strings.TrimSpace(cells[1])
+		// The header row and the separator carry no address.
+		if !strings.HasPrefix(addr, "http") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(verdict, "Отклоняется"):
+			rows = append(rows, docVerdict{addr: addr, refused: true, line: i + 1})
+		case strings.HasPrefix(verdict, "Принимается"):
+			rows = append(rows, docVerdict{addr: addr, refused: false, line: i + 1})
+		default:
+			problems = append(problems, fmt.Sprintf(
+				"line %d states the outcome for %s as %q, which begins with neither "+
+					"«Отклоняется» nor «Принимается»", i+1, addr, verdict))
+		}
+	}
+	return rows, problems
 }
 
 // TestDocsMatchBaseURLBehaviour fails when the documentation describes an
@@ -207,11 +285,33 @@ func TestDocsMatchBaseURLBehaviour(t *testing.T) {
 	}
 
 	// Every file that states the required extension version must state THIS one.
+	//
+	// THE LIST HAS TO CONTAIN THE CURRENT VERSION, and it used to be the one entry
+	// missing. The loop skips whichever entry equals expectedExtensionVersion, so
+	// naming the current version here is inert TODAY and becomes the check the day
+	// the version is bumped: without it, a bump from 0.4.7 leaves every transcript
+	// quoting {"version":"0.4.7"} unwatched, because that number is then stale and
+	// in no list. The assertion under the loop is what forces the list to be
+	// extended along with the constant instead of quietly losing a number.
+	staleVersions := []string{"0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8", "0.4.9"}
+	currentIsListed := false
+	for _, v := range staleVersions {
+		if v == expectedExtensionVersion {
+			currentIsListed = true
+			break
+		}
+	}
+	if !currentIsListed {
+		t.Errorf("the required extension version is %s and it is not in the list of numbers this "+
+			"guard watches (%v). The moment it is bumped, every transcript still quoting %s "+
+			"becomes stale and nothing here looks for it",
+			expectedExtensionVersion, staleVersions, expectedExtensionVersion)
+	}
 	for path, src := range sources {
 		if !strings.Contains(src, expectedExtensionVersion) {
 			continue
 		}
-		for _, stale := range []string{"0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.8", "0.4.9"} {
+		for _, stale := range staleVersions {
 			if stale == expectedExtensionVersion {
 				continue
 			}
@@ -279,8 +379,63 @@ func TestDocsMatchBaseURLBehaviour(t *testing.T) {
 			refused++
 		}
 	}
-	t.Logf("checked %d documented addresses (%d refusals) covering %d sentinels",
-		len(baseURLDocClaims), refused, len(sentinels))
+
+	// -----------------------------------------------------------------------
+	// THE VERDICT THE MARKDOWN STATES, compared with the verdict this file
+	// claims and the code performs. Everything above this point is satisfied by
+	// a row that is merely PRESENT, whatever it says about the address.
+	// -----------------------------------------------------------------------
+	rows, problems := parseBaseURLVerdictTable(sources[docGettingStarted])
+	for _, p := range problems {
+		t.Errorf("%s: %s. A verdict this walk cannot read is a verdict nobody checks",
+			docGettingStarted, p)
+	}
+	// The floor is what stops a reader that matches nothing from agreeing with
+	// everything, which is the objection the old comment raised against reading
+	// the table at all.
+	if len(rows) < 6 {
+		t.Fatalf("the verdict table under %q parsed into %d rows; it has never had fewer than "+
+			"six, so the reader is broken and every comparison below passes on nothing",
+			verdictSection, len(rows))
+	}
+	verdictsRead := 0
+	for _, r := range rows {
+		claims := 0
+		for _, c := range baseURLDocClaims {
+			if c.addr != r.addr {
+				continue
+			}
+			claims++
+			verdictsRead++
+			if r.refused != (c.refusedBy != nil) {
+				docSays, goSays := "принимается", "принимается"
+				if r.refused {
+					docSays = "отклоняется"
+				}
+				if c.refusedBy != nil {
+					goSays = "отклоняется"
+				}
+				t.Errorf("%s:%d tells the reader %s %s, but this guard holds the code to %s. "+
+					"One of the two is wrong and the reader is the one who acts on the table",
+					docGettingStarted, r.line, r.addr, docSays, goSays)
+			}
+		}
+		// A row nobody claims is a row whose verdict is compared with nothing,
+		// which is how a wrong verdict would get in unnoticed.
+		if claims == 0 {
+			t.Errorf("%s:%d documents %s, and baseURLDocClaims says nothing about it, so its "+
+				"verdict is checked against neither this guard nor the code",
+				docGettingStarted, r.line, r.addr)
+		}
+	}
+	if verdictsRead < len(rows) {
+		t.Errorf("only %d documented verdicts were compared against %d table rows",
+			verdictsRead, len(rows))
+	}
+
+	t.Logf("checked %d documented addresses (%d refusals) covering %d sentinels; read %d "+
+		"verdicts out of %d table rows",
+		len(baseURLDocClaims), refused, len(sentinels), verdictsRead, len(rows))
 }
 
 // TestDocsBaseURLGuardCanFail is the positive control. Every assertion above is
@@ -348,5 +503,55 @@ func TestDocsBaseURLGuardCanFail(t *testing.T) {
 	if _, err := os.ReadFile("../../docs/there-is-no-such-file.md"); err == nil {
 		t.Error("reading a missing documentation file succeeded, so the guard could compare " +
 			"against an empty string and pass")
+	}
+
+	// -----------------------------------------------------------------------
+	// THE VERDICT READER. It is a parser for prose, and the objection to writing
+	// one was that such a thing can quietly match nothing and then agree with
+	// everything. So it is driven here against inputs whose answers are known.
+	// -----------------------------------------------------------------------
+	const fixture = verdictSection + `
+
+| Адрес в ` + "`--base`" + ` | Результат |
+|------------------|-----------|
+| ` + "`http://accepted/hs/mcp-1c`" + ` | Принимается. По причине, которая тут не разбирается |
+| ` + "`http://refused/hs/mcp-1c?x=1`" + ` | Отклоняется. Тоже по неразбираемой причине |
+| ` + "`http://unreadable/hs/mcp-1c`" + ` | Наверное сработает |
+
+Текст после таблицы.
+`
+	rows, problems := parseBaseURLVerdictTable(fixture)
+	if len(rows) != 2 {
+		t.Errorf("the reader found %d rows in a fixture with two readable ones: %+v", len(rows), rows)
+	}
+	// It must read the two words apart. A reader that returned the same verdict
+	// for both would agree with any Go table it was compared against.
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.addr] = r.refused
+	}
+	if got["http://accepted/hs/mcp-1c"] {
+		t.Error("the reader calls «Принимается» a refusal, so a flipped verdict would look correct")
+	}
+	if !got["http://refused/hs/mcp-1c?x=1"] {
+		t.Error("the reader calls «Отклоняется» an acceptance, so a flipped verdict would look " +
+			"correct")
+	}
+	// And a cell it cannot read must be REPORTED, never skipped.
+	if len(problems) != 1 {
+		t.Errorf("the reader reported %d problems for one unreadable verdict: %v",
+			len(problems), problems)
+	}
+	// A file with no such section must not come back as "nothing to check".
+	if _, missing := parseBaseURLVerdictTable("# другой документ\n\nбез таблицы\n"); len(missing) == 0 {
+		t.Error("a file without the verdict section produced no complaint, so deleting the " +
+			"section would disable the comparison silently")
+	}
+	// The header and separator rows must not be mistaken for addresses: if they
+	// were, the row count would be satisfied by furniture.
+	for _, r := range rows {
+		if !strings.HasPrefix(r.addr, "http") {
+			t.Errorf("the reader took %q for an address", r.addr)
+		}
 	}
 }
