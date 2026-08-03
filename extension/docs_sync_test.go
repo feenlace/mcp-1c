@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // ---------------------------------------------------------------------------
@@ -27,10 +28,17 @@ import (
 // check that could have caught it was made to agree.
 //
 // WHAT IS COMPARED is the executable statements: comments and blank lines are
-// dropped and runs of whitespace are collapsed. The doc files carry install
-// notes the module has no reason to carry, so comparing them verbatim would fail
-// on prose and teach the next reader to weaken the guard. What must not differ
-// is what the code DOES.
+// dropped and runs of whitespace are collapsed OUTSIDE STRING LITERALS. The doc
+// files carry install notes the module has no reason to carry, so comparing them
+// verbatim would fail on prose and teach the next reader to weaken the guard.
+// What must not differ is what the code DOES.
+//
+// «Outside string literals» is a repair, not a nicety. The reducer used to
+// collapse whitespace everywhere, so a documented install shipping
+// ОтветОшибка(400, "query      is      required") compared equal to the shipped
+// "query is required" and this guard passed. The literal is not decoration: it
+// is the diagnostic on the wire, and tools.isQueryBodyFault matches it by prefix
+// to pick which remedy the caller is given.
 //
 // OMISSION COUNTS AS DRIFT, which is why MCPService.xml is read here and not
 // only the two BSL sources. A comparison of the files that exist cannot see a
@@ -79,11 +87,57 @@ func bslRoutines(src string) map[string][]string {
 }
 
 // bslStatement reduces one source line to the statement on it, or "" when the
-// line carries none. A comment marker inside a string literal would be cut here
-// too; the shipped module has none, which TestBSLStatementReducerWorks pins.
+// line carries none.
+//
+// STRING LITERALS ARE COPIED, NOT REDUCED, and that is the whole of the
+// difference from what this used to be. It was strings.Fields over the text
+// before the first "//", which collapses whitespace EVERYWHERE, including inside
+// a literal. Measured: a docs/bsl copy shipping
+// ОтветОшибка(400, "query      is      required") reduced to the same statement
+// as the shipped "query is required" and TestDocsBSLMatchesShippedModule passed.
+// That is not a cosmetic difference on the wire: tools.isQueryBodyFault matches
+// that answer by PREFIX, so the documented install would have shipped a
+// diagnostic the Go side classifies as a query rejection and answers with the
+// wrong remedy, and the one guard that compares the two copies could not see it.
+//
+// The comment marker is now found outside literals only, which is the same rule
+// applied to the same problem: a "//" inside a literal is data.
 func bslStatement(line string) string {
-	code, _, _ := strings.Cut(line, "//")
-	return strings.Join(strings.Fields(code), " ")
+	var b strings.Builder
+	rs := []rune(line)
+	inString, pendingSpace := false, false
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		if inString {
+			b.WriteRune(r)
+			if r == '"' {
+				// Two quotes in a row are an escaped quote, not the end.
+				if i+1 < len(rs) && rs[i+1] == '"' {
+					b.WriteRune('"')
+					i++
+					continue
+				}
+				inString = false
+			}
+			continue
+		}
+		if r == '/' && i+1 < len(rs) && rs[i+1] == '/' {
+			break
+		}
+		if unicode.IsSpace(r) {
+			pendingSpace = true
+			continue
+		}
+		if pendingSpace && b.Len() > 0 {
+			b.WriteRune(' ')
+		}
+		pendingSpace = false
+		b.WriteRune(r)
+		if r == '"' {
+			inString = true
+		}
+	}
+	return b.String()
 }
 
 // TestDocsBSLMatchesShippedModule fails when a handler documented under
@@ -258,20 +312,39 @@ func TestBSLStatementReducerWorks(t *testing.T) {
 		t.Errorf("bslStatement dropped a statement with no comment on it: %q", s)
 	}
 
-	// The shipped module must not contain a // inside a string literal, because
-	// the reducer would cut there. Checked rather than assumed.
-	raw, err := Source.ReadFile(embeddedModul)
-	if err != nil {
-		t.Fatalf("read embedded %s: %v", embeddedModul, err)
+	// WHAT IS INSIDE A LITERAL IS DATA. This block replaces a check that the
+	// shipped module contains no "//" inside a string literal, which existed
+	// because the reducer would have cut there. The reducer no longer cuts there,
+	// so the constraint on the module is gone and what is pinned instead is the
+	// reducer's own behaviour.
+	for _, c := range []struct{ name, in, want string }{
+		{"double slash inside a literal is not a comment",
+			`    Возврат ОтветОшибка(400, "see http://example/hs"); // хвост`,
+			`Возврат ОтветОшибка(400, "see http://example/hs");`},
+		{"runs of spaces inside a literal survive",
+			`    Возврат ОтветОшибка(400, "query      is      required");`,
+			`Возврат ОтветОшибка(400, "query      is      required");`},
+		{"runs of spaces outside a literal are collapsed",
+			`    Если    А   >   0   Тогда`, `Если А > 0 Тогда`},
+		{"an escaped quote does not end the literal",
+			`    Т = "он сказал ""да""   и ушёл";`, `Т = "он сказал ""да""   и ушёл";`},
+	} {
+		if got := bslStatement(c.in); got != c.want {
+			t.Errorf("%s: bslStatement(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
 	}
-	for i, line := range strings.Split(string(raw), "\n") {
-		code, _, cut := strings.Cut(line, "//")
-		if !cut {
-			continue
-		}
-		if strings.Count(code, `"`)%2 != 0 {
-			t.Errorf("%s:%d has // inside a string literal, which the reducer cuts: %s",
-				embeddedModul, i+1, strings.TrimSpace(line))
-		}
+
+	// AND THE REDUCER MUST STILL DISCRIMINATE. Two lines that differ only inside
+	// a literal have to reduce to different statements. Without this the property
+	// above is satisfied by a reducer that returns every line unchanged, which
+	// would pass the four cases and stop collapsing anything.
+	tight := bslStatement(`    Возврат ОтветОшибка(400, "query is required");`)
+	loose := bslStatement(`    Возврат ОтветОшибка(400, "query      is      required");`)
+	if tight == loose {
+		t.Errorf("two literals with different spacing reduce to the same statement %q, which is "+
+			"the drift TestDocsBSLMatchesShippedModule was measured to miss", tight)
+	}
+	if d := firstDifference([]string{tight}, []string{loose}); d == "" {
+		t.Error("firstDifference finds nothing between two statements that differ inside a literal")
 	}
 }
