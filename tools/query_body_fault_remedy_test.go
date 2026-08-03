@@ -3,6 +3,7 @@ package tools
 import (
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,6 +49,33 @@ var queryBodyFaultAnswers = []string{
 
 // TestQueryBodyFaultGetsAdviceThatFitsIt is the defect.
 func TestQueryBodyFaultGetsAdviceThatFitsIt(t *testing.T) {
+	// COUNTS, because every assertion below lives inside the loop and a loop over
+	// nothing satisfies all of them. Measured: with queryBodyFaultAnswers emptied
+	// this test reported --- PASS with no subtest at all. Its two siblings in this
+	// file and in cmd/mcp-1c/docs_base_url_test.go both state a floor; this one
+	// did not.
+	if len(queryBodyFaultAnswers) < 4 {
+		t.Fatalf("only %d body fault answers are driven; the table has shrunk, and a walk over "+
+			"nothing satisfies every check below", len(queryBodyFaultAnswers))
+	}
+	// AND THE FLOOR IS TIED TO THE SHIPPED CLASSIFIER, not only to a number. Every
+	// prefix isQueryBodyFault redirects on must have an answer driven here,
+	// otherwise a prefix added to queryBodyFaultPrefixes would ship with its
+	// rendering unexercised while the count above stayed satisfied.
+	for _, prefix := range queryBodyFaultPrefixes {
+		covered := false
+		for _, detail := range queryBodyFaultAnswers {
+			if strings.HasPrefix(detail, prefix) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("isQueryBodyFault redirects %q, and no answer driven here starts with it, "+
+				"so what a caller receives for that prefix is not measured anywhere", prefix)
+		}
+	}
+
 	for _, detail := range queryBodyFaultAnswers {
 		t.Run(detail, func(t *testing.T) {
 			text := renderFailure(headingQuery, &onec.StatusError{
@@ -147,13 +175,36 @@ func TestQueryBodyFaultSetMatchesTheShippedModule(t *testing.T) {
 	// bucket and fails below.
 	aboutTheQueryItself := map[string]bool{"Only SELECT queries allowed": true}
 
-	literal := regexp.MustCompile(`ОтветОшибка\(400,\s*"([^"]*)"`)
-	found := literal.FindAllStringSubmatch(body, -1)
-	if len(found) < 5 {
-		t.Fatalf("the walk found %d literal 400 answers in ЗапросPOST; it used to find five, so "+
-			"the extractor is broken and every check below passes on nothing", len(found))
-	}
-	for _, m := range found {
+	// builtFromAnExpression are the 400 answers whose text is NOT a literal.
+	// ОписаниеОшибки() is 1С's own diagnostic out of the Попытка around Новый
+	// Запрос, УстановитьПараметр and Выполнить, so remedyQueryRejected is right
+	// for it and it is not a body fault: by the time it can be raised the body has
+	// parsed and the query has been read out of it.
+	//
+	// THEY ARE PINNED BECAUSE THEY USED TO BE INVISIBLE. The walk was a regexp
+	// requiring a quote right after the comma, so it saw only same expression
+	// literals and this call was not one of them. Measured: adding a second
+	// expression built 400 to ЗапросPOST left this test passing and still
+	// reporting «classified 5 literal 400 answers», because five literals were
+	// still there and the floor only counted those.
+	builtFromAnExpression := map[string]bool{"ОписаниеОшибки()": true}
+
+	args := bslAnswerArguments(body, 400)
+	literals, expressions := 0, 0
+	firstLiteral := regexp.MustCompile(`^"([^"]*)"`)
+	for _, a := range args {
+		m := firstLiteral.FindStringSubmatch(a)
+		if m == nil {
+			expressions++
+			if !builtFromAnExpression[a] {
+				t.Errorf("ЗапросPOST can answer 400 with the expression %s, which this repository "+
+					"has not classified. Its text is decided at run time, so isQueryBodyFault "+
+					"cannot be read to find out which remedy it gets: say here which one is "+
+					"right for it.", a)
+			}
+			continue
+		}
+		literals++
 		text := m[1]
 		switch {
 		case isQueryBodyFault(text):
@@ -163,6 +214,17 @@ func TestQueryBodyFaultSetMatchesTheShippedModule(t *testing.T) {
 				"a body fault nor a statement about the query. It will be given "+
 				"remedyQueryRejected by default, which may be the wrong advice.", text)
 		}
+	}
+	// Both floors, because the two shapes fail independently: a broken literal
+	// reader leaves the expression count intact and the other way round.
+	if literals < 5 {
+		t.Fatalf("the walk found %d literal 400 answers in ЗапросPOST; it used to find five, so "+
+			"the extractor is broken and every check above passes on nothing", literals)
+	}
+	if expressions < 1 {
+		t.Fatalf("the walk found %d expression built 400 answers in ЗапросPOST; it used to find "+
+			"one, ОтветОшибка(400, ОписаниеОшибки()), so the extractor no longer sees the shape "+
+			"it was widened for", expressions)
 	}
 
 	// CONTROL: the classifier is not simply true of everything. The extension's
@@ -178,5 +240,55 @@ func TestQueryBodyFaultSetMatchesTheShippedModule(t *testing.T) {
 			t.Errorf("isQueryBodyFault(%q) = true, so the classifier accepts anything", notABodyFault)
 		}
 	}
-	t.Logf("classified %d literal 400 answers in ЗапросPOST", len(found))
+	t.Logf("classified %d 400 answers in ЗапросPOST: %d literal, %d built from an expression",
+		len(args), literals, expressions)
+}
+
+// bslAnswerArguments returns the first argument of every ОтветОшибка(status, …)
+// call in body, whatever shape that argument has.
+//
+// IT BALANCES PARENTHESES rather than reading to the first ")", because the one
+// argument this walk was blind to is ОписаниеОшибки(), whose own ")" comes
+// first. Quotes are tracked so a ")" inside a diagnostic does not close the
+// call; BSL escapes a quote by doubling it, which toggles the flag off and
+// straight back on and therefore cannot leave the scan inside a literal.
+func bslAnswerArguments(body string, status int) []string {
+	open := regexp.MustCompile(`ОтветОшибка\(\s*` + strconv.Itoa(status) + `\s*,\s*`)
+	var out []string
+	for pos := 0; pos < len(body); {
+		loc := open.FindStringIndex(body[pos:])
+		if loc == nil {
+			break
+		}
+		start := pos + loc[1]
+		depth, inString, i := 1, false, start
+		for ; i < len(body); i++ {
+			c := body[i]
+			if inString {
+				if c == '"' {
+					inString = false
+				}
+				continue
+			}
+			switch c {
+			case '"':
+				inString = true
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+			if depth == 0 {
+				break
+			}
+		}
+		if i >= len(body) {
+			break
+		}
+		// Multi line concatenations are joined so the argument reads as one
+		// expression; the literal reader below only looks at its first fragment.
+		out = append(out, strings.Join(strings.Fields(body[start:i]), " "))
+		pos = i
+	}
+	return out
 }
