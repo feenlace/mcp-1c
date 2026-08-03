@@ -246,11 +246,33 @@ func TestUnstrippableAdviceDoesNotEndInASecondRefusal(t *testing.T) {
 // SplitURLCredentials returns any address without '@', '?' or '#' byte for byte
 // and never parses it, so an address whose only problem is a space is ACCEPTED.
 // The advice named a cause that cannot produce the message it was printed with.
+//
+// WHY NOTHING HERE PINS A url.Parse VERDICT. Which of two sentinels refuses a
+// malformed address turns on a single bit: whether url.Parse rejects it. That
+// bit is net/url's own judgement and it MOVES. Measured on one input,
+// http://[::1x]/hs?x=1: go1.25.0 PARSES it, so step 5 refuses it with
+// ErrBaseURLHasQueryOrFragment; go1.26.0 REJECTS it, so the branch after step 1
+// refuses it with ErrBaseURLUnparsable, because go1.26 validates a bracketed
+// IPv6 literal through netip.ParseAddr. The product is right under both and both
+// messages are true of that address, yet a test naming the sentinel was really
+// asserting the Go version, and it failed CI (which pins the version in go.mod,
+// 1.25.0) while passing on a developer machine with a newer toolchain.
+//
+// So every row below has its sentinel DERIVED from url.Parse as the test runs,
+// the same way ambiguousAtArms re-derives the ambiguity arms instead of reading
+// them out of the refusal. What is asserted is what survives the drift: the
+// address is refused, and the message it is refused with names a cause the
+// address really has.
 func TestUnparsableNamesACauseThatCanProduceIt(t *testing.T) {
 	msg := ErrBaseURLUnparsable.Error()
 
-	// MEASUREMENT 1: a space alone does not produce this refusal. These addresses
-	// all fail url.Parse and are all accepted anyway.
+	// MEASUREMENT 1: a space alone does not produce this refusal. Step 1 hands
+	// these back byte for byte, so they are accepted even when net/url would
+	// refuse them. Not all of them are refused by net/url, and that is the point
+	// of measuring instead of declaring: http://localhost:8080/hs/mcp -1c parses
+	// cleanly on both toolchains above, so a claim that all three fail url.Parse
+	// would be false prose sitting on top of a passing test.
+	unparsedYetAccepted := false
 	for _, spaceOnly := range []string{
 		`http://localhost:80 80/hs/mcp-1c`,
 		`http:// localhost:8080/hs/mcp-1c`,
@@ -260,15 +282,34 @@ func TestUnparsableNamesACauseThatCanProduceIt(t *testing.T) {
 			t.Fatalf("premise broken: %q is now refused (%v); the false cause this test exists for "+
 				"would have become a real one", spaceOnly, err)
 		}
+		if _, err := url.Parse(spaceOnly); err != nil {
+			unparsedYetAccepted = true
+			t.Logf("%q is refused by net/url (%v) and accepted anyway: step 1 never parsed it",
+				spaceOnly, err)
+		}
 	}
-	if _, err := url.Parse(`http://localhost:80 80/hs/mcp-1c`); err == nil {
-		t.Fatal("premise broken: net/url now parses an address with a broken port, so 'accepted without " +
-			"being parsed' is no longer what is being measured")
+	// WHICH of the rows above net/url refuses is net/url's business; that at
+	// least one of them is refused and accepted anyway is the property. Naming
+	// the row would pin the very verdict this test exists to stop pinning.
+	if !unparsedYetAccepted {
+		t.Fatal("premise broken: net/url now parses every address above, so 'accepted without being " +
+			"parsed' is no longer what is being measured; this test needs an address it still refuses")
 	}
 
-	// MEASUREMENT 2: every address that DOES reach this sentinel carries a '?' or
-	// a '#', and none of them carries an '@'. That is the cause the message may
-	// name.
+	// MEASUREMENT 2: every address here is malformed, carries a '?' or a '#' and
+	// carries no '@'. Each one is refused, and the refusal it gets is the one the
+	// code structurally owes it:
+	//
+	//   url.Parse REFUSES it -> the branch after step 1 sees no '@' and returns
+	//                           ErrBaseURLUnparsable;
+	//   url.Parse ACCEPTS it -> nothing between there and step 5 can fire (no '@'
+	//                           means no userinfo and no '@' in the path), so
+	//                           step 5 returns ErrBaseURLHasQueryOrFragment.
+	//
+	// Both are derivations from the two properties asserted per row, not guesses,
+	// and BOTH messages are then held to the same standard of truth: the first
+	// may name '?' and '#' because every row carries one, and the second says the
+	// address contains a '?' or a '#', which is likewise true of every row.
 	reaching := []string{
 		`http://localhost:80 80/hs/mcp-1c?x=1`,
 		`http://localhost:80 80/hs/mcp-1c#x`,
@@ -278,20 +319,51 @@ func TestUnparsableNamesACauseThatCanProduceIt(t *testing.T) {
 		`http://localhost:8080/hs/%zz?x=1`,
 		"http://local\x7fhost/hs?x=1",
 	}
+	sawUnparsable := false
 	for _, in := range reaching {
-		err := CheckURLCredentialResidue(in)
-		if !errors.Is(err, ErrBaseURLUnparsable) {
-			t.Errorf("PREMISE BROKEN: %q is refused with %v, not ErrBaseURLUnparsable", in, err)
+		// The two properties every derivation below rests on, checked rather than
+		// assumed: a row that lost its '?' or grew an '@' would be evidence about
+		// some other sentinel entirely.
+		if !strings.ContainsAny(in, "?#") {
+			t.Errorf("%q carries neither '?' nor '#', so it says nothing about a message that names "+
+				"them as the cause", in)
 			continue
 		}
-		if !strings.ContainsAny(in, "?#") {
-			t.Errorf("%q reaches ErrBaseURLUnparsable without a '?' or a '#'; the message may no longer "+
-				"name them as the cause", in)
-		}
 		if strings.ContainsRune(in, '@') {
-			t.Errorf("%q reaches ErrBaseURLUnparsable with an '@'; credential advice would belong in "+
-				"this message after all", in)
+			t.Errorf("%q carries an '@', so the credential branch takes it and it cannot reach this "+
+				"refusal at all", in)
+			continue
 		}
+
+		err := CheckURLCredentialResidue(in)
+		if err == nil {
+			t.Errorf("%q is malformed and carries a '?' or a '#', yet it is accepted", in)
+			continue
+		}
+
+		if _, parseErr := url.Parse(in); parseErr != nil {
+			if !errors.Is(err, ErrBaseURLUnparsable) {
+				t.Errorf("net/url refuses %q (%v) and it carries no '@', so ErrBaseURLUnparsable is the "+
+					"only refusal that can own it, yet it is refused with %v", in, parseErr, err)
+				continue
+			}
+			sawUnparsable = true
+			continue
+		}
+		if !errors.Is(err, ErrBaseURLHasQueryOrFragment) {
+			t.Errorf("net/url parses %q, so step 5 owns it and ErrBaseURLHasQueryOrFragment is the only "+
+				"refusal that can fire, yet it is refused with %v", in, err)
+			continue
+		}
+		t.Logf("this toolchain parses %q, so it is refused for its '?' or '#' rather than for being "+
+			"unparsable; that message is true of it too", in)
+	}
+
+	// Without one row reaching it, every requirement below would describe a
+	// message this test never saw produced, and would pass for that reason.
+	if !sawUnparsable {
+		t.Fatal("PREMISE BROKEN: no address reached ErrBaseURLUnparsable, so the requirements below are " +
+			"about a refusal nothing here produces; the catalogue needs an address net/url still refuses")
 	}
 
 	// THE VERDICT. The message may not name spaces, because a space alone cannot
