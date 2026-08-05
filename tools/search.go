@@ -151,8 +151,52 @@ type MatchDisplayFunc func(moduleName string) MatchDisplay
 // dump.Index.SearchWithStats should call FormatSearchResultWithStats instead;
 // this signature is kept for callers outside this module.
 func FormatSearchResult(matches []dump.Match, total int, query string, mode dump.SearchMode, displayFn MatchDisplayFunc) string {
-	return FormatSearchResultWithStats(matches, dump.SearchStats{Total: total}, query, mode, displayFn)
+	return FormatSearchResultWithStats(matches,
+		dump.SearchStats{Total: total, Unit: dump.SearchUnitFor(mode)}, query, mode, displayFn)
 }
+
+// countNoun is the RU genitive-plural noun for what a search counted, used
+// wherever the number is printed.
+//
+// THE HEADER USED ONE WORD FOR THREE DIFFERENT QUANTITIES. «(N совпадений)» meant
+// modules in smart and lines in regex/exact, and the reader had no way to tell.
+// Measured on a 13575-file dump, one query «Процедура», limit 500: smart 11788,
+// regex 203718, exact 204795, all rendered by that one sentence. A customer read
+// 2150 off it and went looking for 2150 lines.
+//
+// The unit comes from the SearchStats the engine stamped. A stats value built by
+// hand and never filled in resolves through dump.SearchUnitFor, the single mapping
+// the engine itself uses, rather than through a default here: a default here is the
+// assumption that produced the shared label.
+//
+// Customer-facing RU: no тире.
+func countNoun(unit dump.SearchUnit, mode dump.SearchMode) string {
+	if unit == "" {
+		unit = dump.SearchUnitFor(mode)
+	}
+	if unit == dump.SearchUnitLines {
+		return "строк"
+	}
+	return "модулей"
+}
+
+// smartOneLinePerModuleNote is the route to the results smart cannot give.
+//
+// Smart is a BM25 ranking over DOCUMENTS: it selects modules and this formatter
+// shows one line from each. That is why a customer searching «Процедура» saw line
+// numbers that never went past twenty. They were first occurrences, and the
+// definition he wanted, on line 1198 of a module whose first hit is on line 199,
+// was not in the answer and nothing said it existed.
+//
+// The note is printed only when at least one shown module HAS more matching lines
+// than the one shown, so it appears exactly when it is actionable and an answer
+// that is already complete stays quiet.
+//
+// Customer-facing RU: no тире.
+const smartOneLinePerModuleNote = "> Режим smart ранжирует модули и показывает по одной строке " +
+	"из каждого, поэтому число в заголовке считает модули, а не строки. Чтобы получить все " +
+	"строки, повторите запрос в режиме exact или regex, при необходимости сузив его фильтрами " +
+	"category и module.\n"
 
 // FormatSearchResultWithStats formats search matches into markdown text and
 // keeps the answer consistent with its own count.
@@ -171,12 +215,13 @@ func FormatSearchResult(matches []dump.Match, total int, query string, mode dump
 // reload_dump. Neither remedy does anything for the other cause.
 func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, query string, mode dump.SearchMode, displayFn MatchDisplayFunc) string {
 	var b strings.Builder
+	noun := countNoun(stats.Unit, mode)
 
 	if stats.Unreadable > 0 {
-		fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%d совпадений в индексе, показано %d)\n\n",
-			query, stats.Total, len(matches))
+		fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%s с совпадениями в индексе: %d, показано %d)\n\n",
+			query, noun, stats.Total, len(matches))
 	} else {
-		fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%d совпадений)\n\n", query, stats.Total)
+		fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%s с совпадениями: %d)\n\n", query, noun, stats.Total)
 	}
 
 	if len(matches) == 0 {
@@ -189,8 +234,19 @@ func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, q
 		// are gone, which is a different fact with a different remedy, so the
 		// sentence must not be reused for it.
 		b.WriteString("Ни одного совпадения показать не удалось.\n\n")
-		b.WriteString(searchShortfallNote(stats, 0))
+		b.WriteString(searchShortfallNote(stats, 0, noun))
 		return b.String()
+	}
+
+	// Does any shown module hold matching lines this answer is not showing? Asked
+	// over the matches rather than assumed from the mode, so the note below appears
+	// only where there is something further to fetch.
+	moreLinesHidden := false
+	for _, m := range matches {
+		if m.LinesMatched > 1 {
+			moreLinesHidden = true
+			break
+		}
 	}
 
 	for _, m := range matches {
@@ -210,6 +266,12 @@ func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, q
 		if m.Line == 0 {
 			lineLabel = "строка не определена"
 		}
+		// One line is shown; say how many there are when there are more. A module
+		// with a single matching line has nothing further to offer, and printing
+		// «1» for it would put a number on every row of every ordinary answer.
+		if m.LinesMatched > 1 {
+			lineLabel += fmt.Sprintf(", строк с совпадениями в модуле: %d", m.LinesMatched)
+		}
 
 		if mode == dump.SearchModeSmart && m.Score > 0 {
 			fmt.Fprintf(&b, "### %s%s (%s, score: %.3f)\n", prefix, displayName, lineLabel, m.Score)
@@ -228,7 +290,10 @@ func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, q
 	}
 
 	if stats.Total > len(matches) {
-		b.WriteString(searchShortfallNote(stats, len(matches)))
+		b.WriteString(searchShortfallNote(stats, len(matches), noun))
+	}
+	if moreLinesHidden {
+		b.WriteString(smartOneLinePerModuleNote)
 	}
 
 	return b.String()
@@ -240,9 +305,12 @@ func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, q
 // shown is the number of matches rendered. stats.Unreadable of the hits the limit
 // selected were dropped as unreadable; whatever the index counts beyond those two
 // never left the index at all and is the ordinary limit truncation.
-func searchShortfallNote(stats dump.SearchStats, shown int) string {
+// noun is what stats.Total counted, in the genitive plural, and it is the SAME
+// word the header used: a reader who is told «модулей» above and «совпадений»
+// below has been given two labels for one number and learnt nothing from either.
+func searchShortfallNote(stats dump.SearchStats, shown int, noun string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "> Показано %d из %d совпадений.", shown, stats.Total)
+	fmt.Fprintf(&b, "> Показано %d из %d %s.", shown, stats.Total, noun)
 
 	if stats.Unreadable == 0 {
 		// Nothing was dropped, so the only cause is the caller's own limit and the
@@ -251,9 +319,9 @@ func searchShortfallNote(stats dump.SearchStats, shown int) string {
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, " Ещё %d совпадений отобрано, но не показано: их модули не удалось перечитать, "+
+	fmt.Fprintf(&b, " Ещё %d отобрано, но не показано: эти модули не удалось перечитать, "+
 		"файлы изменились или удалены уже после того, как построен индекс. Число в заголовке взято "+
-		"из индекса и эти совпадения всё ещё учитывает. Выполните выгрузку конфигурации заново "+
+		"из индекса и их всё ещё учитывает. Выполните выгрузку конфигурации заново "+
 		"и вызовите reload_dump.", stats.Unreadable)
 
 	if stats.Total > shown+stats.Unreadable {

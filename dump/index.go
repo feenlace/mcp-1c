@@ -187,6 +187,21 @@ type Match struct {
 	Line    int
 	Context string  // Surrounding lines for context
 	Score   float64 // BM25 relevance score (smart mode only)
+	// LinesMatched is how many lines of this module carry the query, of which
+	// Line is the one shown. SMART MODE ONLY, and it is the answer to a customer
+	// report: smart ranks MODULES and returns one line from each, so a call site
+	// on line 199 was in the answer while the definition on line 1198 of the same
+	// module was not, and nothing said the rest existed. It is 0 in regex and
+	// exact, where every matching line is its own Match and the number would be
+	// the same 1 on every row.
+	//
+	// It is counted by the scan that already runs to choose Line, so it costs
+	// nothing extra, and it counts by the SAME rule that scan uses: a line carries
+	// the query when it holds at least one token of it, or, on the synonym
+	// fallback path, at least one expanded token. For a one-word query, which is
+	// the shape the report came from, that is exactly the number of occurrences by
+	// line.
+	LinesMatched int
 }
 
 // extractContext returns lines around the given index with a context window.
@@ -681,6 +696,55 @@ type SearchStats struct {
 	// out of the scan before it can contribute to Total, so those two numbers
 	// cannot disagree in the first place.
 	Unreadable int
+
+	// Unit says WHAT Total counted. It is not decoration and it is not derivable
+	// by the caller without repeating a mapping that would then be free to drift:
+	// the three modes count two different things and used to hand all three back
+	// as one unlabelled int under one label. Measured on a 13575-file dump with a
+	// single query «Процедура» and limit 500: smart 11788, regex 203718, exact
+	// 204795. A customer read the first kind of number off the header and went
+	// looking for the second kind of thing.
+	//
+	// The zero value is the empty string, which is neither unit. A caller that
+	// receives one (only through a SearchStats it built itself, never from a
+	// search) must resolve it with SearchUnitFor rather than assume a default,
+	// because assuming is what produced the shared label.
+	Unit SearchUnit
+}
+
+// SearchUnit names what a search's Total counted.
+//
+// It is a string and not a bool so the zero value is neither of the two answers:
+// a SearchStats that nobody filled in reads as "not stated" instead of silently
+// reading as "modules", which is exactly the kind of default that let one label
+// stand over three different quantities.
+type SearchUnit string
+
+const (
+	// SearchUnitModules: Total is the number of MODULES that match. Smart search
+	// is a BM25 ranking over documents; its total comes from the index and one
+	// module contributes 1 to it however many of its lines carry the query.
+	SearchUnitModules SearchUnit = "modules"
+	// SearchUnitLines: Total is the number of matching LINES actually read. Regex
+	// and exact scan line by line and count each matching line once, however many
+	// times the query occurs within it.
+	SearchUnitLines SearchUnit = "lines"
+)
+
+// SearchUnitFor is the ONE mapping from mode to unit.
+//
+// It exists so the engine and any renderer answer the question from the same
+// place. searchSmart and searchLineByLine stamp their own results, so a mode
+// whose counting changes changes its stamp at the source; this function is what
+// a caller holding only a mode (the legacy two-value formatter entry point) uses
+// instead of writing the mapping out a second time.
+func SearchUnitFor(mode SearchMode) SearchUnit {
+	switch mode {
+	case SearchModeRegex, SearchModeExact:
+		return SearchUnitLines
+	default:
+		return SearchUnitModules
+	}
 }
 
 // SearchParams holds all parameters for a search query.
@@ -2190,8 +2254,15 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 
 		// Score each line by counting how many distinct query tokens it contains.
 		// Pick the line with the highest score; on ties, prefer the first occurrence.
+		//
+		// The same pass counts how many lines carry the query at all. That number
+		// is what turns "here is a line from this module" into "here is one of N",
+		// and it is free here: the loop already visits every line and already knows
+		// whether this one matched. Computing it anywhere else would mean reading
+		// the module a second time.
 		lineNum := 0
 		bestScore := 0
+		linesMatched := 0
 		for i, line := range lines {
 			ll := strings.ToLower(line)
 			score := 0
@@ -2200,6 +2271,9 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 					score++
 				}
 			}
+			if score > 0 {
+				linesMatched++
+			}
 			if score > bestScore {
 				bestScore = score
 				lineNum = i + 1
@@ -2207,17 +2281,24 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 		}
 
 		// Synonym fallback: if no original token matched any line, try expanded tokens.
+		// The count follows the same fallback, because a count taken under one rule
+		// beside a line chosen under another would describe two different searches.
 		if lineNum == 0 && len(expandedTokens) > len(tokens) {
 			for i, line := range lines {
 				ll := strings.ToLower(line)
+				hit := false
 				for _, tok := range expandedTokens {
 					if strings.Contains(ll, tok) {
-						lineNum = i + 1
+						hit = true
 						break
 					}
 				}
-				if lineNum > 0 {
-					break
+				if !hit {
+					continue
+				}
+				linesMatched++
+				if lineNum == 0 {
+					lineNum = i + 1
 				}
 			}
 		}
@@ -2245,14 +2326,19 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 
 		ctx := extractContext(lines, lineNum-1, 2)
 		matches = append(matches, Match{
-			Module:  hit.ID,
-			Line:    lineNum,
-			Context: ctx,
-			Score:   hit.Score,
+			Module:       hit.ID,
+			Line:         lineNum,
+			Context:      ctx,
+			Score:        hit.Score,
+			LinesMatched: linesMatched,
 		})
 	}
 
-	return matches, SearchStats{Total: int(result.Total), Unreadable: unreadable}, nil
+	return matches, SearchStats{
+		Total:      int(result.Total),
+		Unreadable: unreadable,
+		Unit:       SearchUnitModules,
+	}, nil
 }
 
 // searchLineByLine performs line-by-line search using a matcher function.
@@ -2271,6 +2357,7 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 	if err != nil {
 		return nil, SearchStats{}, err
 	}
+	candidates = distinctNames(candidates)
 
 	var matches []Match
 	total := 0
@@ -2346,7 +2433,44 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 		}
 	}
 
-	return matches, SearchStats{Total: total}, nil
+	return matches, SearchStats{Total: total, Unit: SearchUnitLines}, nil
+}
+
+// distinctNames drops repeats from a candidate list, keeping first-seen order.
+//
+// WHY A SCAN LIST MUST NOT CARRY REPEATS. idx.names holds ONE ENTRY PER DUMP FILE,
+// including the files whose derived module name was already taken by another file;
+// that is how the collapse report counts them (collapsed_keys.go), and it is right.
+// But every map the scan reads through is keyed by the NAME: pathByName holds the
+// path of the file that won the key, and contentForScan can only ever return that
+// one file's bytes. So a collided name in the candidate list made the scan open the
+// SURVIVING file once per collided entry: it counted the survivor's matching lines
+// once per entry and appended the same Match once per entry.
+//
+// MEASURED on a two-root fixture whose files collide on one key: exact search
+// reported Total=2 and rendered the same module, the same line and the same quoted
+// code twice, and both copies were the content of the file that won. The loser's
+// content was in neither copy. The number and the body were both about one file and
+// claimed to be about two.
+//
+// Deduplicating is therefore not "losing" the second file: the second file's content
+// is not reachable through this index at all, which is what the collapse notice on
+// every answer already says. What is dropped is a phantom repeat of the first.
+//
+// Order is preserved because the merge below assembles matches in candidate order
+// and the first-Limit cap is applied over that order; sorting or map iteration here
+// would make an unfiltered scan's output depend on hash ordering.
+func distinctNames(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	out := names[:0:0]
+	for _, n := range names {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
 }
 
 // filterModules returns the subset of module names matching category/module filters.

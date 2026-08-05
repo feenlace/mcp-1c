@@ -10,7 +10,7 @@ import (
 
 // TestFormatSearchResult_HeaderNeverOverclaimsOnItsOwnLine pins the header, and
 // it is deliberately a separate test from the footer checks. A reader, human or
-// LLM, takes the first line as the answer's headline, and «(386 совпадений)»
+// LLM, takes the first line as the answer's headline, and «(модулей с совпадениями: 386)»
 // standing alone above an empty body is the claim that started this. The footer
 // reconciling it three paragraphs later does not unmake the headline.
 //
@@ -37,7 +37,7 @@ func TestFormatSearchResult_HeaderNeverOverclaimsOnItsOwnLine(t *testing.T) {
 			text := FormatSearchResultWithStats(tc.matches, tc.stats, "Процедура", dump.SearchModeSmart, nil)
 			header, _, _ := strings.Cut(text, "\n")
 
-			plain := fmt.Sprintf("(%d совпадений)", tc.stats.Total)
+			plain := fmt.Sprintf("(модулей с совпадениями: %d)", tc.stats.Total)
 			if got := strings.Contains(header, plain); got != tc.wantPlain {
 				t.Errorf("header %q: plain count present=%v, want %v", header, got, tc.wantPlain)
 			}

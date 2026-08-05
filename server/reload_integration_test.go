@@ -21,12 +21,21 @@ import (
 //
 // The header has two shapes and both are spelled out here rather than matched
 // loosely. When every counted match could be rendered it is the plain
-// «(N совпадений)». When some hits were dropped because their module could no
-// longer be read, the header names the number as the index's and prints what the
-// body actually holds next to it, so that the first line of the answer does not
-// assert a count the body cannot support. That is exactly the state
+// «(модулей с совпадениями: N)». When some hits were dropped because their module
+// could no longer be read, the header names the number as the index's and prints
+// what the body actually holds next to it, so that the first line of the answer
+// does not assert a count the body cannot support. That is exactly the state
 // TestIntegration_ReloadDump_DropsADeletedModule puts the server in.
-var searchTotalRe = regexp.MustCompile(`\((\d+) совпадений(?: в индексе, показано \d+)?\)`)
+//
+// The unit noun is captured, not skipped over. searchTotals below calls all three
+// modes and smart counts MODULES while regex and exact count LINES; before the
+// noun existed those three numbers were printed by one sentence, which is what a
+// customer reading 2150 off this header ran into. Capturing it lets the helper
+// assert, over the MCP wire, that each mode names its own quantity.
+var searchTotalRe = regexp.MustCompile(`\((модулей|строк) с совпадениями(?: в индексе)?: (\d+)(?:, показано \d+)?\)`)
+
+// searchUnitNouns is the noun each mode's header must use.
+var searchUnitNouns = map[string]string{"smart": "модулей", "regex": "строк", "exact": "строк"}
 
 // setupReloadDump wires a server over a dump the test owns and can rewrite, using
 // the generation serve path (build + open read-only) that a real `serve` uses.
@@ -100,9 +109,14 @@ func searchTotals(t *testing.T, session *mcp.ClientSession, query string) (smart
 		if m == nil {
 			t.Fatalf("search_code(%s) answer has no match count:\n%s", mode, text)
 		}
-		n, err := strconv.Atoi(m[1])
+		if want := searchUnitNouns[mode]; m[1] != want {
+			t.Errorf("search_code(%s) header calls its number %q, want %q: over the wire the "+
+				"three modes must not label two different quantities the same way:\n%s",
+				mode, m[1], want, text)
+		}
+		n, err := strconv.Atoi(m[2])
 		if err != nil {
-			t.Fatalf("search_code(%s) match count %q: %v", mode, m[1], err)
+			t.Fatalf("search_code(%s) match count %q: %v", mode, m[2], err)
 		}
 		*out[i] = n
 	}

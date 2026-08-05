@@ -80,7 +80,7 @@ func TestFormatSearchResult(t *testing.T) {
 	for _, want := range []string{
 		"Результаты поиска",
 		"Контрагент",
-		"2 совпадений",
+		"модулей с совпадениями: 2",
 		"Справочник.Контрагенты.МодульОбъекта",
 		"строка 42",
 		"score: 0.847",
@@ -160,8 +160,8 @@ func TestFormatSearchResult_Empty(t *testing.T) {
 	if !strings.Contains(text, "Ничего не найдено") {
 		t.Errorf("expected 'Ничего не найдено' in text, got:\n%s", text)
 	}
-	if !strings.Contains(text, "0 совпадений") {
-		t.Errorf("expected '0 совпадений' in text, got:\n%s", text)
+	if !strings.Contains(text, "модулей с совпадениями: 0") {
+		t.Errorf("expected 'модулей с совпадениями: 0' in text, got:\n%s", text)
 	}
 }
 
@@ -176,7 +176,7 @@ func TestFormatSearchResult_Truncated(t *testing.T) {
 
 	text := FormatSearchResult(matches, 150, "Тест", dump.SearchModeSmart, nil)
 
-	if !strings.Contains(text, "Показано 1 из 150 совпадений") {
+	if !strings.Contains(text, "Показано 1 из 150 модулей") {
 		t.Errorf("expected truncation message, got:\n%s", text)
 	}
 	if !strings.Contains(text, "увеличьте limit") {
@@ -271,7 +271,8 @@ func TestNewSearchCodeHandler_WithFilters(t *testing.T) {
 	}
 
 	tc := result.Content[0].(*mcp.TextContent)
-	if !strings.Contains(tc.Text, "1 совпадений") {
+	// The call above asked for mode exact, whose total counts LINES.
+	if !strings.Contains(tc.Text, "строк с совпадениями: 1") {
 		t.Errorf("expected 1 match with category filter, got:\n%s", tc.Text)
 	}
 	if !strings.Contains(tc.Text, "Справочник") {
