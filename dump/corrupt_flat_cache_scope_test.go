@@ -365,3 +365,124 @@ func TestFailedColdBuildDoesNotDestroyTheGenerationsArena(t *testing.T) {
 			"(what is left: %v)", gensig, cpath, flatCacheArtefacts(t, cpath))
 	}
 }
+
+// TestRecoveryDoesNotAnnounceARemovalItDidNotMake.
+//
+// The removed= attribute was already honest: removeFlatCacheContents returns the
+// names it actually unlinked and only those. The SENTENCE beside it was not. It
+// read «removed a flat index cache that could not be opened» on every path,
+// including the one where the list is empty and nothing at all was taken off disk.
+// An operator reads prose, and the prose said the cache was gone while the
+// attribute said nothing had moved.
+//
+// The empty case is reachable without contriving anything: a per-dump cache
+// directory that holds only the generations arena has no flat artefact to remove,
+// and removeFlatCacheContents skips g/ by name.
+func TestRecoveryDoesNotAnnounceARemovalItDidNotMake(t *testing.T) {
+	// A cache directory whose ONLY content is the arena the recovery must preserve.
+	cpath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cpath, generationsDirName, "deadbeef"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := captureLogs(t)
+	if !dropFlatCacheForRecovery(cpath, "test") {
+		t.Fatal("the recovery refused a cache directory nothing else holds")
+	}
+
+	// PREMISE: nothing was unlinked, or the sentence under test is not the one this
+	// case produces.
+	removed := rec.attrValuesAt(slog.LevelError, "removed")
+	if len(removed) != 1 || removed[0] != "" {
+		t.Fatalf("removed= is %v, want exactly one empty value: this fixture is supposed "+
+			"to reach the branch where the recovery unlinked nothing", removed)
+	}
+	// The arena is still there, which is the other half of "nothing was unlinked".
+	if _, err := os.Stat(filepath.Join(cpath, generationsDirName, "deadbeef")); err != nil {
+		t.Fatalf("the generation under g/ was removed after all: %v", err)
+	}
+
+	msgs := strings.Join(rec.atLevel(slog.LevelError), "\n")
+	if strings.Contains(msgs, "removed a flat index cache") {
+		t.Errorf("the recovery announced a removal it did not make, beside an empty "+
+			"removed= attribute:\n%s", msgs)
+	}
+	if !strings.Contains(msgs, "nothing was unlinked") {
+		t.Errorf("the recovery said nothing about having removed nothing:\n%s", msgs)
+	}
+}
+
+// TestRecoveryStillAnnouncesARemovalItDidMake is the positive control for the test
+// above, and it is a separate test so it can fail on its own.
+//
+// «Does not claim a removal» is satisfied by a recovery that has gone silent
+// altogether, which is the defect the announcement was added for. So the same call
+// over a directory that DOES carry a flat artefact must still say so and still name
+// it.
+func TestRecoveryStillAnnouncesARemovalItDidMake(t *testing.T) {
+	cpath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cpath, generationsDirName, "deadbeef"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cpath, "shard_0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := captureLogs(t)
+	if !dropFlatCacheForRecovery(cpath, "test") {
+		t.Fatal("the recovery refused a cache directory nothing else holds")
+	}
+	msgs := strings.Join(rec.atLevel(slog.LevelError), "\n")
+	if !strings.Contains(msgs, "removed a flat index cache") {
+		t.Errorf("a recovery that really did unlink a shard directory did not announce "+
+			"it:\n%s", msgs)
+	}
+	if removed := rec.attrValuesAt(slog.LevelError, "removed"); !slices.Contains(removed, "shard_0") {
+		t.Errorf("removed= is %v and does not name shard_0", removed)
+	}
+	if _, err := os.Stat(filepath.Join(cpath, generationsDirName, "deadbeef")); err != nil {
+		t.Fatalf("the generation under g/ was removed: %v", err)
+	}
+}
+
+// TestRecoveryCannotReachTheLogsBecauseTheyAreOneLevelUp pins the correction to
+// removeFlatCacheContents' own doc comment, which listed «the stderr/server logs»
+// among what it removes.
+//
+// It cannot remove them and never could. openLogFile in cmd/mcp-1c opens
+// server.log and stderr.log against the CACHE DIRECTORY, and cpath is the per-dump
+// subdirectory below it, so a ReadDir of cpath never sees them. The comment
+// described a blast radius the function does not have, which is the same class of
+// error as announcing a removal that did not happen: a sentence about a destruction
+// that was not measured.
+func TestRecoveryCannotReachTheLogsBecauseTheyAreOneLevelUp(t *testing.T) {
+	cacheDir := t.TempDir()
+	logPath := filepath.Join(cacheDir, "stderr.log")
+	if err := os.WriteFile(logPath, []byte("серверный журнал\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The per-dump directory, resolved the way the production code resolves it, so
+	// the "one level up" is the real relationship and not one this test invented.
+	cpath, err := cachePath(t.TempDir(), cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	if filepath.Dir(cpath) != cacheDir {
+		t.Fatalf("premise broken: cpath %s is not one level below the cache dir %s", cpath, cacheDir)
+	}
+	if err := os.MkdirAll(filepath.Join(cpath, "shard_0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if !dropFlatCacheForRecovery(cpath, "test") {
+		t.Fatal("the recovery refused a cache directory nothing else holds")
+	}
+	// PREMISE: the recovery really did run and really did remove something, or the
+	// surviving log below is a log nothing was ever aimed at.
+	if _, err := os.Stat(filepath.Join(cpath, "shard_0")); !os.IsNotExist(err) {
+		t.Fatalf("premise broken: shard_0 survived the recovery (stat err %v)", err)
+	}
+	if _, err := os.Stat(logPath); err != nil {
+		t.Errorf("the recovery removed %s, so it does reach the logs after all: %v", logPath, err)
+	}
+}

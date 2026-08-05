@@ -66,11 +66,16 @@ func cacheShardDirs(cacheDir string) []string {
 }
 
 // removeFlatCacheContents removes the LEGACY flat cache artifacts directly under
-// cpath (shard_* dirs, manifest.json, serve.lock, the stderr/server logs, ...)
-// WITHOUT touching the immutable generations subtree (g/). It is the safe
-// replacement for os.RemoveAll(cpath) on every path that discards a flat cache: a
-// flat rebuild must never destroy a generation a concurrent read-only serve may
-// hold. Best-effort.
+// cpath (shard_* dirs, manifest.json, serve.lock, ...) WITHOUT touching the
+// immutable generations subtree (g/). It is the safe replacement for
+// os.RemoveAll(cpath) on every path that discards a flat cache: a flat rebuild must
+// never destroy a generation a concurrent read-only serve may hold. Best-effort.
+//
+// IT DOES NOT TOUCH THE LOGS, and this comment used to say it did. server.log and
+// stderr.log are opened by openLogFile in cmd/mcp-1c against the CACHE DIRECTORY,
+// while cpath is the per-dump subdirectory one level below it, so a ReadDir of
+// cpath cannot see them and a recovery here has never removed one. Measured on a
+// real run: the log sits beside the per-dump hash directory, not inside it.
 //
 // It RETURNS THE NAMES IT ACTUALLY UNLINKED, and only those: an entry whose
 // removal failed is left out. That is what lets a caller report a destruction
@@ -159,6 +164,29 @@ func dropFlatCacheForRecovery(cpath, why string) bool {
 	}
 
 	removed := removeFlatCacheContents(cpath)
+	if len(removed) == 0 {
+		// THE SENTENCE MATCHES THE ATTRIBUTE OR IT IS NOT WORTH THE ATTRIBUTE. The
+		// message below used to announce a removal unconditionally, so a recovery that
+		// unlinked nothing at all still printed "removed a flat index cache" beside an
+		// EMPTY removed= attribute. An operator reading the prose then believes the
+		// cache is gone, and the whole reason removeFlatCacheContents returns the names
+		// it actually unlinked is that this line must not be true by construction.
+		//
+		// Nothing was unlinked, and the two ways of arriving there are not
+		// distinguished on purpose: a directory holding only g/ has nothing to remove,
+		// and a directory whose every removal failed removed nothing. Both are "nothing
+		// was unlinked", and claiming which one it was would be the same invention in a
+		// smaller size.
+		slog.Error("dump: the flat index cache could not be opened and nothing was unlinked; "+
+			"it will be rebuilt. The immutable generations under g/ were kept",
+			"path", cpath, "removed", "", "reason", why)
+		if showProgress.Load() {
+			fmt.Fprintf(os.Stderr, "Внимание: кэш индекса не открылся, но ничего не было "+
+				"удалено. Индекс будет построен заново. Каталог: %s. Неизменяемые "+
+				"поколения сохранены.\n", cpath)
+		}
+		return true
+	}
 	slog.Error("dump: removed a flat index cache that could not be opened; it will be rebuilt. "+
 		"The immutable generations under g/ were kept",
 		"path", cpath, "removed", strings.Join(removed, " "), "reason", why)
