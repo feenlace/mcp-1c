@@ -34,6 +34,24 @@ var metadataTypes = []MetadataType{
 // directory name (e.g. "Catalog" -> "Catalogs"). Derived from metadataTypes.
 var objectTypeToDumpDir map[string]string
 
+// categoryNames is the SET of strings this package ever puts in the category slot
+// of a key: every Russian display name in dumpDirNames, plus the configuration's
+// own configModulePrefix.
+//
+// It exists because "ext" alone cannot tell a namespaced key from an ordinary one.
+// A dump root may hold a directory literally named «ext» (the customer whose tree
+// started all of this had one), an unknown top-level directory becomes the category
+// slot verbatim, and such a key really can reach five segments. What settles it is
+// the segment AFTER the extension name: only a category this package emits can
+// stand there. See splitModuleKey.
+//
+// DERIVED, never typed. A kind added to metadataTypes joins this set on the same
+// line it joins dumpDirNames, so a new kind cannot silently stop being recognised
+// after an "ext." prefix. It is populated at the END of init below, after every
+// entry has been added, which is why it is not built anywhere else in the package:
+// init order across files would decide whether it was complete.
+var categoryNames map[string]struct{}
+
 // dumpDirNames maps plural English dump directory name to Russian display
 // name (e.g. "Catalogs" -> "Справочник"). Derived from metadataTypes.
 //
@@ -158,4 +176,13 @@ func init() {
 	// Configuration.mdo; admitting it would make dumpRootMarker accept a directory
 	// that can never be the top of a configuration dump.
 	dumpDirNames["Bots"] = "Бот"
+
+	// LAST, and the position is the point: every entry above has to be in place
+	// before the set is taken, and a table completed after this line would leave
+	// its kinds unrecognised behind an "ext." prefix.
+	categoryNames = make(map[string]struct{}, len(dumpDirNames)+1)
+	for _, ru := range dumpDirNames {
+		categoryNames[ru] = struct{}{}
+	}
+	categoryNames[configModulePrefix] = struct{}{}
 }

@@ -1749,23 +1749,64 @@ type moduleNameParts struct {
 	module   string // e.g. "МодульОбъекта"
 }
 
+// extKeyNamespace is the first segment of every key that belongs to a
+// configuration extension: "ext.<Имя>." followed by the ordinary base-config key.
+// The deriver has produced that shape since the Расширения layout existed.
+const extKeyNamespace = "ext"
+
+// splitModuleKey is the ONE place a docID is taken apart into the three slots a
+// caller can filter on.
+//
+// WHY IT IS ONE PLACE. This switch used to be written out three times, in
+// parseModuleName, in NewPathIndex and in PathIndex.AddEntry, and three copies
+// drift: the same filter would answer differently depending on which of them
+// built the entry. Everything that splits a key now goes through here.
+//
+// THE NAMESPACE IS PART OF THE GRAMMAR, not something to be skipped over blindly.
+// Taken naively, "ext.МоёРасш.Справочник.Ном.МодульОбъекта" put the literal "ext"
+// in the category slot and the EXTENSION's name where an object's name belongs,
+// and dropped the two segments that carry the meaning. A caller filtering by
+// «Справочник», which is the vocabulary tools/search.go documents, got nothing
+// back for any extension in any dump.
+//
+// WHAT DECIDES that a key carries a namespace is NOT the leading "ext". A dump
+// root can hold a directory literally named «ext», an unknown top-level directory
+// becomes the category slot verbatim, and "ext/Ном/Forms/Ф/Ext/Form/Module.bsl"
+// derives the five-segment "ext.Ном.Форма.Ф.МодульФормы" with no extension
+// anywhere in it. The discriminator is the segment AFTER the extension name: it
+// has to be a category this package emits (categoryNames, derived from
+// dumpDirNames). «Форма» is a form infix and is not one, so that key is left
+// alone; «Справочник» is one, so the namespace is real.
+//
+// Five segments is the minimum because two are consumed and three are needed to
+// fill every slot, and no real key falls under it: every path a dump can produce
+// derives at least three segments, which is what TestNoTwoSegmentKeysInCorpus
+// pins over the whole key corpus. The one exception that test states, a .bsl
+// lying directly in the dump root, is not a shape 1C emits and keeps the
+// behaviour it already had.
+func splitModuleKey(docID string) (category, objectName, moduleType string) {
+	parts := strings.Split(docID, ".")
+	if len(parts) >= 5 && parts[0] == extKeyNamespace {
+		if _, ok := categoryNames[parts[2]]; ok {
+			parts = parts[2:]
+		}
+	}
+	switch {
+	case len(parts) >= 3:
+		return parts[0], parts[1], parts[len(parts)-1]
+	case len(parts) == 2:
+		return parts[0], parts[1], ""
+	default:
+		return "", docID, ""
+	}
+}
+
 // parseModuleName splits "Справочник.Номенклатура.МодульОбъекта" into parts.
 // For form paths like "Документ.Док.Форма.ФормаДок.МодульФормы", the module type
 // is the last dot-separated segment ("МодульФормы"), not the third segment.
 func parseModuleName(fullName string) moduleNameParts {
-	parts := strings.Split(fullName, ".")
-	switch {
-	case len(parts) >= 3:
-		return moduleNameParts{
-			category: parts[0],
-			name:     parts[1],
-			module:   parts[len(parts)-1],
-		}
-	case len(parts) == 2:
-		return moduleNameParts{category: parts[0], name: parts[1]}
-	default:
-		return moduleNameParts{name: fullName}
-	}
+	category, name, module := splitModuleKey(fullName)
+	return moduleNameParts{category: category, name: name, module: module}
 }
 
 // IndexDoc adds or replaces a document in the index at runtime.

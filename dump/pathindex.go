@@ -2,7 +2,6 @@ package dump
 
 import (
 	"sort"
-	"strings"
 )
 
 // PathEntry represents a single BSL module with its decomposed path components.
@@ -37,22 +36,9 @@ func NewPathIndex(names []string) *PathIndex {
 	}
 
 	for _, name := range names {
-		parts := strings.Split(name, ".")
-
 		var entry PathEntry
 		entry.DocID = name
-
-		switch {
-		case len(parts) >= 3:
-			entry.Category = parts[0]
-			entry.ObjectName = parts[1]
-			entry.ModuleType = parts[len(parts)-1]
-		case len(parts) == 2:
-			entry.Category = parts[0]
-			entry.ObjectName = parts[1]
-		default:
-			entry.ObjectName = name
-		}
+		entry.Category, entry.ObjectName, entry.ModuleType = splitModuleKey(name)
 
 		idx := len(pi.entries)
 		pi.entries = append(pi.entries, entry)
@@ -292,21 +278,9 @@ func (pi *PathIndex) AddEntry(docID string) {
 		return
 	}
 
-	parts := strings.Split(docID, ".")
 	var entry PathEntry
 	entry.DocID = docID
-
-	switch {
-	case len(parts) >= 3:
-		entry.Category = parts[0]
-		entry.ObjectName = parts[1]
-		entry.ModuleType = parts[len(parts)-1]
-	case len(parts) == 2:
-		entry.Category = parts[0]
-		entry.ObjectName = parts[1]
-	default:
-		entry.ObjectName = docID
-	}
+	entry.Category, entry.ObjectName, entry.ModuleType = splitModuleKey(docID)
 
 	pi.addEntryInternal(entry)
 }
@@ -322,13 +296,10 @@ func (pi *PathIndex) AddEntryWithMeta(docID, category, moduleType string) {
 		return
 	}
 
-	parts := strings.Split(docID, ".")
-	objectName := ""
-	if len(parts) >= 2 {
-		objectName = parts[1]
-	} else if len(parts) == 1 {
-		objectName = docID
-	}
+	// The category and the module type are the caller's; the OBJECT NAME is still
+	// derived, and it is derived by the same splitter as everywhere else. A fourth
+	// private copy of that rule is how the first three came to disagree.
+	_, objectName, _ := splitModuleKey(docID)
 
 	pi.addEntryInternal(PathEntry{
 		DocID:      docID,
