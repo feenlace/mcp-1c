@@ -103,6 +103,12 @@ func TestFormatSearchResult_ExactMode(t *testing.T) {
 			Module:  "Модуль.Тест",
 			Line:    1,
 			Context: "Тест",
+			// A SCORE THE RENDERER HAS TO REFUSE BECAUSE OF THE MODE. The gate is
+			// `mode == SearchModeSmart && m.Score > 0`, so with Score left at its zero
+			// value the second conjunct silences the label on its own and the mode half
+			// is never reached: the assertion below then holds on a build whose gate
+			// reads `||`, and the thing it names is not the thing it measures.
+			Score: 0.847,
 		},
 	}
 
@@ -111,6 +117,13 @@ func TestFormatSearchResult_ExactMode(t *testing.T) {
 	// Exact mode should NOT contain "score:".
 	if strings.Contains(text, "score:") {
 		t.Errorf("exact mode should not display score, got:\n%s", text)
+	}
+
+	// CONTROL: the SAME match in smart mode does print it, so the silence above is
+	// the mode deciding and not a formatter that never prints a score at all.
+	if smart := FormatSearchResult(matches, 1, "Тест", dump.SearchModeSmart, nil); !strings.Contains(smart, "score: 0.847") {
+		t.Errorf("smart mode did not print the score, so the exact-mode silence above "+
+			"proves nothing about the mode:\n%s", smart)
 	}
 }
 

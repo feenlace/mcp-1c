@@ -145,6 +145,23 @@ func rootnessOf(ents []os.DirEntry) (isRoot bool, childDirs []string) {
 // one, and saying anything else would be a second answer to a question
 // dumpPathFault in cmd/mcp-1c already answers.
 func InspectDumpRoot(dir string) DumpRootInspection {
+	return inspectDumpRootWith(dir, os.ReadDir)
+}
+
+// inspectDumpRootWith is InspectDumpRoot with its directory reader passed in.
+//
+// IT EXISTS SO THE SORT AT THE END CAN BE MEASURED. os.ReadDir returns entries
+// already sorted by filename, and NestedRoots is a filtered subsequence of them, so
+// wired straight to os.ReadDir the sort can never be OBSERVED to do anything: an
+// assertion that the list comes back sorted holds identically on a build with no
+// sort in it, and did. A reader handed in as an argument, rather than a package
+// variable a test swaps, keeps that seam free of shared mutable state.
+//
+// The sort is kept rather than deleted because os.ReadDir's ordering is the only
+// thing supplying it. A later change to a budgeted read (os.File.ReadDir(n), which
+// makes no ordering promise) would take that away silently, and this is the line
+// that would still be right.
+func inspectDumpRootWith(dir string, readDir func(string) ([]os.DirEntry, error)) DumpRootInspection {
 	var got DumpRootInspection
 
 	// LSTAT BEFORE READDIR, because ReadDir would follow the link and hide the one
@@ -153,7 +170,7 @@ func InspectDumpRoot(dir string) DumpRootInspection {
 		got.RootIsSymlink = true
 	}
 
-	ents, err := os.ReadDir(dir)
+	ents, err := readDir(dir)
 	if err != nil {
 		return got
 	}
@@ -181,7 +198,7 @@ func InspectDumpRoot(dir string) DumpRootInspection {
 			break
 		}
 		scanned++
-		childEnts, err := os.ReadDir(filepath.Join(dir, name))
+		childEnts, err := readDir(filepath.Join(dir, name))
 		if err != nil {
 			continue // unreadable child: not a root as far as anything here can tell
 		}

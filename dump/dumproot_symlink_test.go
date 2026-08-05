@@ -5,6 +5,7 @@ package dump
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -98,11 +99,30 @@ func TestSymlinkedChildrenAreCounted(t *testing.T) {
 	}
 	// And the symlinked child is NOT among the nested roots, which is the agreement
 	// with the walker rather than an oversight.
-	for _, n := range insp.NestedRoots {
-		if n == "снаружи" {
-			t.Error("a symlinked child was listed as a nested dump root, which the indexer " +
-				"would never descend into")
-		}
+	//
+	// IT HAS TO BE ASKED BELOW A PATH THAT IS NOT ITSELF A ROOT. InspectDumpRoot
+	// returns the moment it recognises one and only fills NestedRoots after that
+	// return, so on the tree above the list is nil whatever the child scan does with
+	// a link, and a loop over it is a loop over nothing: with the question asked
+	// here it held on a build that treats a symlinked child as an ordinary
+	// directory.
+	parent := t.TempDir()
+	writeKindDirs(t, filepath.Join(parent, "внутри"), "Catalogs", "Documents")
+	if err := os.Symlink(real, filepath.Join(parent, "снаружи")); err != nil {
+		t.Fatal(err)
+	}
+	below := InspectDumpRoot(parent)
+	if below.IsRoot {
+		t.Fatalf("premise broken: the parent must not be a root itself: %+v", below)
+	}
+	// POSITIVE CONTROL: an ordinary child root IS named, so the absence of the link
+	// below is about the link and not about a list that is empty either way.
+	if !slices.Contains(below.NestedRoots, "внутри") {
+		t.Fatalf("NestedRoots = %v, want the ordinary child root named", below.NestedRoots)
+	}
+	if slices.Contains(below.NestedRoots, "снаружи") {
+		t.Error("a symlinked child was listed as a nested dump root, which the indexer " +
+			"would never descend into")
 	}
 
 	// CONTROL: with no symlink the same shape counts none, so the 1 above is the

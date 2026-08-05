@@ -85,17 +85,22 @@ func TestBothNewNoticesCarryNoDashAndNoDiskContent(t *testing.T) {
 		t.Fatal("control failed: the hostile names carry no dash character")
 	}
 
-	produced := 0
-	for _, layout := range []dump.ExtensionLayoutSummary{
+	layouts := []dump.ExtensionLayoutSummary{
 		{NotRegular: 1}, {Unreadable: 1}, {ReadTruncated: 1}, {NameRejected: 1},
 		{ScanTruncated: true},
 		{NotRegular: 1, Unreadable: 2, ReadTruncated: 3, NameRejected: 4, ScanTruncated: true},
-	} {
+	}
+	produced, doubts := 0, 0
+	for _, layout := range layouts {
 		layout.Dirs = hostile
 		layout.SelfNamed = true
 		layout.Extensions = len(hostile)
+		doubt := indexLayoutDoubtNotice(layout)
+		if doubt != "" {
+			doubts++
+		}
 		msgs := []string{
-			indexLayoutDoubtNotice(layout),
+			doubt,
 			indexWrappedNotice(dump.WrappedPathState{Files: 7, Total: 9}),
 		}
 		for _, m := range msgs {
@@ -121,10 +126,20 @@ func TestBothNewNoticesCarryNoDashAndNoDiskContent(t *testing.T) {
 			}
 		}
 	}
+	// THE COUNT THAT SAYS THE SCAN REACHED THE BRANCHES IT NAMES. The wrapped notice
+	// does not vary with the layout: it is the same non-empty sentence on every turn
+	// of the loop, so counting it into `produced` made the total reach six with every
+	// doubt branch silent. A scan «over every branch» that reports six while checking
+	// none of the six is the shape this file exists to refuse, so the doubt branches
+	// are counted apart and all of them must speak.
+	if doubts != len(layouts) {
+		t.Fatalf("scanned %d doubt notices, want %d: a branch that produced nothing is a "+
+			"branch this scan did not check", doubts, len(layouts))
+	}
 	if produced == 0 {
 		t.Fatal("no branch produced a sentence, so the scan measured nothing")
 	}
-	t.Logf("scanned %d non-empty notices", produced)
+	t.Logf("scanned %d non-empty notices, %d of them doubt branches", produced, doubts)
 }
 
 // TestWrappedNotice_ADumpTwoLevelsUpIsReported is the end-to-end case: a real tree,

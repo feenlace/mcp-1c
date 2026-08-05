@@ -120,10 +120,20 @@ func TestNestedRootsAreNamedAndNeverDescendedInto(t *testing.T) {
 		t.Errorf("NestedRoots = %v, want %v (sorted, and the non-dump sibling excluded)",
 			got.NestedRoots, want)
 	}
-	// Sorted, not map order: a list that reordered between two identical runs
-	// would read as a changing dump.
-	if !slices.IsSorted(got.NestedRoots) {
-		t.Errorf("NestedRoots = %v is not sorted", got.NestedRoots)
+	// SORTED WHATEVER ORDER THE SCAN FOUND THEM IN, which is the only form of this
+	// question that can be answered wrongly. os.ReadDir already returns entries
+	// sorted by filename and NestedRoots is a filtered subsequence of them, so
+	// slices.IsSorted over a real directory read is an assertion no build can fail,
+	// including one with no sort in it at all. The reader is handed in reversed so
+	// the scan really does collect the names the other way round.
+	reversed := func(name string) ([]os.DirEntry, error) {
+		ents, err := os.ReadDir(name)
+		slices.Reverse(ents)
+		return ents, err
+	}
+	if unsorted := inspectDumpRootWith(parent, reversed); !slices.Equal(unsorted.NestedRoots, []string{"ext", "main"}) {
+		t.Errorf("NestedRoots = %v, want [ext main]: the list carries the order the "+
+			"directory happened to be read in", unsorted.NestedRoots)
 	}
 
 	// Negative control: a parent whose children are NOT roots reports none, so the
