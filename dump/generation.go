@@ -181,6 +181,31 @@ const (
 	baselineZapVersion    = 16
 )
 
+// genStamp is the (index schema, zap format) pair a generation declares in its own
+// manifest. It answers "which binary built this", which is what lets the GC tell a
+// peer's generation from this binary's own superseded one. See GCGenerations.
+type genStamp struct{ schema, zap int }
+
+// unknownGenStamp is the stamp of a generation whose manifest cannot be read, or
+// that carries none at all (an empty-dump build). It is deliberately a value no
+// binary can ever stamp, so it groups with nothing and equals no real stamp: unknown
+// provenance is not this binary's provenance.
+var unknownGenStamp = genStamp{schema: -1, zap: -1}
+
+// currentGenStamp is what this binary stamps on everything it builds.
+func currentGenStamp() genStamp {
+	return genStamp{schema: dumpIndexSchemaVersion, zap: zapSegmentVersion}
+}
+
+// generationStamp reads the stamp a generation declares.
+func generationStamp(genDir string) genStamp {
+	m, err := LoadManifest(genDir)
+	if err != nil || m == nil {
+		return unknownGenStamp
+	}
+	return genStamp{schema: m.schemaVersion(), zap: m.zapVersion()}
+}
+
 // generationsDir returns <cpath>/g.
 func generationsDir(cpath string) string {
 	return filepath.Join(cpath, generationsDirName)
@@ -574,6 +599,9 @@ func (idx *Index) attachReadOnlyShards(genDir string, held *readerRegistration) 
 // by a live reader (consulted via each generation's readers/ registry). It never
 // removes:
 //   - the current generation (keepGensig),
+//   - the generationRetainOthers most recently adopted OTHER generations, which is
+//     what stops two binaries on opposite sides of a schema bump from deleting
+//     each other's index (see the retention comment in the body),
 //   - a generation a live reader still holds,
 //   - an in-progress build (a .building-* temp dir),
 //   - a non-adopted directory (no READY sentinel) — reaped instead by
@@ -605,7 +633,12 @@ func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
 		return nil, fmt.Errorf("reading generations dir: %w", err)
 	}
 
-	var removed []string
+	type adopted struct {
+		name  string
+		built time.Time
+		stamp genStamp
+	}
+	var others []adopted
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -617,9 +650,68 @@ func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
 		if name == keepGensig {
 			continue // current generation
 		}
+		// One stat, used for two questions: is this an adopted generation, and when
+		// was it adopted. READY is written LAST and the directory is renamed into
+		// place already holding it, so its timestamp is the moment the generation
+		// became usable.
 		genDir := generationDir(cpath, name)
-		if !generationReadyDir(genDir) {
+		st, statErr := os.Stat(readySentinelPath(genDir))
+		if statErr != nil || st.IsDir() {
 			continue // not an adopted generation
+		}
+		others = append(others, adopted{name: name, built: st.ModTime(), stamp: generationStamp(genDir)})
+	}
+
+	// A GENERATION BUILT UNDER ANOTHER SCHEMA BELONGS TO ANOTHER BINARY, AND IS NOT
+	// THIS ONE'S TO RECLAIM.
+	//
+	// The gensig folds in dumpIndexSchemaVersion, so two binaries on opposite sides
+	// of a schema bump compute DIFFERENT signatures for the same dump in the same
+	// cache dir. Removing every adopted generation that is not the one being served
+	// made those two take turns deleting each other's index, and a binary that is
+	// not running holds no reader claim to stop it. On the 13575-file corpus this
+	// branch measures against, that is a 21 second cold rebuild on every start, for
+	// both binaries, for as long as both are in use.
+	//
+	// Before v4 it could not happen: no schema bump had landed since generations
+	// were introduced, so every binary in the field agreed on the signature and
+	// every foreign generation really was abandoned. The v3 -> v4 bump makes
+	// disagreement the NORMAL shape of an upgrade or a rollback, which is why this
+	// is a rule and not a coincidence.
+	//
+	// THE DISCRIMINATOR IS THE STAMP AND NOT RECENCY. A generation carries its own
+	// manifest, stamped with the schema and zap versions that built it, so "whose
+	// is this" is a question the arena can answer instead of guess. Keeping the N
+	// most recent generations instead would have retained THIS binary's own
+	// superseded generation just as readily, which is the ordinary case the GC
+	// exists to reclaim, and would have doubled every cache dir for nothing.
+	//
+	// Growth stays bounded: only the most recently adopted generation per foreign
+	// stamp is kept, so a peer that rebuilds repeatedly does not accumulate, and a
+	// stamp nobody writes any more disappears as soon as a newer one for the same
+	// stamp appears. A generation whose manifest cannot be read counts as its own
+	// unknown stamp, on the same "unknown is not mine" reading flatCacheSchemaStale
+	// uses, so an arena of unreadable generations retains one of them and no more.
+	mine := currentGenStamp()
+	keepForeign := make(map[genStamp]adopted, 2)
+	for _, o := range others {
+		if o.stamp == mine {
+			continue
+		}
+		cur, seen := keepForeign[o.stamp]
+		if !seen || o.built.After(cur.built) ||
+			(o.built.Equal(cur.built) && o.name > cur.name) { // total order, so ties are not random
+			keepForeign[o.stamp] = o
+		}
+	}
+
+	var removed []string
+	for _, cand := range others {
+		name := cand.name
+		if kept, ok := keepForeign[cand.stamp]; ok && kept.name == name {
+			slog.Debug("GC: keeping a generation built under another index schema",
+				"gen", name, "schema", cand.stamp.schema, "zap", cand.stamp.zap)
+			continue
 		}
 		gone, err := removeUnheldGeneration(gensDir, name)
 		if err != nil {
@@ -1468,19 +1560,44 @@ func flatCacheAdoptable(cpath, dir string) (bool, string) {
 // decomposable (short-I / IO) names were stored NFD and never match an NFC query —
 // so reusing it silently breaks module_code / resolve for those names.
 //
-// It returns true ONLY for a readable, version-compatible manifest whose stamped
-// schema or zap version differs from the current binary's. It returns false (reuse)
-// when the manifest is absent or carries an incompatible manifest version
-// (LoadManifest -> nil): loadFromManifestAndDiff then re-walks the dump with the
-// current schema, so there is nothing trustworthy to gate on. It also returns false
-// on a manifest read error, leaving the existing warm-start path to surface it
-// rather than dropping a cache on a transient I/O hiccup.
+// IT ANSWERS "STALE" FOR A MANIFEST THAT IS THERE AND CANNOT BE USED, and that is
+// a correction rather than caution. It used to answer "reuse" for every way of
+// failing to read one: an I/O error, a corrupt file, an incompatible manifest
+// version. The shards were then opened and the names re-derived by the CURRENT
+// binary, so the served state became this binary's module names over the other
+// binary's shard docIDs. Every hit the index returns from such a shard is a docID
+// GetContent cannot resolve, which the search reports as «файлы изменились или
+// удалены» and answers with the remedy for a changed dump. The condition is a stale
+// cache and it was diagnosed as a moved one.
+//
+// That path had never been exercised on a large scale, because until v4 no schema
+// bump had happened since the stamp was introduced. The v3 -> v4 bump makes the
+// transition happen on every installation at once, which is what turns a latent
+// misreading into a certain one.
+//
+// AN ABSENT MANIFEST STILL READS AS "REUSE", and the two are deliberately not one
+// answer. A cache directory holding shards and no manifest at all is the shape a
+// build leaves behind before it writes one, and those shards were written by the
+// binary that is running; loadFromManifestAndDiff re-walks the dump with the
+// current schema and writes a fresh manifest. Nothing about that state suggests a
+// foreign schema, so dropping it would be a gratuitous cold rebuild.
+//
+// So the discriminator is PRESENCE, asked separately from readability, because
+// LoadManifest deliberately collapses "absent" and "version-incompatible" into the
+// same nil for callers that only want a usable manifest or nothing.
 func flatCacheSchemaStale(cpath string) bool {
 	m, err := LoadManifest(cpath)
-	if err != nil || m == nil {
-		return false
+	if err == nil && m != nil {
+		return m.schemaVersion() != dumpIndexSchemaVersion || m.zapVersion() != zapSegmentVersion
 	}
-	return m.schemaVersion() != dumpIndexSchemaVersion || m.zapVersion() != zapSegmentVersion
+	if _, statErr := os.Stat(manifestPath(cpath)); statErr != nil {
+		return false // no manifest on disk at all
+	}
+	// A manifest file exists and nothing usable came out of it. What schema wrote
+	// the shards beside it is unknown, and "unknown" is not "mine".
+	slog.Info("dump: the flat index cache has a manifest that cannot be read; treating the "+
+		"cache as built under an unknown index schema", "path", cpath, "error", err)
+	return true
 }
 
 // adoptFlatShards adopts the legacy flat shards (shardDirs, all directly under

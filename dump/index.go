@@ -1166,6 +1166,35 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 	idx.pathIndex = NewPathIndex(idx.names)
 	idx.ready.Store(true)
 
+	// THE FLAT CACHE GOES TOO, and only now that the replacement is proven.
+	//
+	// A generation-aware reindex builds a fresh generation and never touches g/,
+	// which is the safety property it exists for. What it never touched either is
+	// the LEGACY FLAT CACHE beside g/ under the same per-dump cache dir, and that
+	// flat cache is what NewIndex's warm-start path opens on the next start. So
+	// --reindex produced a correct generation that the local open never reads and
+	// left the cache the user asked to discard exactly where it was: measured, a
+	// flat manifest carrying a fabricated docID is replayed again on the very next
+	// start after a --reindex.
+	//
+	// The removal is guarded by the serve lock and preserves g/, because the reason
+	// the reindex stopped doing os.RemoveAll(cpath) has not gone away: a flat cache
+	// another live process has memory-mapped must not be unlinked under it. A lock
+	// held by anyone but us means the flat cache stays and the reindex is simply
+	// not durable for that start, which is the same outcome as today and strictly
+	// better than corrupting a peer.
+	//
+	// It runs AFTER the attach and the name load, so a reindex that failed to
+	// produce a usable generation leaves the old flat cache in place as the
+	// fallback it has always been.
+	if pid, present := readCacheLock(cpath); !present || pid == os.Getpid() {
+		removeFlatCacheContents(cpath)
+	} else {
+		slog.Info("reindex: leaving the legacy flat cache in place because another process "+
+			"holds it; the fresh generation is served, but this cache dir still carries the "+
+			"old flat index", "path", cpath, "holder_pid", pid)
+	}
+
 	// Now that a fresh generation is current, reap old, unheld generations.
 	if dropped, gcErr := GCGenerations(dir, cacheDir, gensig); gcErr != nil {
 		slog.Warn("reindex: GC of old generations failed", "error", gcErr)
