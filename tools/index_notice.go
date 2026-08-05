@@ -3,13 +3,24 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/feenlace/mcp-1c/dump"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// The index-protection notice: the user-visible half of "the server never SILENTLY
-// serves an index generation it could not protect".
+// The standing index notices: the user-visible half of "the server never SILENTLY
+// serves an index it could not protect, or one that has lost module content".
+//
+// There are two of them now, and they go through ONE wrapper on purpose. The
+// wrapper is still called withIndexProtectionNotice, which records the condition
+// that came first rather than the set it carries today; a second wrapper would
+// eventually disagree with this one about ordering, about the error path, and
+// about which return paths it covers, and the whole reason this is a wrapper and
+// not a formatter is that a wrapper has no return path to miss.
+//
+// The first condition, protection, is documented immediately below. The second,
+// a collapsed keyspace, is documented at indexCollapseNotice.
 //
 // WHY IT IS HERE AND NOT ONLY IN THE LOG. The dump package already reports an
 // unprotected serve at slog.Error (claimOrServeUnprotected). That line goes into a
@@ -92,6 +103,65 @@ func indexProtectionNotice(st dump.UnprotectedState) string {
 	return indexUnprotectedNotice
 }
 
+// indexCollapseNotice is the second standing condition: the index derived one
+// module name for more than one dump file, so the later file overwrote the
+// earlier one in every map the index reads through and that content is not served
+// at all. ModuleCount still counts both, which is why the server cannot be left
+// to answer with the number alone.
+//
+// WHY IT IS BUILT AND NOT A CONSTANT, unlike the two above. Those two say
+// everything they have to say in a fixed sentence; this one is worth reading only
+// with its numbers in it. A reader deciding whether to re-point a path needs to
+// know whether a couple of files are missing or most of the dump: measured on the
+// customer-shaped corpus, a root pointed one level too high lost 10839 modules out
+// of 13575. A notice that said "some content" would push that reader back to the
+// log this whole mechanism exists to replace.
+//
+// WHAT IT DOES NOT SAY. It does not name a cause. The server observed a
+// collision; it did not observe why there was one. The path check below is
+// offered as something to VERIFY, in the imperative, and not as a diagnosis,
+// because the one cause ever measured (a --dump pointed one level too high) is
+// now corrected automatically for every metadata kind this build knows, and what
+// survives is by definition the cases nobody has characterised.
+//
+// The sample is bounded by the dump package; the counts are not. A truncated list
+// beside an exact count is a reader who can act; a rounded count is a reader who
+// cannot.
+//
+// Customer-facing RU: no тире.
+func indexCollapseNotice(st dump.CollapsedKeyState) string {
+	if st.Files <= 0 {
+		return ""
+	}
+	notice := fmt.Sprintf("> ВНИМАНИЕ: индекс выгрузки потерял часть содержимого. "+
+		"Файлов, чьё имя модуля уже было занято другим файлом: %d. Совпавших имён: %d.",
+		st.Files, st.Keys)
+	if len(st.Sample) > 0 {
+		notice += " Например: " + strings.Join(st.Sample, ", ") + "."
+	}
+	notice += " Такие файлы сервер считает в общем числе модулей, но выдать их содержимое " +
+		"не может. Проверьте, что путь в `--dump` указывает на сам корень выгрузки, то есть " +
+		"на каталог, внутри которого лежат `Catalogs`, `Documents` и `Ext`, а не на каталог " +
+		"выше него. После исправления пути вызовите `reload_dump`.\n"
+	return notice
+}
+
+// indexNotices assembles every standing condition that is TRUE of the index into
+// the block that goes in front of an answer, or "" when there is nothing to say.
+//
+// Both states arrive as arguments, each already read in ONE atomic load by the
+// caller, so a reload landing between them cannot produce a sentence about one
+// generation next to a number from another.
+//
+// ORDER IS FIXED AND IS PROTECTION FIRST. That one says the answer below can be
+// removed from under the reader while they are reading it, which changes what
+// they should do next; the collapse says part of the dump is missing, which
+// changes what they should believe about the answer. Both matter, and a stable
+// order is what lets a reader who sees these lines every call learn to skim them.
+func indexNotices(prot dump.UnprotectedState, collapse dump.CollapsedKeyState) string {
+	return indexProtectionNotice(prot) + indexCollapseNotice(collapse)
+}
+
 // withIndexProtectionNotice wraps an index-backed tool handler so that every
 // response it produces carries indexUnprotectedNotice while the attached generation
 // is unprotected, and none of them carries it otherwise.
@@ -123,7 +193,7 @@ func indexProtectionNotice(st dump.UnprotectedState) string {
 func withIndexProtectionNotice(index *dump.Index, h mcp.ToolHandler) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		res, err := h(ctx, req)
-		notice := indexProtectionNotice(index.Unprotected())
+		notice := indexNotices(index.Unprotected(), index.CollapsedKeys())
 		if notice == "" {
 			return res, err
 		}
