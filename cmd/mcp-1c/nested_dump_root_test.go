@@ -430,3 +430,61 @@ func TestMainReportsNestedDumpRootsBeforeServing(t *testing.T) {
 		t.Errorf("reportDumpRootAndLayout is handed %v, want *dumpDir", star.X)
 	}
 }
+
+// TestASymlinkedDumpPathIsReportedRatherThanApproved is the delivery half of R17.
+//
+// The inspection follows the link and may report a perfectly good dump root; the
+// indexer does not follow it and indexes nothing. The sentence for that path must
+// be about the link, not about the target, because every other sentence this
+// function can produce is true of the target and useless about the path.
+func TestASymlinkedDumpPathIsReportedRatherThanApproved(t *testing.T) {
+	symlinked := dump.DumpRootInspection{IsRoot: true, RootIsSymlink: true}
+	got := nestedDumpRootMessage(symlinked, dump.ExtensionLayoutSummary{})
+	if got == "" {
+		t.Fatal("a symlinked --dump that inspects AS A ROOT produced nothing, so a path " +
+			"that indexes zero modules is declared correct")
+	}
+	if !strings.Contains(got, "символьная ссылка") {
+		t.Errorf("the sentence does not say what is wrong with the path: %q", got)
+	}
+	if !strings.Contains(got, "ни один модуль") {
+		t.Errorf("the sentence does not say what the consequence is: %q", got)
+	}
+
+	// It overrides the nested-root sentence too: a symlink whose target holds roots
+	// still indexes nothing, so naming them would be advice about a path that
+	// cannot work.
+	withRoots := dump.DumpRootInspection{RootIsSymlink: true, NestedRoots: []string{"a", "b"}}
+	if nestedDumpRootMessage(withRoots, dump.ExtensionLayoutSummary{Extensions: 2}) != got {
+		t.Error("a symlinked path with roots under it got the nested-root sentence, which " +
+			"describes the target rather than the path")
+	}
+
+	// A real root with symlinked children says something narrower: what is lost is
+	// those subtrees, not everything.
+	children := nestedDumpRootMessage(
+		dump.DumpRootInspection{IsRoot: true, SymlinkedChildren: 3}, dump.ExtensionLayoutSummary{})
+	if children == "" {
+		t.Error("a root with symlinked children produced nothing; the walk skips them silently")
+	}
+	if children == got {
+		t.Error("a root with symlinked children got the whole-path sentence")
+	}
+	if !strings.Contains(children, "3") {
+		t.Errorf("the count is missing: %q", children)
+	}
+
+	// AND A PLAIN ROOT IS STILL SILENT.
+	if s := nestedDumpRootMessage(dump.DumpRootInspection{IsRoot: true}, dump.ExtensionLayoutSummary{}); s != "" {
+		t.Errorf("an ordinary correct root produced %q", s)
+	}
+
+	// No тире in any of them.
+	for _, m := range []string{got, children} {
+		for _, r := range []rune{'—', '–', '‒', '―', '−'} {
+			if strings.ContainsRune(m, r) {
+				t.Errorf("customer-facing RU carries U+%04X: %s", r, m)
+			}
+		}
+	}
+}

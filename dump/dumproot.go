@@ -89,6 +89,29 @@ type DumpRootInspection struct {
 	// NestedRoots may be short. It is carried rather than dropped because "no root
 	// below this" and "no root among the first 64" are different answers.
 	Truncated bool
+	// RootIsSymlink reports that the inspected path is itself a symbolic link.
+	//
+	// IT IS NOT A DETAIL, IT IS THE DIFFERENCE BETWEEN A CORRECT PATH AND AN EMPTY
+	// INDEX. os.ReadDir follows the link, so everything else in this struct
+	// describes the TARGET and can report a perfectly good dump root; the indexer
+	// does not, because filepath.WalkDir lstats its root and a symlink is not a
+	// directory, so the walk ends before it visits one file. Measured: a symlink to
+	// a two-module dump inspects as IsRoot and indexes 0 of 2 modules. Saying
+	// nothing about it is declaring a path correct that indexes nothing at all.
+	//
+	// The walk is not changed here. Making it descend means resolving the dump
+	// directory once, at index creation, and that path feeds filepath.Rel, the
+	// containment check and the generation signature alike; it is a change to what a
+	// dump root IS, not a diagnostic. So the diagnosis is what this carries, and the
+	// remedy it points at is the real path.
+	RootIsSymlink bool
+	// SymlinkedChildren is how many immediate children are symbolic links.
+	//
+	// They are invisible to both sides and invisible in the same way: os.ReadDir
+	// reports a symlink as a non-directory, so a symlinked child that is a dump root
+	// is never listed in NestedRoots, and WalkDir does not descend into one either.
+	// The two agree, and both stay quiet, which is why the count is carried.
+	SymlinkedChildren int
 	// ReadDirs and Entries are what the inspection actually spent.
 	ReadDirs int
 	Entries  int
@@ -124,12 +147,23 @@ func rootnessOf(ents []os.DirEntry) (isRoot bool, childDirs []string) {
 func InspectDumpRoot(dir string) DumpRootInspection {
 	var got DumpRootInspection
 
+	// LSTAT BEFORE READDIR, because ReadDir would follow the link and hide the one
+	// fact the indexer disagrees with this inspection about.
+	if lst, err := os.Lstat(dir); err == nil && lst.Mode()&os.ModeSymlink != 0 {
+		got.RootIsSymlink = true
+	}
+
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return got
 	}
 	got.ReadDirs = 1
 	got.Entries = len(ents)
+	for _, e := range ents {
+		if e.Type()&os.ModeSymlink != 0 {
+			got.SymlinkedChildren++
+		}
+	}
 
 	isRoot, childDirs := rootnessOf(ents)
 	if isRoot {

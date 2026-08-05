@@ -589,7 +589,26 @@ func dumpPathFault(dumpDir string) error {
 //
 // Customer-facing RU: no тире.
 func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLayoutSummary) string {
+	if insp.RootIsSymlink {
+		// FIRST, AND IT OVERRIDES EVERYTHING BELOW. The inspection followed the link
+		// and may be about to report a perfectly good dump root; the indexer will not
+		// follow it and will index nothing. Measured: a symlink to a two-module dump
+		// inspects as a root and yields 0 modules. Every other sentence in this
+		// function would be true of the target and useless about the path.
+		return "путь в --dump это символьная ссылка. Индексатор внутрь ссылки не " +
+			"заходит, поэтому в индекс не попадёт ни один модуль, даже если по ссылке " +
+			"лежит правильная выгрузка. Укажите настоящий путь к каталогу выгрузки."
+	}
 	if insp.IsRoot {
+		if insp.SymlinkedChildren > 0 {
+			// A root that is correct, with children the walk will skip. Worth one
+			// sentence and not the one above: what is lost is those subtrees, not
+			// everything.
+			return "путь в --dump указывает на корень выгрузки, но среди его подкаталогов " +
+				"есть символьные ссылки, штук: " + strconv.Itoa(insp.SymlinkedChildren) +
+				". Индексатор внутрь ссылок не заходит, поэтому их содержимое в индекс не " +
+				"попадёт. Если модули лежат по ссылке, укажите настоящий путь."
+		}
 		return ""
 	}
 	if len(insp.NestedRoots) == 0 {
