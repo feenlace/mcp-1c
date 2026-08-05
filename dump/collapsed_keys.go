@@ -37,10 +37,17 @@ import "slices"
 // one pass. Persisting it would put a new field in the generation manifest, which
 // is the on-disk format the BUMP PROTOCOL in generation.go governs: that would
 // force dumpIndexSchemaVersion up and invalidate every warm generation on every
-// installation, to carry a number that can be recomputed for free. Since the
-// anchor scan moves no key either (the pinned digest in module_key_guard_test.go
-// is unchanged), NOTHING in this change requires a schema bump or a cache
-// invalidation.
+// installation, to carry a number that can be recomputed for free. That reasoning
+// is about THIS report and is unaffected by anything below it: a recomputed number
+// needs no format, so it needs no bump.
+//
+// dumpIndexSchemaVersion HAS since gone from 3 to 4, and it was not this file that
+// moved it. Two later changes did: dumpDirNames gained the kinds a configuration
+// declares, and the wrongly rooted user whose collapsed DocIDs are PERSISTED in a
+// generation manifest would otherwise never receive the anchor fix at all. The
+// argument for that bump lives at dumpIndexSchemaVersion in generation.go and the
+// proof of it in cache_invalidation_test.go; what is said here remains what it
+// said, which is that the collapse REPORT costs no bump of its own.
 
 // collapsedKeySampleLimit caps how many colliding module names are carried for
 // display. The COUNTS are never capped: a report that rounded off the number of

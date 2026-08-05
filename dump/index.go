@@ -320,8 +320,14 @@ const formSubdirName = "Form"
 // at some index > 0, because every object subtree carries an inner "Ext"
 // directory. Anchoring on the first marker alone would re-key almost the entire
 // corpus. With the shape check, anchorIndex is 0 on all 13575 — the scan is a
-// measured no-op at a correctly pointed root, and the pinned key digest in
-// module_key_guard_test.go does not move.
+// measured no-op at a correctly pointed root, and adding it moved no pinned key.
+//
+// bslUnwrappedCorpusDigest HAS moved since, and it was not this scan that moved
+// it: completing dumpDirNames re-keyed one synthetic corpus row. The no-op claim
+// above is still checked, by the anchorIndex assertion inside
+// TestUnwrappedCorpusDigestDidNotMoveWithTheAnchorScan rather than by the digest
+// number, which is why that assertion is in the test beside the digest and not
+// folded into it.
 //
 // EVERY PREDICATE READS THE PACKAGE'S EXISTING TABLES (dumpDirNames,
 // configModuleDirName, extensionDirName, configModuleNames, moduleNameSuffixes,
