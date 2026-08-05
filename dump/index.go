@@ -708,6 +708,14 @@ type Index struct {
 	// comes back, and every tool call reads it on the request goroutine. An atomic
 	// keeps the READ off mu, so a tool call never contends with a reload for it.
 	unprotected atomic.Pointer[UnprotectedState]
+	// collapsed carries how much of the dump was lost to module-name collisions in
+	// the load currently published, or the zero value before anything is loaded.
+	//
+	// It is an atomic for the same reason unprotected is: it is written by the
+	// background build goroutine and by a reload's generation swap, and read on
+	// every MCP tool request goroutine. An atomic keeps that read off mu, so a tool
+	// call never contends with a reload for it. See collapsed_keys.go.
+	collapsed atomic.Pointer[CollapsedKeyState]
 	// cacheDir is the cache location this index was opened with, in NewIndex
 	// semantics (empty = the platform cache dir). Reload needs it to build the
 	// replacement generation under the SAME cache the current one lives in;
@@ -1603,6 +1611,10 @@ func (idx *Index) loadBSLFiles(dir string) error {
 	// are unaffected because they are keyed by name/relPath.
 	slices.Sort(idx.names)
 
+	// Count what the map writes above silently swallowed. Every duplicate name in
+	// idx.names is one file whose content the previous line's maps no longer hold.
+	idx.noteCollapsedKeys(idx.names)
+
 	return nil
 }
 
@@ -1648,6 +1660,7 @@ func (idx *Index) loadBSLPaths(dir string) error {
 	if err != nil {
 		return fmt.Errorf("walking dump directory: %w", err)
 	}
+	idx.noteCollapsedKeys(idx.names)
 	return nil
 }
 
@@ -2307,6 +2320,11 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 		idx.pathToDocID[relPath] = docID
 	}
 	slices.Sort(idx.names)
+	// The manifest is keyed by relative path and carries one DocID per entry, so
+	// two entries sharing a DocID are exactly the collapse the cold build would
+	// have produced from the same files. Recorded here, before the diff, because
+	// the diff can only ADD to the picture and its additions are dedup-guarded.
+	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 
 	// Diff walks the filesystem once to detect changes.

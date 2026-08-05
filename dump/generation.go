@@ -896,6 +896,10 @@ func (idx *Index) loadNamesReadOnly(genDir string) error {
 		idx.pathToDocID[relPath] = docID
 	}
 	slices.Sort(idx.names)
+	// A generation's manifest carries one DocID per relative path, so duplicate
+	// DocIDs are the same collapse a cold build over those files would produce.
+	// Recorded here so a read-only serve reports it exactly as a build does.
+	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 	return nil
 }

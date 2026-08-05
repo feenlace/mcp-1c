@@ -372,6 +372,11 @@ func (idx *Index) swapGeneration(
 	idx.setUnprotected(reg.protectionState())
 	idx.gensig = gensig
 	idx.names = names
+	// The collapse report follows the generation, in the same critical section that
+	// publishes it, exactly as the protection notice above does. A report left
+	// describing the RETIRED generation would state a number about a dump nobody is
+	// serving any more, and a reload is precisely how an operator fixes a collapse.
+	idx.noteCollapsedKeys(names)
 	idx.pathByName = pathByName
 	idx.pathToDocID = pathToDocID
 	idx.pathIndex = pathIndex
