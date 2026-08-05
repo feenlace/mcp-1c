@@ -948,6 +948,15 @@ func fenced(text string) string {
 
 // fenceLen is the longest run of backticks in text plus one, never below three.
 func fenceLen(text string) int {
+	return max(3, longestBacktickRun(text)+1)
+}
+
+// longestBacktickRun is the length of the longest run of consecutive backticks
+// in text. It is the one measurement both containers in this package are built
+// on: a block fence (fenceLen) and an inline code span (inlineCode) are each
+// closed by a run of their own length, so each needs a delimiter longer than
+// anything the payload carries.
+func longestBacktickRun(text string) int {
 	longest, run := 0, 0
 	for _, r := range text {
 		if r == '`' {
@@ -959,10 +968,82 @@ func fenceLen(text string) int {
 		}
 		run = 0
 	}
-	if longest < 3 {
-		return 3
+	return longest
+}
+
+// headingBreakReplacer maps every rune a markdown renderer may treat as a
+// MANDATORY line break onto a visible marker.
+//
+// It is the ONLY rewriting inlineCode does, and the set is exactly the runes for
+// which no container exists. A code span holds every markdown-active character
+// on its line, so a hash, a bracket, an angle, a pipe, an asterisk, a backtick
+// and a dash all stay exactly as the customer typed them. A LINE BREAK is
+// different in kind: an inline span lives on one line, so a break ends the
+// construct whatever it is wrapped in, and the choice is to mark it or to let
+// the text leave the place it was printed into.
+//
+// The marker is U+FFFD rather than a space or nothing, for the reason a name
+// differs from a diagnostic: a reader should be able to see that the name is
+// wrong instead of reading one that was quietly repaired into something
+// plausible. On the names this actually runs over the replacer is a no-op, since
+// no ordinary 1С object name carries a line break.
+//
+// CRLF is listed FIRST so a Windows line ending becomes ONE marker rather than
+// two: strings.Replacer compares its old strings in argument order and never
+// overlaps a match.
+//
+// The seven spellings are CR, CRLF, LF, VT, FF, U+0085 NEL, U+2028 and U+2029.
+// The last three are the ones that matter most here, because strings.Split(s,
+// "\n") cannot see them: a guard that counted lines would report a name carrying
+// U+2028 as perfectly contained.
+var headingBreakReplacer = strings.NewReplacer(
+	"\r\n", "\ufffd",
+	"\r", "\ufffd",
+	"\n", "\ufffd",
+	"\v", "\ufffd",
+	"\f", "\ufffd",
+	"\u0085", "\ufffd",
+	"\u2028", "\ufffd",
+	"\u2029", "\ufffd",
+)
+
+// inlineCode renders text as a markdown inline code span that stays on its line
+// and cannot be closed by its own content. It is the ONE-LINE sibling of fenced,
+// for text that has to sit inside a line this package wrote.
+//
+// WHY A HEADING NEEDS A DIFFERENT MECHANISM FROM A BLOCK. An indented code block
+// contains anything at all because it has NO CLOSING DELIMITER to type: it ends
+// at the first line indented less than its margin, and no line it emits ever is.
+// A heading cannot be indented (four spaces would make it a code block and stop
+// being a heading), so that mechanism is unavailable. What contains text inside
+// a heading is a code SPAN, and a span has two bounds rather than none:
+//
+//   - Its closing delimiter, which the payload could otherwise type. That one is
+//     defeated: the delimiter is longestBacktickRun(text)+1, so no run in the
+//     payload is long enough to close it. This is the same rule fenced already
+//     applies to the block form and the reason neither is fixed at three.
+//   - The END OF THE LINE, which nothing defeats, because that is what a heading
+//     is. Hence headingBreakReplacer above, and hence its set is as small as it
+//     is: it holds exactly the runes the container cannot.
+//
+// The space padding is CommonMark's code-span rule, not decoration: when the raw
+// content both begins and ends with a space it loses one from each end, so a
+// payload starting or ending with a backtick or a space is padded to survive
+// that strip byte-exactly. Content that is ALL spaces is not stripped at all, so
+// it is not padded either.
+func inlineCode(text string) string {
+	text = headingBreakReplacer.Replace(text)
+	if text == "" {
+		return ""
 	}
-	return longest + 1
+	delim := strings.Repeat("`", longestBacktickRun(text)+1)
+	pad := ""
+	if strings.TrimLeft(text, " ") != "" &&
+		(strings.HasPrefix(text, "`") || strings.HasSuffix(text, "`") ||
+			strings.HasPrefix(text, " ") || strings.HasSuffix(text, " ")) {
+		pad = " "
+	}
+	return delim + pad + text + pad + delim
 }
 
 // paragraphs joins blocks with exactly one blank line between them, so no caller
