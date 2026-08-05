@@ -272,6 +272,15 @@ func main() {
 				"dump", *dumpDir, "error", err)
 		}
 
+		// The SECOND cheap question, asked in the same place and for the same
+		// reason: the path exists and is a directory, but is it the directory the
+		// operator meant. A customer pointed --dump one level too high, at a folder
+		// holding two dump roots, and nothing said so. Answering here, synchronously,
+		// puts it in front of the person who typed the flag; answering from the build
+		// goroutine would put it in a report that is not sequenced against the end of
+		// the process and goes missing outright over repeated starts.
+		reportNestedDumpRoots(*dumpDir)
+
 		var err error
 		dumpIndex, err = openServeIndexLocal(serveBuildCtx, *dumpDir, *cacheDir, *reindex)
 		if err != nil {
@@ -552,6 +561,77 @@ func dumpPathFault(dumpDir string) error {
 		return fmt.Errorf("%s is not a directory", dumpDir)
 	}
 	return nil
+}
+
+// nestedDumpRootMessage is what to say when --dump points ABOVE the dump root, or
+// "" when there is nothing to say.
+//
+// SILENCE IS THE NORMAL ANSWER and is the shipped behaviour: a path that is itself
+// a dump root produces nothing at all, and so does a path that has no root under
+// it either, because then this code has learned nothing the operator does not
+// already know.
+//
+// IT NAMES THE ROOTS AND STOPS THERE. Which of them the operator wants is not
+// something the server can observe, and descending into one silently would be the
+// same defect the customer reported, moved one level down and made harder to see.
+// So the message ends in an instruction to the person, not in an action.
+//
+// Customer-facing RU: no тире.
+func nestedDumpRootMessage(insp dump.DumpRootInspection) string {
+	if insp.IsRoot || len(insp.NestedRoots) == 0 {
+		return ""
+	}
+	msg := "путь в --dump указывает не на корень выгрузки, а на каталог выше него. "
+	if len(insp.NestedRoots) == 1 {
+		msg += "Внутри лежит готовый корень выгрузки: " + insp.NestedRoots[0] + ". " +
+			"Укажите в --dump именно его."
+	} else {
+		msg += "Внутри лежат готовые корни выгрузки: " + strings.Join(insp.NestedRoots, ", ") + ". " +
+			"Укажите в --dump один из них, тот, который вам нужен."
+	}
+	msg += " Сервер не переходит внутрь сам, потому что выбрать за вас не может, " +
+		"а молчаливый переход скрыл бы ошибку пути ровно так же, как она скрывалась до сих пор. " +
+		"Пока путь не исправлен, модули расширения и конфигурации попадают в одно " +
+		"пространство ключей и затирают друг друга."
+	if insp.Truncated {
+		msg += " Просмотрены не все подкаталоги, поэтому список может быть неполным."
+	}
+	return msg
+}
+
+// reportNestedDumpRoots delivers that message, or says nothing.
+//
+// slog.Error, and the level is the whole delivery. main installs the default
+// handler at LevelError (MCP clients render every stderr line as [error], so
+// INFO and WARN are suppressed on purpose), which means a slog.Warn here would
+// compile, would have a passing test, and would never appear in a normal run.
+// That exact failure has been shipped before. The pin lives in
+// nested_dump_root_test.go:TestNestedDumpRootNoticeIsDeliveredAtErrorLevel, which
+// publishes through a handler that keeps nothing below Error, so a downgrade to
+// Warn fails the build instead of going quiet.
+//
+// WHERE IT LANDS, MEASURED ON THE BUILT BINARY rather than argued: on a terminal
+// launch it is written to file descriptor 2, and under a pipe launch it goes to
+// stderr.log in the cache directory, because that is where main has pointed
+// stderr by then and writing to fd 2 mid-session is the very thing that redirect
+// exists to prevent. Both were run against the real trees on this machine and
+// both carried the sentence with the roots named; a correctly pointed --dump
+// produced nothing on either path.
+//
+// So under a pipe this line reaches a log, and a log nobody reads is not a
+// message. That is accepted here because it is not the only channel this
+// condition has: a --dump above the root collapses the keyspace, and the collapse
+// notice in tools/index_notice.go rides on EVERY tool response with the exact
+// counts. This one adds the precise diagnosis for the operator who can see
+// stderr, in the same place and by the same means as the dumpPathFault message
+// it sits beside.
+func reportNestedDumpRoots(dumpDir string) {
+	insp := dump.InspectDumpRoot(dumpDir)
+	msg := nestedDumpRootMessage(insp)
+	if msg == "" {
+		return
+	}
+	slog.Error(msg, "dump", dumpDir, "roots", strings.Join(insp.NestedRoots, ","))
 }
 
 // compareExtensionVersions orders two dotted numeric extension versions,

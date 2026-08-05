@@ -1,0 +1,164 @@
+package dump
+
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+// Recognising the root of a dump, and the root that sits one level below the path
+// somebody typed.
+//
+// THE DEFECT THIS ANSWERS. A customer pointed --dump at a directory holding two
+// dump roots side by side, "main" and "ext", and the server took it in silence.
+// The anchor scan in index.go now derives the right key for each module in such a
+// tree, which is a real repair and is not the whole one: with a base configuration
+// and an extension of it under one path, the extension's modules land exactly on
+// the base configuration's keys and OVERWRITE them. Measured on the 13575-path
+// corpus paired with a copy of itself under "ext/Имя/": 27150 files, 13575 distinct
+// keys, worst bucket 2, 13575 files lost to overwrite. The anchor alone does not
+// rescue that customer. Being told does.
+//
+// THE RULE, and BOTH HALVES ARE REQUIRED. A directory is a dump root when it
+// carries a manifest (ConfigDumpInfo.xml or Configuration.xml) OR when enough of
+// its immediate children are metadata kind directories. Measured on this machine:
+// dumps/dump_bsl holds 13575 .bsl and no manifest at any depth, so manifest-only
+// would miss it; ~/Downloads/extdump_vm/mcp_service is a real extension dump with
+// exactly ONE kind directory, so a kind threshold high enough to keep an ordinary
+// home directory out would miss it. Each branch covers what the other cannot.
+//
+// THE BEHAVIOUR IS TO TELL, NEVER TO DESCEND. If the path is itself a root the
+// answer is silence, exactly as before. If it is not one but a child is, the child
+// is NAMED and the operator chooses. Descending silently would repeat the very
+// silence the customer complained about, one level lower and harder to see.
+//
+// THE COST IS ONE ReadDir PER CANDIDATE AND NOTHING ELSE. Both branches are
+// decided from the entries that single read already returned: a manifest shows up
+// in the listing, so testing for it costs no extra syscall. A path that IS a root
+// costs exactly one read and stops. The inspection never opens a file, never
+// descends past a child, and never walks a tree.
+
+const (
+	// dumpManifestConfigDumpInfo and dumpManifestConfiguration are the two files
+	// DumpConfigToFiles writes at the top of its output. Either one present is
+	// enough: an extension dump carries both (measured at 798 B and 316 B for
+	// ConfigDumpInfo.xml on the two real extension dumps on hand), and a
+	// configuration's own can be very large (20 591 903 B in dumps/dump_2), which is
+	// exactly why only their PRESENCE is consulted here and never their contents.
+	dumpManifestConfigDumpInfo = "ConfigDumpInfo.xml"
+	dumpManifestConfiguration  = "Configuration.xml"
+
+	// minKindDirsForRoot is how many immediate children must be metadata kind
+	// directories for a directory with no manifest to count as a dump root.
+	//
+	// TWO is measured, not chosen for looking reasonable. Counting kind-named
+	// children over twenty directories that are not dumps ($HOME and six paths
+	// under it, the repository checkout and its dump/ package, /usr/local, /usr,
+	// /etc, /, /Users, /Applications, /Library, /System, /opt, /private/tmp,
+	// /usr/share, /usr/lib), exactly one scores at all: $HOME scores 1, because
+	// «Documents» is both an ordinary home directory and a 1C metadata kind. None
+	// scores 2. So 1 fires on the user's home directory and 2 fires on none of
+	// them, and the real roots on the same machine score 41, 23, 8, 2 and 1.
+	//
+	// The root that scores 1 is a real extension dump and is NOT sacrificed to this
+	// threshold: it carries a manifest, and that is the branch that recognises it.
+	minKindDirsForRoot = 2
+
+	// maxNestedRootScan bounds how many children are examined when the path itself
+	// is not a root. It exists because that branch is the only one whose cost grows
+	// with the directory, and a --dump pointed at something like a downloads folder
+	// would otherwise pay one read per child of a directory with thousands of them.
+	// A dump root has tens of children, not hundreds, so a path needing more than
+	// this to find a root below it is not a shape anybody is looking for.
+	maxNestedRootScan = 64
+)
+
+// DumpRootInspection is what a --dump path turned out to be.
+//
+// The cost counters are part of the result rather than a debug aside. The claim
+// this code makes is that it does not walk the tree, and a claim like that is
+// worth exactly as much as the test that can measure it: ReadDirs and Entries are
+// what let TestInspectionCostIsBoundedAndMeasured assert the budget as numbers.
+type DumpRootInspection struct {
+	// IsRoot reports whether the inspected path is itself a dump root.
+	IsRoot bool
+	// NestedRoots are the immediate children that are dump roots, sorted, and empty
+	// whenever IsRoot is true. Names only, never paths: the caller knows the parent.
+	NestedRoots []string
+	// Truncated reports that the child scan stopped at maxNestedRootScan, so
+	// NestedRoots may be short. It is carried rather than dropped because "no root
+	// below this" and "no root among the first 64" are different answers.
+	Truncated bool
+	// ReadDirs and Entries are what the inspection actually spent.
+	ReadDirs int
+	Entries  int
+}
+
+// rootnessOf decides both branches from one already-read listing, and returns the
+// child directories in the order the listing gave them.
+func rootnessOf(ents []os.DirEntry) (isRoot bool, childDirs []string) {
+	kinds := 0
+	manifest := false
+	for _, e := range ents {
+		name := e.Name()
+		if !e.IsDir() {
+			if name == dumpManifestConfigDumpInfo || name == dumpManifestConfiguration {
+				manifest = true
+			}
+			continue
+		}
+		childDirs = append(childDirs, name)
+		if _, ok := dumpDirNames[name]; ok {
+			kinds++
+		}
+	}
+	return manifest || kinds >= minKindDirsForRoot, childDirs
+}
+
+// InspectDumpRoot answers whether dir is a dump root and, when it is not, which of
+// its immediate children are.
+//
+// An unreadable dir returns the zero value: it is neither a root nor the parent of
+// one, and saying anything else would be a second answer to a question
+// dumpPathFault in cmd/mcp-1c already answers.
+func InspectDumpRoot(dir string) DumpRootInspection {
+	var got DumpRootInspection
+
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return got
+	}
+	got.ReadDirs = 1
+	got.Entries = len(ents)
+
+	isRoot, childDirs := rootnessOf(ents)
+	if isRoot {
+		// A correctly pointed path costs one read and says nothing. This early
+		// return is the behaviour, not an optimisation: a root that happens to
+		// contain another root below it is still the root the operator chose.
+		got.IsRoot = true
+		return got
+	}
+
+	scanned := 0
+	for _, name := range childDirs {
+		if scanned == maxNestedRootScan {
+			got.Truncated = true
+			break
+		}
+		scanned++
+		childEnts, err := os.ReadDir(filepath.Join(dir, name))
+		if err != nil {
+			continue // unreadable child: not a root as far as anything here can tell
+		}
+		got.ReadDirs++
+		got.Entries += len(childEnts)
+		if childIsRoot, _ := rootnessOf(childEnts); childIsRoot {
+			got.NestedRoots = append(got.NestedRoots, name)
+		}
+	}
+	// Sorted, because os.ReadDir's order is the filesystem's and a list that
+	// reordered between two identical runs would read as a changing dump.
+	slices.Sort(got.NestedRoots)
+	return got
+}
