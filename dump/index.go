@@ -2588,8 +2588,10 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	slices.Sort(idx.names)
 	// The manifest is keyed by relative path and carries one DocID per entry, so
 	// two entries sharing a DocID are exactly the collapse the cold build would
-	// have produced from the same files. Recorded here, before the diff, because
-	// the diff can only ADD to the picture and its additions are dedup-guarded.
+	// have produced from the same files. Recorded here so the report is already
+	// right for the commonest warm start, the one over an unchanged dump, before
+	// the filesystem walk below runs. It is recorded AGAIN after the diff, because
+	// the diff can change the answer in both directions; see there.
 	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 
@@ -2698,6 +2700,38 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	if len(diff.Added) > 0 || len(diff.Modified) > 0 || len(diff.Deleted) > 0 {
 		slog.Info("Incremental update", "added", len(diff.Added), "modified", len(diff.Modified), "deleted", len(diff.Deleted))
 	}
+
+	// RE-RECORD, AND FROM pathToDocID RATHER THAN FROM names.
+	//
+	// The report published before the diff was justified by two claims, and both
+	// were measured false, in opposite directions.
+	//
+	// «The diff can only ADD to the picture» is false: the deletion loop above
+	// removes names. Measured, on a two-root fixture whose files collide on one
+	// key, deleting one of the two colliding files leaves a warm start reporting
+	// files=1 keys=1 and printing the name of a module that is now perfectly
+	// readable.
+	//
+	// «Its additions are dedup-guarded» is true of idx.names and false as a reason
+	// the COUNT stays right. The guard refuses to append a docID already present in
+	// pathByName or contentByName, which is precisely the case a duplicate key
+	// arrives in, so a duplicate introduced by the diff never reaches idx.names and
+	// a report counted from idx.names cannot see it. Measured on the same fixture,
+	// adding a THIRD file that collides with a manifest entry gives files=0 keys=0
+	// while one file's content is unreachable through every map the index reads.
+	// That is the silent loss this counter exists to make countable.
+	//
+	// pathToDocID is the right multiset: one entry per dump FILE, kept in step by
+	// both loops above, so a duplicate value is exactly one file whose content the
+	// maps no longer hold. idx.names cannot be that multiset here, because the
+	// addition path deliberately keeps it deduplicated.
+	idx.mu.Lock()
+	docIDs := make([]string, 0, len(idx.pathToDocID))
+	for _, id := range idx.pathToDocID {
+		docIDs = append(docIDs, id)
+	}
+	idx.noteCollapsedKeys(docIDs)
+	idx.mu.Unlock()
 
 	// Save updated manifest.
 	idx.saveManifest(cacheDir)

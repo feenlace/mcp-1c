@@ -139,7 +139,8 @@ func indexCollapseNotice(st dump.CollapsedKeyState) string {
 	notice += " Такие файлы сервер считает в общем числе модулей, но выдать их содержимое " +
 		"не может. Проверьте, что путь в `--dump` указывает на сам корень выгрузки, то есть " +
 		"на каталог, внутри которого лежат `Catalogs`, `Documents` и `Ext`, а не на каталог " +
-		"выше него. После исправления пути вызовите `reload_dump`.\n"
+		"выше него. Путь читается при запуске, поэтому исправленный путь применяется только " +
+		"перезапуском: укажите новый `--dump` и перезапустите сервер. " + reloadDumpIsNotThePathRemedy + "\n"
 	if sample := echoableSample(st.Sample); len(sample) > 0 {
 		notice += "\nСовпавшие имена:\n" + fenced(strings.Join(sample, "\n")) + "\n"
 	}
@@ -197,9 +198,33 @@ func indexWrappedNotice(st dump.WrappedPathState) string {
 		"Файлов, у которых над корнем выгрузки оказались лишние каталоги: %d из %d. "+
 		"Имена таких модулей сервер восстанавливает, но пространство имён расширения "+
 		"при этом теряется: модули расширения попадают туда же, куда модули "+
-		"конфигурации. Укажите в `--dump` сам корень выгрузки и вызовите `reload_dump`.\n",
-		st.Files, st.Total)
+		"конфигурации. Укажите в `--dump` сам корень выгрузки и перезапустите сервер. %s\n",
+		st.Files, st.Total, reloadDumpIsNotThePathRemedy)
 }
+
+// reloadDumpIsNotThePathRemedy is the sentence that stops a reader following the
+// instruction these two notices used to give.
+//
+// BOTH OF THEM PRESCRIBED `reload_dump`, AND IT CANNOT CARRY THAT OUT. The tool
+// takes no arguments at all, so there is no way to hand it a corrected path; it
+// re-reads the directory the index was CONSTRUCTED with, which is the wrong one.
+// Pointed at the same directory it does even less: dump.Index.Reload compares the
+// dump's content signature against the one it is serving and returns without
+// rebuilding when nothing on disk moved, and correcting a --dump flag moves
+// nothing on disk. The reader who followed the instruction got «изменений не
+// обнаружено», keys exactly as wrong as before, and this same notice again on the
+// next answer.
+//
+// So the remedy named is the restart, and the tool is named too, because a reader
+// who has been told to call it before will otherwise try it and conclude the
+// diagnosis was wrong rather than the instruction.
+//
+// `reload_dump` stays the right remedy where the PATH is right and the FILES
+// moved, which is the search shortfall note, and it keeps saying so there.
+//
+// Customer-facing RU: no тире.
+const reloadDumpIsNotThePathRemedy = "Вызов `reload_dump` здесь не поможет: он " +
+	"перечитывает тот же самый каталог и на имена модулей не влияет."
 
 // indexLayoutDoubtNotice is the fourth: directories whose extension-ness the
 // server could not decide.
