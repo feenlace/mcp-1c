@@ -736,9 +736,38 @@ type Index struct {
 	mu        sync.RWMutex
 	contentMu sync.RWMutex // protects lazy content loading
 	buildErr  atomic.Pointer[error]
-	ctx       context.Context
-	cancel    context.CancelFunc
-	done      chan struct{}
+	// extLayout is how this dump root relates to configuration extensions, read
+	// from the manifests ONCE and then reused for every key derived from it. See
+	// extlayout.go; the zero value is an ordinary dump and changes no key.
+	//
+	// Behind a sync.Once because the file loaders derive names from a pool of
+	// goroutines, so the first one to need it computes it and the rest observe the
+	// finished value through the Once's happens-before. Reading the manifests per
+	// file instead would put a file open on every .bsl in the dump.
+	extLayout     extensionLayout
+	extLayoutOnce sync.Once
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
+}
+
+// moduleKeyFor derives the index key for a dump-relative path, applying whatever
+// extension layout this dump root has.
+//
+// It is the single chokepoint for deriving a key FROM A PATH, so a file cannot be
+// keyed one way by the cold build and another by the warm incremental diff. Its
+// four callers are loadBSLFiles, loadBSLPaths, and the Added/Modified branches of
+// loadFromManifestAndDiff and applyIncrementalUpdate.
+//
+// What does NOT go through it is a key that was already derived once and written
+// down: readGenerationNames and the unchanged half of a manifest diff take the
+// DocID straight out of the generation manifest, because re-deriving it there
+// would let one generation disagree with itself about a file nobody touched. The
+// version that governs whether such a manifest may be adopted at all is
+// dumpIndexSchemaVersion, and the extension layout rides its v4 bump.
+func (idx *Index) moduleKeyFor(relPath string) string {
+	idx.extLayoutOnce.Do(func() { idx.extLayout = detectExtensionLayout(idx.dir) })
+	return idx.extLayout.moduleKey(relPath)
 }
 
 // Ready reports whether the index has finished building and is available for search.
@@ -1580,7 +1609,7 @@ func (idx *Index) loadBSLFiles(dir string) error {
 				return
 			}
 			relSlash := filepath.ToSlash(rel)
-			name := bslPathToModuleName(rel)
+			name := idx.moduleKeyFor(rel)
 			results <- loadedModule{name: name, relPath: relSlash, content: stripBOM(string(data)), stamp: stamp}
 		}(p)
 	}
@@ -1644,7 +1673,7 @@ func (idx *Index) loadBSLPaths(dir string) error {
 			return nil
 		}
 		relSlash := filepath.ToSlash(rel)
-		name := bslPathToModuleName(rel)
+		name := idx.moduleKeyFor(rel)
 		absPath, err := filepath.Abs(path)
 		if err != nil {
 			absPath = path
@@ -2387,7 +2416,7 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 			slog.Warn("Cannot read file", "path", relPath, "error", err)
 			continue
 		}
-		docID := bslPathToModuleName(relPath)
+		docID := idx.moduleKeyFor(relPath)
 		content := stripBOM(string(data))
 
 		parts := parseModuleName(docID)
@@ -2692,7 +2721,7 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 			slog.Warn("Cannot read file", "path", relPath, "error", err)
 			continue
 		}
-		docID := bslPathToModuleName(relPath)
+		docID := idx.moduleKeyFor(relPath)
 		content := stripBOM(string(data))
 
 		parts := parseModuleName(docID)
