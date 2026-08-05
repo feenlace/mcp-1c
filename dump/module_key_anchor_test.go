@@ -75,7 +75,7 @@ const (
 // to rebuild the same string. Only index 0 means "the existing body ran on the
 // untouched parts slice".
 func TestAnchorScanIsANoOpAtACorrectRoot(t *testing.T) {
-	for _, p := range keyDigestCorpus {
+	for _, p := range unwrappedKeyDigestCorpus {
 		if i := anchorIndex(strings.Split(p, "/")); i != 0 {
 			t.Errorf("anchorIndex(%q) = %d, want 0: the scan must not fire at a correct root",
 				p, i)
@@ -102,7 +102,7 @@ func TestAnchorScanIsANoOpAtACorrectRoot(t *testing.T) {
 // four files>", which is exactly two.
 func TestAnchorScanNeverLeavesFewerThanTwoSegments(t *testing.T) {
 	shortest := -1
-	for _, p := range keyDigestCorpus {
+	for _, p := range unwrappedKeyDigestCorpus {
 		for _, prefix := range wrapperPrefixes {
 			parts := strings.Split(prefix+p, "/")
 			i := anchorIndex(parts)
@@ -141,7 +141,7 @@ func TestAnchorScanRecoversEveryWrapperShape(t *testing.T) {
 		anchorCorpusUnknownKind: false,
 	}
 	covered := 0
-	for _, p := range keyDigestCorpus {
+	for _, p := range unwrappedKeyDigestCorpus {
 		if _, isExcluded := excluded[p]; isExcluded {
 			excluded[p] = true
 			continue
@@ -161,9 +161,9 @@ func TestAnchorScanRecoversEveryWrapperShape(t *testing.T) {
 				"unexercised and the loop may be skipping rows silently", p)
 		}
 	}
-	if covered != len(keyDigestCorpus)-len(excluded) {
+	if covered != len(unwrappedKeyDigestCorpus)-len(excluded) {
 		t.Fatalf("covered %d of %d corpus rows, want %d: the loop is skipping rows "+
-			"nobody declared", covered, len(keyDigestCorpus), len(keyDigestCorpus)-len(excluded))
+			"nobody declared", covered, len(unwrappedKeyDigestCorpus), len(unwrappedKeyDigestCorpus)-len(excluded))
 	}
 
 	// Negative controls: each excluded row really is outside the property, so the

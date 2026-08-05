@@ -130,13 +130,29 @@ func TestDumpDirNamesCoversMeasuredTopLevelDirs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // keyDigestCorpus is a fixed set of dump-relative paths covering every branch of
-// bslPathToModuleName: each dumpDirNames prefix family, the Forms/Commands infix,
-// the CommonModules/HTTPServices/WebServices plain-Module rule, the configuration
+// bslPathToModuleName. It is built from two halves that must stay distinguishable,
+// because they pin two different claims:
+//
+//   - unwrappedKeyDigestCorpus: paths at a CORRECTLY pointed root. Their digest is
+//     pinned separately, as bslUnwrappedCorpusDigest, and that digest is the
+//     evidence that the anchor scan is a no-op where it must be one.
+//   - anchoredKeyDigestCorpus: paths whose key the anchor scan derives from some
+//     index OTHER than 0. Without them the guard could not see the scan at all:
+//     every unwrapped row anchors at 0, so removing the scan entirely leaves
+//     bslUnwrappedCorpusDigest untouched.
+//
+// The split is structural rather than an index into one slice, so inserting a row
+// in the middle of either half cannot silently move the boundary.
+var keyDigestCorpus = slices.Concat(unwrappedKeyDigestCorpus, anchoredKeyDigestCorpus)
+
+// unwrappedKeyDigestCorpus covers every branch of bslPathToModuleName at a correct
+// root: each dumpDirNames prefix family, the Forms/Commands infix, the
+// CommonModules/HTTPServices/WebServices plain-Module rule, the configuration
 // modules under Ext/, the extension subtree, and the unknown-category fallback.
 //
 // It is a literal list on purpose. Deriving it from dumpDirNames would make the
 // digest move together with the table and the guard would stop noticing a change.
-var keyDigestCorpus = []string{
+var unwrappedKeyDigestCorpus = []string{
 	"Catalogs/Номенклатура/Ext/ObjectModule.bsl",
 	"Catalogs/Номенклатура/Ext/ManagerModule.bsl",
 	"Catalogs/Номенклатура/Commands/Печать/Ext/CommandModule.bsl",
@@ -178,6 +194,35 @@ var keyDigestCorpus = []string{
 	"Module.bsl",
 }
 
+// anchoredKeyDigestCorpus is the half the anchor scan actually moves. Every row
+// here derives its key from an index other than 0, so deleting the scan changes
+// bslKeyCorpusDigest and this guard goes red — which is the whole reason the rows
+// exist. TestAnchoredCorpusRowsReallyAnchor asserts that property directly, so a
+// row that stopped anchoring could not sit here contributing nothing.
+//
+// Eight of the rows are wrappers and they are adversarial rather than convenient:
+// four of them open with a name the scan must recognise and then REJECT on shape,
+// drawn from three distinct such names ("Documents", "Ext", "Catalogs"). That is
+// exactly the case a marker test alone gets wrong.
+//
+// The last two rows are not wrappers. They are the two residual classes the anchor
+// scan is documented to move (see the anchor block in index.go and
+// module_key_anchor_test.go): neither occurs in the 13575 measured paths and
+// neither is a shape 1C emits, and they are pinned here so a later change to them
+// moves the digest instead of passing unnoticed.
+var anchoredKeyDigestCorpus = []string{
+	"dump_bsl/Catalogs/Номенклатура/Ext/ObjectModule.bsl",
+	"Documents/dumps/Catalogs/Номенклатура/Forms/ФормаСписка/Ext/Form/Module.bsl",
+	"Ext/CommonModules/ОбщегоНазначения/Ext/Module.bsl",
+	"a/b/c/d/e/Ext/SessionModule.bsl",
+	"Catalogs/Спр/Расширения/Доработки3D/CommonModules/WA_ПовтИсп/Ext/Module.bsl",
+	"main/HTTPServices/ЭДО/Ext/Module.bsl",
+	"ext/Расширения/TestExt/Ext/SessionModule.bsl",
+	"Catalogs/Спр/SettingsStorages/НастройкиНовостей/Forms/Настройка/Ext/Form/Module.bsl",
+	"Catalogs/Ном/Ext/ManagedApplicationModule.bsl",
+	"Catalogs/Расширения/Y/Catalogs/Ном/Ext/ObjectModule.bsl",
+}
+
 // bslKeyCorpusDigest is sha256 over "<path>\t<key>\n" for keyDigestCorpus in the
 // order declared above.
 //
@@ -187,14 +232,28 @@ var keyDigestCorpus = []string{
 // dumpIndexSchemaVersion to be bumped for, because a generation built by an older
 // binary would otherwise be adopted and served under the old keys, leaving the
 // change inert for every existing cache.
+// bslUnwrappedCorpusDigest is the same digest taken over unwrappedKeyDigestCorpus
+// ALONE, and it is the evidence for the claim that carries the anchor scan: at a
+// correctly pointed root, not one key moves.
+//
+// It is pinned SEPARATELY and not folded into the value above because the two
+// numbers answer different questions and must be able to move independently. This
+// one moving means a correctly rooted dump now keys differently, which is a
+// schema-version event under the BUMP PROTOCOL. The one above moving may mean only
+// that the anchor scan changed, which is not.
+//
+// Its value is the digest the guard carried BEFORE the anchor scan existed, byte
+// for byte, and that is the point: the scan was added, this number did not change.
+const bslUnwrappedCorpusDigest = "7134dd1c0084959c2e8b8f7722972ca93d39954c9c401181465bfc7f156bbba0"
+
 const (
-	bslKeyCorpusDigest              = "7134dd1c0084959c2e8b8f7722972ca93d39954c9c401181465bfc7f156bbba0"
+	bslKeyCorpusDigest              = "7871387d3835a9e0ceaffce9f1083bfdfd0ec50e3b6a129faee944bc48e8ea88"
 	pinnedSchemaVersionForKeyDigest = 3
 )
 
-func keyCorpusDigest() (string, string) {
+func digestOf(paths []string) (string, string) {
 	var sb strings.Builder
-	for _, p := range keyDigestCorpus {
+	for _, p := range paths {
 		sb.WriteString(p)
 		sb.WriteByte('\t')
 		sb.WriteString(bslPathToModuleName(p))
@@ -203,6 +262,8 @@ func keyCorpusDigest() (string, string) {
 	sum := sha256.Sum256([]byte(sb.String()))
 	return hex.EncodeToString(sum[:]), sb.String()
 }
+
+func keyCorpusDigest() (string, string) { return digestOf(keyDigestCorpus) }
 
 // TestBslKeyDerivationPinnedToSchemaVersion fails whenever bslPathToModuleName
 // produces a different key for any corpus path, and whenever
@@ -224,6 +285,73 @@ func TestBslKeyDerivationPinnedToSchemaVersion(t *testing.T) {
 			"pinnedSchemaVersionForKeyDigest. Without the bump every warm cache keeps serving the "+
 			"old keys and the change is inert.\n\ncurrent derivation:\n%s",
 			got, bslKeyCorpusDigest, dumpIndexSchemaVersion, table)
+	}
+}
+
+// TestUnwrappedCorpusDigestDidNotMoveWithTheAnchorScan pins the no-op claim as a
+// digest rather than as a sentence: the anchor scan was added to
+// bslPathToModuleName and the keys of a correctly rooted dump are byte for byte
+// what they were.
+//
+// This is the number the BUMP PROTOCOL cares about. bslKeyCorpusDigest above now
+// also covers rows the scan deliberately moves, so it will change whenever the
+// scan changes; this one changing means a real dump's keys changed, and that is
+// what forces dumpIndexSchemaVersion up.
+func TestUnwrappedCorpusDigestDidNotMoveWithTheAnchorScan(t *testing.T) {
+	got, table := digestOf(unwrappedKeyDigestCorpus)
+	if got != bslUnwrappedCorpusDigest {
+		t.Errorf("the keys of a CORRECTLY ROOTED dump changed.\n"+
+			"digest got  = %s\ndigest want = %s\n\n"+
+			"This is the case the BUMP PROTOCOL in generation.go names: bump "+
+			"dumpIndexSchemaVersion (currently %d) and re-pin both digests, or every warm "+
+			"generation keeps serving the old keys.\n\ncurrent derivation:\n%s",
+			got, bslUnwrappedCorpusDigest, dumpIndexSchemaVersion, table)
+	}
+
+	// And every row in that half really is at a correct root, so the digest above is
+	// a statement about un-anchored derivation and not an accident.
+	for _, p := range unwrappedKeyDigestCorpus {
+		if i := anchorIndex(strings.Split(p, "/")); i != 0 {
+			t.Errorf("%q anchors at %d, so it belongs in anchoredKeyDigestCorpus; "+
+				"leaving it here makes bslUnwrappedCorpusDigest depend on the anchor scan",
+				p, i)
+		}
+	}
+}
+
+// TestAnchoredCorpusRowsReallyAnchor is what closes the guard gap. Before the
+// anchor rows existed, every corpus path anchored at 0, so DELETING the scan left
+// the digest exactly where it was and the guard could not see the change at all.
+//
+// Each row here must anchor at a non-zero index. A row that stopped anchoring
+// would sit in the corpus contributing nothing while looking like coverage, which
+// is the failure mode this test exists to prevent.
+func TestAnchoredCorpusRowsReallyAnchor(t *testing.T) {
+	if len(anchoredKeyDigestCorpus) == 0 {
+		t.Fatal("the anchored half of the corpus is empty, so removing the anchor scan " +
+			"would not move bslKeyCorpusDigest and the guard is blind to it")
+	}
+	for _, p := range anchoredKeyDigestCorpus {
+		if i := anchorIndex(strings.Split(p, "/")); i == 0 {
+			t.Errorf("%q anchors at 0, so its key does not depend on the anchor scan and "+
+				"it adds nothing to the guard", p)
+		}
+	}
+
+	// Positive control: a correctly rooted path must NOT anchor, or the assertion
+	// above would be satisfied by a scan that fires on everything.
+	const rooted = "Catalogs/Номенклатура/Ext/ObjectModule.bsl"
+	if i := anchorIndex(strings.Split(rooted, "/")); i != 0 {
+		t.Fatalf("positive control failed: %q anchors at %d, so anchoring proves nothing",
+			rooted, i)
+	}
+
+	// And the two halves must not overlap, or a row could be counted as evidence
+	// for both claims at once.
+	for _, p := range anchoredKeyDigestCorpus {
+		if slices.Contains(unwrappedKeyDigestCorpus, p) {
+			t.Errorf("%q is in both halves of the corpus", p)
+		}
 	}
 }
 
