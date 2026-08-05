@@ -1435,10 +1435,13 @@ func TestBslPathToModuleName_ServiceKindsAndConfigModules(t *testing.T) {
 			"Documents/Док/Forms/ФормаДок/Ext/Module.bsl",
 			"Документ.Док.Форма.ФормаДок.МодульФормы"},
 		// An unknown category still falls back to the raw English name. The fix
-		// narrows that fallback, it does not remove it.
+		// narrows that fallback, it does not remove it. Styles used to be this
+		// example and is now a known kind; ExternalDataProcessors replaces it and is
+		// unknown on purpose, being a standalone root mdclass rather than a
+		// configuration child class.
 		{"unknown category still falls back",
-			"Styles/Основной/Ext/Module.bsl",
-			"Styles.Основной.МодульФормы"},
+			"ExternalDataProcessors/Основной/Ext/Module.bsl",
+			"ExternalDataProcessors.Основной.МодульФормы"},
 		// Only the four known configuration modules get the Конфигурация key.
 		// Anything else directly under the root Ext keeps the old fallback, so
 		// an unexpected file is visibly odd instead of silently mislabelled.

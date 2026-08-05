@@ -1,0 +1,69 @@
+# Виды объектов, которые реальная конфигурация объявляет в <ChildObjects> своего
+# Configuration.xml, вместе с именем каталога выгрузки для каждого вида.
+#
+# Это НЕ то же самое, что dump_toplevel_module_dirs.txt. Тот файл перечисляет
+# каталоги, в которых ВСТРЕЧАЛИСЬ файлы .bsl. Этот перечисляет виды, которые
+# конфигурация вообще может содержать, независимо от того, есть ли у вида модуль.
+# Оба нужны: первый ловит потерю ключа модуля, второй ловит неполноту таблицы
+# видов, от которой зависит распознавание корня выгрузки.
+#
+# Происхождение строк, всё измерено, ничего не выведено по памяти:
+#   1) Виды: разбор <ChildObjects> файла Configuration.xml выгрузки
+#      dumps/dump_2 (1 339 696 байт). Ровно 41 различный вид.
+#   2) Имена каталогов: каждое имя из второй колонки проверено на диске в той же
+#      выгрузке. Совпали все 41 из 41, каталогов без пары нет.
+#   3) Число файлов .bsl в каждом каталоге тоже измерено. У 23 каталогов модули
+#      есть, у остальных 18 их НЕТ ни одного, и это ожидаемо: у роли, стиля,
+#      подсистемы, языка и прочих служебных видов модуля не бывает. Запись в
+#      таблице им нужна не ради ключа модуля, а ради опознания вида как
+#      каталога корня выгрузки.
+#
+# Виды, которых у ЭТОЙ конфигурации нет, а у 1С они есть, здесь отсутствуют по
+# построению: CalculationRegisters и Sequences реальны, просто эта конфигурация
+# ими не пользуется. Отсутствие вида в этом файле НЕ повод убирать его из
+# dumpDirNames.
+#
+# Формат: <ИмяКаталога> <ВидИзМанифеста>. Пустые строки и строки, начинающиеся
+# с #, игнорируются.
+
+AccountingRegisters         AccountingRegister
+AccumulationRegisters       AccumulationRegister
+BusinessProcesses           BusinessProcess
+Catalogs                    Catalog
+ChartsOfAccounts            ChartOfAccounts
+ChartsOfCalculationTypes    ChartOfCalculationTypes
+ChartsOfCharacteristicTypes ChartOfCharacteristicTypes
+CommandGroups               CommandGroup
+CommonAttributes            CommonAttribute
+CommonCommands              CommonCommand
+CommonForms                 CommonForm
+CommonModules               CommonModule
+CommonPictures              CommonPicture
+CommonTemplates             CommonTemplate
+Constants                   Constant
+DataProcessors              DataProcessor
+DefinedTypes                DefinedType
+DocumentJournals            DocumentJournal
+DocumentNumerators          DocumentNumerator
+Documents                   Document
+Enums                       Enum
+EventSubscriptions          EventSubscription
+ExchangePlans               ExchangePlan
+FilterCriteria              FilterCriterion
+FunctionalOptions           FunctionalOption
+FunctionalOptionsParameters FunctionalOptionsParameter
+HTTPServices                HTTPService
+InformationRegisters        InformationRegister
+Languages                   Language
+Reports                     Report
+Roles                       Role
+ScheduledJobs               ScheduledJob
+SessionParameters           SessionParameter
+SettingsStorages            SettingsStorage
+StyleItems                  StyleItem
+Styles                      Style
+Subsystems                  Subsystem
+Tasks                       Task
+WSReferences                WSReference
+WebServices                 WebService
+XDTOPackages                XDTOPackage

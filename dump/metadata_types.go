@@ -90,4 +90,72 @@ func init() {
 	dumpDirNames["SettingsStorages"] = "ХранилищеНастроек" // 22 modules measured
 	dumpDirNames["FilterCriteria"] = "КритерийОтбора"      // 3 modules measured
 	dumpDirNames["Sequences"] = "Последовательность"       // 5 modules measured
+
+	// The eighteen kinds a real configuration DECLARES that the table still did
+	// not know. Measured: the Configuration.xml of dumps/dump_2 lists 41 distinct
+	// kinds in <ChildObjects>, the table held 25, and all eighteen directories
+	// below exist on disk in that same dump.
+	//
+	// EVERY ONE OF THEM HOLDS ZERO .bsl FILES, and saying so is the point rather
+	// than an aside. That is why no module census could ever have found them: a
+	// role, a style, a subsystem, a language, a picture and a defined type have no
+	// module by construction, so the fixture behind guard 1 in
+	// module_key_guard_test.go — which records directories caught holding modules —
+	// is structurally blind to them.
+	//
+	// They are added because dumpDirNames is no longer only a display table. It is
+	// what dumpRootMarker reads to decide whether a path segment can be the top of a
+	// dump, so a kind missing here is a shape that cannot be recognised as a dump
+	// root and cannot be anchored past a wrapper. The entry earns its place through
+	// recognition, not through any key it changes.
+	//
+	// NO RUSSIAN NAME HERE WAS WRITTEN FROM KNOWLEDGE. Each is the string this
+	// package already uses for that kind in serviceKindEnToRu (subsystem_kinds.go),
+	// which is the table that canonicalises subsystem membership against the live
+	// platform full name. TestDumpDirRussianNamesMatchTheKindTables asserts that
+	// correspondence for all 41 kinds, so a name typed here rather than copied
+	// fails the build.
+	dumpDirNames["CommandGroups"] = "ГруппаКоманд"
+	dumpDirNames["CommonAttributes"] = "ОбщийРеквизит"
+	dumpDirNames["CommonPictures"] = "ОбщаяКартинка"
+	dumpDirNames["CommonTemplates"] = "ОбщийМакет"
+	dumpDirNames["DefinedTypes"] = "ОпределяемыйТип"
+	dumpDirNames["DocumentNumerators"] = "НумераторДокументов"
+	dumpDirNames["EventSubscriptions"] = "ПодпискаНаСобытие"
+	dumpDirNames["FunctionalOptions"] = "ФункциональнаяОпция"
+	dumpDirNames["FunctionalOptionsParameters"] = "ПараметрФункциональныхОпций"
+	dumpDirNames["Languages"] = "Язык"
+	dumpDirNames["Roles"] = "Роль"
+	dumpDirNames["ScheduledJobs"] = "РегламентноеЗадание"
+	dumpDirNames["SessionParameters"] = "ПараметрСеанса"
+	dumpDirNames["StyleItems"] = "ЭлементСтиля"
+	dumpDirNames["Styles"] = "Стиль"
+	dumpDirNames["Subsystems"] = "Подсистема"
+	dumpDirNames["WSReferences"] = "WSСсылка"
+	dumpDirNames["XDTOPackages"] = "ПакетXDTO"
+
+	// Bots stands apart, and the difference is stated rather than hidden.
+	//
+	// It is a genuine configuration child class — a real EDT manifest carries
+	// <bots>Bot.ОфисМенеджер</bots> beside a live src/Bots directory — but it is
+	// absent from the ERP manifest measured above, so it is not in the fixture, and
+	// it is the ONE kind here whose Russian singular is not copied from another
+	// table: no subsystem table lists a bot.
+	//
+	// The plural collection «Боты» IS known to this repository, in
+	// testdata/config_metadata_properties.txt, the snapshot of the platform type
+	// ОбъектМетаданныхКонфигурация that configModuleNames also draws its four names
+	// from. The singular below is that plural reduced by the same rule
+	// subsystem_kinds.go already applies and documents (ЭлементыСтиля gives
+	// ЭлементСтиля, ВнешниеИсточникиДанных gives ВнешнийИсточникДанных).
+	//
+	// So it is derived, not read, and TestBotsIsTheOneDerivedRussianName says so in
+	// the tree: if the platform full name ever turns out to spell it otherwise,
+	// that test is the single place to correct.
+	//
+	// ExternalDataProcessors is deliberately NOT here. It is not a configuration
+	// child class at all but a standalone root mdclass, and its projects carry no
+	// Configuration.mdo; admitting it would make dumpRootMarker accept a directory
+	// that can never be the top of a configuration dump.
+	dumpDirNames["Bots"] = "Бот"
 }

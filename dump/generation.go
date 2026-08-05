@@ -130,7 +130,35 @@ const (
 	// ".bsl" mid-key and the name repeated. Without this bump a warm generation or
 	// flat cache built by a v2 binary keeps its old gensig, is adopted as current, and
 	// serves the old keys — the whole fix would be inert for every existing user.
-	dumpIndexSchemaVersion = 3
+	//
+	// v4: TWO reasons, and the second is the one that matters for people who are
+	// already affected.
+	//
+	// The first is an ordinary derivation change. dumpDirNames gained the nineteen
+	// kinds it did not know (see metadata_types.go), so a module found under any of
+	// them now keys off a Russian prefix instead of the raw English directory name.
+	// Measured, that moves exactly one row of the pinned corpus
+	// (Styles/Основной/Ext/Module.bsl) and no path in either real dump on hand,
+	// because none of those kinds holds a .bsl at all. On its own it would be a very
+	// weak reason to invalidate every warm generation on every installation.
+	//
+	// The second is the reason. The anchor scan changes the key of every module in a
+	// WRONGLY ROOTED dump, and for exactly those users the derived keys are what is
+	// wrong today. Those keys are PERSISTED: a generation manifest carries one DocID
+	// per file (readGenerationNames and loadFromManifestAndDiff read them back and
+	// use them verbatim), and gensig hashes the dump's .bsl paths, mtimes and sizes,
+	// none of which changes when the fix ships. So without this bump a user whose
+	// dump root was pointed one level too high keeps their old generation, keeps its
+	// collapsed DocIDs, and never sees the fix at all: the one population the whole
+	// branch exists for is the one population it would not reach. The bump is a
+	// deliberate decision to make every installation pay one cold rebuild so that
+	// the affected ones actually receive the fix.
+	//
+	// The extension-layout keying added in the same branch rides this same bump
+	// rather than taking one of its own. Nothing has ever shipped with v4, so there
+	// is no cache anywhere that was built under it and that a second bump could
+	// protect.
+	dumpIndexSchemaVersion = 4
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and

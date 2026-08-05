@@ -126,6 +126,202 @@ func TestDumpDirNamesCoversMeasuredTopLevelDirs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Guard 1b: the table must also cover the kinds a configuration DECLARES, not
+// only the kinds that were caught holding a module.
+//
+// The fixture behind guard 1 records directories observed holding .bsl files. It
+// is the right question for "did a module lose its Russian prefix" and the wrong
+// one for "does this package know what a dump root looks like": of the 41 kinds
+// the measured configuration declares, 23 hold at least one .bsl in that dump and
+// EIGHTEEN hold none at all. A role, a style, a subsystem, a language and a
+// picture have no module by construction, so no module-census can ever put them in
+// the table, and every one of them is still a legitimate top-level directory of a
+// real dump.
+//
+// That gap is what this guard closes, and it is load-bearing for the root
+// detection and the anchor scan rather than for key derivation: dumpRootMarker
+// reads dumpDirNames, so a kind the table does not know is a kind no wrapper can
+// be anchored past and no directory can be recognised by.
+// ---------------------------------------------------------------------------
+
+// configChildObjectDirsFixture pairs each kind a real configuration declares in
+// <ChildObjects> with the dump directory that holds it. Both columns are measured;
+// see the header of the file itself for provenance.
+const configChildObjectDirsFixture = "testdata/config_child_object_dirs.txt"
+
+// configChildKindCount is the number of distinct kinds that manifest declares. It
+// is pinned so a fixture truncated to nothing, or silently halved, cannot pass as
+// full coverage: readConfigChildObjectDirs already refuses an empty parse, and
+// this catches every partial one above it.
+const configChildKindCount = 41
+
+// readConfigChildObjectDirs parses the fixture into dir -> singular-kind pairs,
+// dropping blank lines and comments.
+func readConfigChildObjectDirs(t *testing.T) map[string]string {
+	t.Helper()
+	f, err := os.Open(filepath.FromSlash(configChildObjectDirsFixture))
+	if err != nil {
+		t.Fatalf("open fixture %s: %v", configChildObjectDirsFixture, err)
+	}
+	defer f.Close()
+
+	pairs := map[string]string{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			t.Fatalf("fixture %s: line %q has %d fields, want <ИмяКаталога> <ВидИзМанифеста>",
+				configChildObjectDirsFixture, line, len(fields))
+		}
+		pairs[fields[0]] = fields[1]
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan fixture: %v", err)
+	}
+	if len(pairs) != configChildKindCount {
+		t.Fatalf("fixture %s parsed to %d entries, want %d; the parser or the file is broken",
+			configChildObjectDirsFixture, len(pairs), configChildKindCount)
+	}
+	return pairs
+}
+
+// TestDumpDirNamesCoversDeclaredChildObjectKinds fails when a kind a real
+// configuration declares has no dumpDirNames entry.
+func TestDumpDirNamesCoversDeclaredChildObjectKinds(t *testing.T) {
+	pairs := readConfigChildObjectDirs(t)
+	dirs := make([]string, 0, len(pairs))
+	for d := range pairs {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+
+	if missing := uncoveredDirs(dumpDirNames, dirs); len(missing) > 0 {
+		t.Errorf("dumpDirNames has no entry for declared configuration child kinds %v.\n"+
+			"Each of them is a legitimate top-level directory of a dump, so without an entry "+
+			"dumpRootMarker does not recognise it and a dump whose top directory is one of "+
+			"them cannot be anchored past a wrapper. Add the Russian name to metadata_types.go.",
+			missing)
+	}
+
+	// Positive control on the same checker, with a known-present entry removed.
+	const control = "Catalogs"
+	if _, ok := dumpDirNames[control]; !ok {
+		t.Fatalf("positive control is broken: %q is not in dumpDirNames to begin with", control)
+	}
+	damaged := make(map[string]string, len(dumpDirNames))
+	for k, v := range dumpDirNames {
+		if k == control {
+			continue
+		}
+		damaged[k] = v
+	}
+	if got := uncoveredDirs(damaged, dirs); !slices.Equal(got, []string{control}) {
+		t.Fatalf("positive control failed: with %q removed the checker reported %v, want exactly [%s]",
+			control, got, control)
+	}
+}
+
+// TestDumpDirRussianNamesMatchTheKindTables is the guard against the one failure
+// this work could not test by running it: a WRONG Russian name.
+//
+// A missing entry is loud (the key carries a raw English prefix that no resolver
+// queries). A wrong Russian name is silent — the key looks perfectly ordinary and
+// is simply never the one anybody asks for — and it reaches the customer, because
+// the prefix is the visible half of every module key the server prints.
+//
+// So no Russian name added for a kind is written from knowledge. Each one must be
+// the string this package ALREADY uses for that kind elsewhere: appliedKindEnToRu
+// for the applied kinds, serviceKindEnToRu for the service ones. Those tables are
+// what canonicalises subsystem membership against the live 1C platform full name,
+// so agreeing with them is agreeing with the platform.
+//
+// Bots is the single documented exception and is asserted separately below.
+func TestDumpDirRussianNamesMatchTheKindTables(t *testing.T) {
+	pairs := readConfigChildObjectDirs(t)
+
+	checked := 0
+	for dir, kind := range pairs {
+		want, ok := appliedKindEnToRu[kind]
+		if !ok {
+			want, ok = ServiceKindNameRu(kind)
+		}
+		if !ok {
+			t.Errorf("kind %q (directory %q) has no Russian name in either appliedKindEnToRu or "+
+				"serviceKindEnToRu, so dumpDirNames[%q] cannot be cross-checked against anything "+
+				"and would be a name somebody typed", kind, dir, dir)
+			continue
+		}
+		got, ok := dumpDirNames[dir]
+		if !ok {
+			continue // reported by the coverage test above
+		}
+		checked++
+		if got != want {
+			t.Errorf("dumpDirNames[%q] = %q but this package renders kind %q as %q everywhere else. "+
+				"A prefix that disagrees with the subsystem tables is a key no resolver ever asks for.",
+				dir, got, kind, want)
+		}
+	}
+	if checked != configChildKindCount {
+		t.Fatalf("only %d of %d kinds were actually compared; the loop is skipping rows and its "+
+			"green verdict means nothing", checked, configChildKindCount)
+	}
+
+	// Positive control: the comparison must reject a name that is merely plausible.
+	if want, _ := ServiceKindNameRu("Style"); want == "Стили" {
+		t.Fatal("positive control is broken: the plural was expected to differ from the singular")
+	}
+}
+
+// TestBotsIsTheOneDerivedRussianName states, in the tree, the one Russian name in
+// dumpDirNames that is NOT copied from another table in this package.
+//
+// The repository knows the collection property «Боты» — it is in
+// testdata/config_metadata_properties.txt, the snapshot of the platform type
+// ОбъектМетаданныхКонфигурация that configModuleNames also draws its four names
+// from. It does not know the singular anywhere, because no subsystem table lists a
+// bot. The singular is therefore derived by the rule this package already applies
+// and documents in subsystem_kinds.go, where ЭлементыСтиля gives ЭлементСтиля and
+// ВнешниеИсточникиДанных gives ВнешнийИсточникДанных.
+//
+// The test exists so the derivation is visible rather than buried, and so that
+// anyone who obtains the real platform full name has one place to correct.
+func TestBotsIsTheOneDerivedRussianName(t *testing.T) {
+	const dir = "Bots"
+	got, ok := dumpDirNames[dir]
+	if !ok {
+		t.Fatalf("dumpDirNames has no %q entry", dir)
+	}
+	if got != "Бот" {
+		t.Errorf("dumpDirNames[%q] = %q, want %q", dir, got, "Бот")
+	}
+	// The plural it is derived FROM must really be in the snapshot; without that
+	// the derivation has no source at all.
+	const snapshot = "testdata/config_metadata_properties.txt"
+	data, err := os.ReadFile(filepath.FromSlash(snapshot))
+	if err != nil {
+		t.Fatalf("open %s: %v", snapshot, err)
+	}
+	if !slices.Contains(strings.Split(strings.TrimSpace(string(data)), "\n"), "Боты") {
+		t.Fatalf("%s no longer lists «Боты», so the singular in dumpDirNames is derived from "+
+			"nothing; re-take the snapshot or drop the entry", snapshot)
+	}
+	// And it is genuinely absent from the kind tables, or it would not be an
+	// exception and this test would be describing a state that no longer holds.
+	if _, ok := ServiceKindNameRu("Bot"); ok {
+		t.Fatalf("serviceKindEnToRu now carries Bot; fold %q into the cross-check in "+
+			"TestDumpDirRussianNamesMatchTheKindTables and delete this exception", dir)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Guard 2: key derivation is pinned to dumpIndexSchemaVersion.
 // ---------------------------------------------------------------------------
 
@@ -191,6 +387,10 @@ var unwrappedKeyDigestCorpus = []string{
 	"Расширения/Доработки3D/Ext/ManagedApplicationModule.bsl",
 	"Расширения/Доработки3D/DataProcessors/АРМ/Forms/Форма/Ext/Form/Module.bsl",
 	"Styles/Основной/Ext/Module.bsl",
+	// The unknown-category fallback. It used to be the Styles row above, which the
+	// completed dumpDirNames turned into a KNOWN kind; both are kept, one line
+	// apart, so the corpus covers the branch on either side of the table.
+	"ExternalDataProcessors/Основной/Ext/Module.bsl",
 	"Module.bsl",
 }
 
@@ -221,6 +421,13 @@ var anchoredKeyDigestCorpus = []string{
 	"Catalogs/Спр/SettingsStorages/НастройкиНовостей/Forms/Настройка/Ext/Form/Module.bsl",
 	"Catalogs/Ном/Ext/ManagedApplicationModule.bsl",
 	"Catalogs/Расширения/Y/Catalogs/Ном/Ext/ObjectModule.bsl",
+	// A wrapper above a kind that became a root marker only when dumpDirNames was
+	// completed. Before that this row anchored at 0 and its key was
+	// "wrapper.Styles.МодульФормы": the wrapper was read as the kind and the kind as
+	// the object. It covers ONE of the added entries, Styles, and claims no more
+	// than that; what it buys is that removing that entry from the table shows up as
+	// a moved key here rather than only as one fewer name in a coverage count.
+	"wrapper/Styles/Основной/Ext/Module.bsl",
 }
 
 // bslKeyCorpusDigest is sha256 over "<path>\t<key>\n" for keyDigestCorpus in the
@@ -242,13 +449,37 @@ var anchoredKeyDigestCorpus = []string{
 // schema-version event under the BUMP PROTOCOL. The one above moving may mean only
 // that the anchor scan changed, which is not.
 //
-// Its value is the digest the guard carried BEFORE the anchor scan existed, byte
-// for byte, and that is the point: the scan was added, this number did not change.
-const bslUnwrappedCorpusDigest = "7134dd1c0084959c2e8b8f7722972ca93d39954c9c401181465bfc7f156bbba0"
+// It held 7134dd1c… from before the anchor scan existed until dumpDirNames was
+// completed, which is the whole history of the claim it carries: the scan was
+// added and this number did not move.
+//
+// IT MOVES NOW, AND THE MOVE IS THE FINDING RATHER THAN AN INCONVENIENCE. Two
+// things reached it at once and they are different in kind, so both are named:
+//
+//   - ONE EXISTING ROW RE-KEYED. Completing dumpDirNames turns
+//     "Styles/Основной/Ext/Module.bsl" from "Styles.Основной.МодульФормы" into
+//     "Стиль.Основной.МодульФормы". The other 38 rows are byte for byte unchanged,
+//     verified row by row rather than inferred from the digest moving. Under the
+//     BUMP PROTOCOL this is precisely the event that forces dumpIndexSchemaVersion
+//     up, and it is up: 3 -> 4.
+//   - ONE ROW WAS ADDED. Styles was this corpus's unknown-category row, and it
+//     stopped being unknown, so ExternalDataProcessors was added to keep that
+//     branch covered. A digest that moved only because a row appeared would prove
+//     nothing about derivation, which is why the two causes are separated here
+//     instead of being summed into one sentence.
+//
+// What the moved row does NOT mean is that any real dump re-keys. Styles holds no
+// .bsl at all, and neither do the seventeen other kinds this change took from that
+// manifest, measured on the dump they were enumerated from, so the row is a
+// synthetic probe of the table and not a shape anybody has on disk. (Bots is
+// outside that measurement by construction: it is not in that manifest.) The bump is justified by the wrongly-rooted
+// user whose PERSISTED DocIDs would otherwise replay the collapsed keys, which is
+// argued where it belongs, at dumpIndexSchemaVersion in generation.go.
+const bslUnwrappedCorpusDigest = "7e0d5d125153d6af3e6601479212439c7034a87e17225df9edef8ea829809fac"
 
 const (
-	bslKeyCorpusDigest              = "7871387d3835a9e0ceaffce9f1083bfdfd0ec50e3b6a129faee944bc48e8ea88"
-	pinnedSchemaVersionForKeyDigest = 3
+	bslKeyCorpusDigest              = "0803e4ed74354c08f4606b0fbf4599ac82078508bcf97cb66a7fd63941246351"
+	pinnedSchemaVersionForKeyDigest = 4
 )
 
 func digestOf(paths []string) (string, string) {

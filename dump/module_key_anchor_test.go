@@ -53,18 +53,27 @@ var wrapperPrefixes = []string{
 //     shape. No 1C dump lays a module out that way — the configuration's own
 //     modules live one level down, in the root Ext directory.
 //
-//   - anchorCorpusUnknownKind: "Styles" is the corpus's unknown-category row and
-//     is deliberately NOT a dumpDirNames key, so it is not a root marker and no
-//     anchor exists. This is a real and inherent limit: the scan recognises a
-//     root only through the tables the package already has, so a wrapped dump
-//     whose top-level directory is a kind the package does not know stays
-//     un-anchored. The remedy is the same one Guard 1 in module_key_guard_test.go
-//     already forces from measured ground truth — add the kind to
-//     metadata_types.go — and it fixes both problems at once, because such a
-//     directory yields raw-English-prefix keys even at a CORRECT root.
+//   - anchorCorpusUnknownKind: a top-level directory that is deliberately NOT a
+//     dumpDirNames key, so it is not a root marker and no anchor exists. This is a
+//     real and inherent limit: the scan recognises a root only through the tables
+//     the package already has, so a wrapped dump whose top-level directory is a
+//     kind the package does not know stays un-anchored. The remedy is the one both
+//     coverage guards in module_key_guard_test.go force from measured ground truth
+//     — add the kind to metadata_types.go — and it fixes two problems at once,
+//     because such a directory yields raw-English-prefix keys even at a CORRECT
+//     root.
+//
+//     The row used to be "Styles". That stopped being an unknown kind when
+//     dumpDirNames was completed from a real configuration's <ChildObjects>, and
+//     the controls below caught it rather than passing over it, which is the whole
+//     reason they are written as controls. ExternalDataProcessors takes its place
+//     and is a better example than an invented name: it is a real 1C artefact that
+//     is deliberately NOT in the table, because it is not a configuration child
+//     class at all but a standalone root mdclass. If a later change ever admits it,
+//     this row goes red and that decision has to be made in the open.
 const (
 	anchorCorpusRootOnly    = "Module.bsl"
-	anchorCorpusUnknownKind = "Styles/Основной/Ext/Module.bsl"
+	anchorCorpusUnknownKind = "ExternalDataProcessors/Основной/Ext/Module.bsl"
 )
 
 // TestAnchorScanIsANoOpAtACorrectRoot pins the property the whole change rests
@@ -178,9 +187,9 @@ func TestAnchorScanRecoversEveryWrapperShape(t *testing.T) {
 	// And the MECHANISM behind the unknown-kind exclusion, so the row above is
 	// explained rather than merely observed: an unknown top-level directory is not
 	// a root marker, so no anchor can exist below a wrapper.
-	if dumpRootMarker("Styles") {
-		t.Errorf("dumpRootMarker(\"Styles\") = true; the unknown-kind exclusion is " +
-			"documented against a table state that no longer holds")
+	if unknownDir := strings.Split(anchorCorpusUnknownKind, "/")[0]; dumpRootMarker(unknownDir) {
+		t.Errorf("dumpRootMarker(%q) = true; the unknown-kind exclusion is "+
+			"documented against a table state that no longer holds", unknownDir)
 	}
 	if !dumpRootMarker("Catalogs") {
 		t.Fatalf("positive control failed: dumpRootMarker(\"Catalogs\") = false, so the " +
@@ -198,13 +207,19 @@ func TestAnchorScanLeavesUnanchorablePathsAlone(t *testing.T) {
 		path string
 		want string
 	}{
-		// "Styles" is not a dumpDirNames key, so the raw-English-prefix fallback
-		// applies. The inner "Ext" IS a root marker, so this row also proves the
-		// shape check rejects it: "Module.bsl" is not one of the four
-		// configModuleNames files, so Ext/Module.bsl is not a configuration-module
-		// root.
+		// ExternalDataProcessors is not a dumpDirNames key and is deliberately not
+		// one (it is a standalone root mdclass, not a configuration child class), so
+		// the raw-English-prefix fallback applies. The inner "Ext" IS a root marker,
+		// so this row also proves the shape check rejects it: "Module.bsl" is not one
+		// of the four configModuleNames files, so Ext/Module.bsl is not a
+		// configuration-module root.
 		{"unknown kind keeps the English prefix",
-			"Styles/Основной/Ext/Module.bsl", "Styles.Основной.МодульФормы"},
+			"ExternalDataProcessors/Основной/Ext/Module.bsl", "ExternalDataProcessors.Основной.МодульФормы"},
+		// The same path with a kind the table now KNOWS. It is here beside its own
+		// counter-example so the difference the table makes is one line apart:
+		// Styles was this row's unknown kind until dumpDirNames was completed.
+		{"a newly known kind gets its Russian prefix",
+			"Styles/Основной/Ext/Module.bsl", "Стиль.Основной.МодульФормы"},
 		// Nothing here marks a root at all.
 		{"no marker anywhere", "foo/bar/baz.bsl", "foo.bar.baz"},
 		// A wrapper over a path that is itself not dump-shaped: the scan finds no
