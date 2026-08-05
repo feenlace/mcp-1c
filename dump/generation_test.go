@@ -3,8 +3,12 @@ package dump
 import (
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -487,6 +491,112 @@ func TestReapStaleBuildDirs_RemovesStaleKeepsFresh(t *testing.T) {
 	}
 	if !generationReadyDir(generationDir(cpath, gensig)) {
 		t.Fatalf("generation %s not READY after post-reap build", gensig)
+	}
+}
+
+// TestReapStaleBuildDirs_ARetainedBuildDirIsNotSilent.
+//
+// KEEPING THE DIR IS RIGHT; SAYING NOTHING ABOUT IT WAS NOT. The reaper cannot
+// remove a .building-* whose tree is fresh, because the only thing that
+// distinguishes a killed build from a live one here is the no-write age, and the
+// name carries no owner to ask after (MkdirTemp's suffix is a random number, not a
+// pid). So a build killed a minute ago leaves a temp dir that survives serve after
+// serve and an explicit --reindex, all of them correctly refusing to touch it.
+//
+// What was wrong is that every one of those serves was silent: PrepareServeGeneration
+// logs only when something was reaped, so the space was held with no line naming it
+// and no number for it. This pins the line, and pins that it carries the size,
+// because «a dir is being kept» without the cost is a sentence an operator cannot
+// act on.
+func TestReapStaleBuildDirs_ARetainedBuildDirIsNotSilent(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Реап/Ext/ObjectModule.bsl", "Процедура Р()\nКонецПроцедуры\n")
+
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	gensDir := generationsDir(cpath)
+	freshShard := filepath.Join(gensDir, buildTmpPrefix+"cafef00d-fresh", "shard_0")
+	if err := os.MkdirAll(freshShard, 0o755); err != nil {
+		t.Fatalf("mkdir freshShard: %v", err)
+	}
+	// A payload whose byte count is known exactly, so the number in the log line is
+	// checked against something rather than merely present.
+	const payload = "живой сегмент"
+	if err := os.WriteFile(filepath.Join(freshShard, "segment.zap"), []byte(payload), 0o644); err != nil {
+		t.Fatalf("write fresh seg: %v", err)
+	}
+
+	rec := captureLogs(t)
+	removed, err := ReapStaleBuildDirs(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("ReapStaleBuildDirs: %v", err)
+	}
+	// PREMISE: the dir really was KEPT. If it had been reaped, an absent retention
+	// line would be correct and this test would be measuring nothing.
+	if len(removed) != 0 {
+		t.Fatalf("removed = %v, want none: a fresh build temp dir must survive", removed)
+	}
+	if _, err := os.Stat(filepath.Dir(freshShard)); err != nil {
+		t.Fatalf("the fresh build temp dir is gone: %v", err)
+	}
+
+	msgs := strings.Join(rec.atLevel(slog.LevelInfo), "\n")
+	if !strings.Contains(msgs, "keeping an in-progress build temp dir") {
+		t.Fatalf("a build temp dir was kept and nothing said so. INFO seen: %q", msgs)
+	}
+	if dirs := rec.attrValuesAt(slog.LevelInfo, "dir"); !slices.Contains(dirs, buildTmpPrefix+"cafef00d-fresh") {
+		t.Errorf("dir= is %v and does not name the dir that was kept", dirs)
+	}
+	// THE COST, not just the fact. A retention line with no number cannot tell 2 MB
+	// from the 115 MB a real interrupted build leaves behind.
+	if got := rec.attrValuesAt(slog.LevelInfo, "bytes"); !slices.Contains(got, strconv.Itoa(len(payload))) {
+		t.Errorf("bytes= is %v, want it to carry %d, the exact size of the tree that is "+
+			"being kept", got, len(payload))
+	}
+}
+
+// TestReapStaleBuildDirs_AReapedBuildDirIsNotReportedAsRetained is the control for
+// the test above: «says it is keeping the dir» must not be satisfied by a reaper
+// that says so about every dir, including the ones it just deleted.
+func TestReapStaleBuildDirs_AReapedBuildDirIsNotReportedAsRetained(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Реап/Ext/ObjectModule.bsl", "Процедура Р()\nКонецПроцедуры\n")
+
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("cachePath: %v", err)
+	}
+	gensDir := generationsDir(cpath)
+	staleDir := filepath.Join(gensDir, buildTmpPrefix+"deadbeef-stale")
+	staleShard := filepath.Join(staleDir, "shard_0")
+	if err := os.MkdirAll(staleShard, 0o755); err != nil {
+		t.Fatalf("mkdir staleShard: %v", err)
+	}
+	staleSeg := filepath.Join(staleShard, "segment.zap")
+	if err := os.WriteFile(staleSeg, []byte("partial"), 0o644); err != nil {
+		t.Fatalf("write stale seg: %v", err)
+	}
+	old := time.Now().Add(-2 * buildDirStaleAfter)
+	for _, p := range []string{staleSeg, staleShard, staleDir} { // children-first
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	rec := captureLogs(t)
+	removed, err := ReapStaleBuildDirs(dir, cacheDir)
+	if err != nil {
+		t.Fatalf("ReapStaleBuildDirs: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("removed = %v, want the stale dir removed", removed)
+	}
+	if msgs := strings.Join(rec.atLevel(slog.LevelInfo), "\n"); strings.Contains(msgs, "keeping an in-progress build temp dir") {
+		t.Errorf("the reaper announced it was KEEPING a dir it removed:\n%s", msgs)
 	}
 }
 

@@ -900,6 +900,7 @@ func ReapStaleBuildDirs(dir, cacheDir string) ([]string, error) {
 			// (1) Abandoned mid-build temp dir. A fresh tree means a live build may
 			// still be writing it — MUST NOT remove.
 			if !buildDirStale(genPath, cutoff) {
+				noteRetainedBuildDir(genPath, name)
 				continue
 			}
 			if removeReapable(genPath, name, "abandoned build temp dir") {
@@ -952,6 +953,86 @@ func removeReapable(path, name, kind string) bool {
 	}
 	slog.Info("reap: removed "+kind, "dir", name)
 	return true
+}
+
+// buildDirSizeWalkLimit bounds the entry count noteRetainedBuildDir will walk to
+// size a retained build dir. The number it publishes must be honest, so the walk
+// says when it stopped rather than rounding a partial sum up into a total. A build
+// dir is a handful of shard subdirs holding zap segments, so this reaches the whole
+// tree of any real one; the bound exists so a pathological arena cannot turn a
+// diagnostic into the expensive part of opening a serve.
+const buildDirSizeWalkLimit = 20000
+
+// noteRetainedBuildDir reports a .building-* temp dir that ReapStaleBuildDirs
+// declined to remove, with what it costs to keep.
+//
+// WHY THE DIR IS KEPT AT ALL, AND WHY REAPING IT SOONER WOULD BE WRONG. The only
+// evidence available here that a build is dead is that nothing in its tree has been
+// written for buildDirStaleAfter. The name carries no owner to ask after: the build
+// temp dir is os.MkdirTemp(gensDir, buildTmpPrefix+gensig+"-"), so the suffix is
+// MkdirTemp's random number and not a pid, and a pid would not settle it either on
+// a shared cache dir where the owner may live in another container or on another
+// host. Reaping a fresh tree therefore cannot be made safe: it would delete the
+// shards a live build-leader is streaming, and on the adoptFlatShards path the temp
+// dir can hold the ONLY copy of the legacy flat cache mid-rename.
+//
+// SO THE LEAK IS MADE VISIBLE INSTEAD OF SMALLER. Before this, a serve open that
+// found such a dir said nothing whatsoever: PrepareServeGeneration logs only when
+// something was actually reaped, so a killed build's temp dir sat there through
+// serve after serve, and through an explicit --reindex, with no line naming it and
+// no number for the space. That silence is the defect. The dir itself is correct
+// behaviour.
+//
+// WHAT AN OPERATOR CAN AND CANNOT SEE. This is slog.Info, the level its sibling
+// reap-summary line already uses, and deliberately not louder: retained space that
+// clears itself on a later start is not the class of event that justifies Error.
+// The consequence is stated rather than glossed. cmd/mcp-1c installs FIVE default
+// loggers and THREE of them sit at LevelError: the early default that --build-index
+// runs under, the MCP pipe
+// launch, and the devnull fallback the pipe launch takes when it cannot open its
+// stderr log. Those three drop this line, exactly as they would drop a Warn. The
+// two at LevelInfo, the terminal serve and --debug, show it. Raising the level
+// would not change that; only Error would, and this is not one.
+//
+// Both figures are resolved by, and only by:
+//
+//	/usr/bin/grep -v '^[[:space:]]*//' cmd/mcp-1c/main.go | /usr/bin/grep -c 'slog.SetDefault('
+//
+// It reads ONE file and drops comment lines, so naming the identifier in prose,
+// which this paragraph and two others in this package now do, cannot move either
+// number.
+func noteRetainedBuildDir(path, name string) {
+	var bytes int64
+	// entries, NOT files: the walk visits directories too, and the attribute is named
+	// for what it counts. The dir itself is one of them.
+	entries, truncated := 0, false
+	walkErr := filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entries >= buildDirSizeWalkLimit {
+			truncated = true
+			return fs.SkipAll
+		}
+		entries++
+		if d.IsDir() {
+			return nil
+		}
+		if info, iErr := d.Info(); iErr == nil {
+			bytes += info.Size()
+		}
+		return nil
+	})
+	if walkErr != nil {
+		// The dir may have been adopted or removed under us mid-walk, which is the
+		// ordinary end of a healthy build. Report what was counted and say the count
+		// is partial rather than publishing it as a total.
+		truncated = true
+	}
+	slog.Info("reap: keeping an in-progress build temp dir; it holds space until its "+
+		"whole tree has gone untouched for the staleness window",
+		"dir", name, "bytes", bytes, "entries", entries, "partial", truncated,
+		"stale_after", buildDirStaleAfter.String())
 }
 
 // buildDirStale reports whether EVERY entry in the temp build dir tree is older

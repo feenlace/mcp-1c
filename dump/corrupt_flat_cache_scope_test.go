@@ -168,12 +168,14 @@ func TestCorruptFlatCacheDoesNotDestroyTheGenerationsArena(t *testing.T) {
 // arena again would have to say so in its own log line.
 //
 // THE LEVEL IS PART OF THE ASSERTION and it is slog.Error, because
-// cmd/mcp-1c/main.go throws away anything below it in two of its four logging
-// configurations: the early default (main.go:52) that the whole of
-// `--build-index` runs under, and the MCP pipe launch (main.go:167). Those are
-// the two in which this line is the operator's only evidence, and the offline
-// --build-index is the very command the arena loss was measured on. A WARN here
-// would satisfy a reader of this source and reach nobody.
+// cmd/mcp-1c/main.go throws away anything below it in three of its five logging
+// configurations (this said two of four, and both halves were short by one; the
+// resolving command is in noteRetainedBuildDir's doc comment): the
+// early default that the whole of `--build-index` runs under, the MCP pipe launch,
+// and the devnull fallback that launch takes when it cannot open its stderr log.
+// Those are the three in which this line is the operator's only evidence, and the
+// offline --build-index is the very command the arena loss was measured on. A WARN
+// here would satisfy a reader of this source and reach nobody.
 func TestCorruptFlatCacheRecoveryNamesWhatItRemoved(t *testing.T) {
 	dumpDir, cacheDir, cpath, _ := corruptFlatCacheBesideAnArena(t)
 	before := flatCacheArtefacts(t, cpath)

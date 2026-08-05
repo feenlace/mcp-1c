@@ -127,11 +127,14 @@ func removeFlatCacheContents(cpath string) []string {
 // that were actually unlinked, and on a terminal launch in Russian too.
 //
 // IT IS slog.Error AND THAT IS NOT SEVERITY INFLATION, it is the only level this
-// binary does not throw away. cmd/mcp-1c/main.go installs four logging
-// configurations and TWO of them sit at LevelError: the early default at
-// main.go:52, which is the one `--build-index` runs under from start to exit,
-// and the MCP pipe launch at main.go:167. A WARN here would be dropped by
-// exactly the two configurations in which this message is the operator's only
+// binary does not throw away. This paragraph said FOUR configurations of which TWO
+// sit at LevelError, and both halves were short by one: the command in
+// noteRetainedBuildDir's doc comment counts FIVE default loggers in
+// cmd/mcp-1c/main.go, and THREE of them are at
+// LevelError. They are the early default, which is the one `--build-index` runs
+// under from start to exit; the MCP pipe launch; and the devnull fallback that
+// launch takes when it cannot open its stderr log. A WARN here would be dropped by
+// exactly the three configurations in which this message is the operator's only
 // evidence, including the offline --build-index the loss was measured on. The
 // remaining two (terminal serve, --debug) sit at LevelInfo and print it either
 // way.
