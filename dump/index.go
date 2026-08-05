@@ -753,6 +753,12 @@ type Index struct {
 	// every MCP tool request goroutine. An atomic keeps that read off mu, so a tool
 	// call never contends with a reload for it. See collapsed_keys.go.
 	collapsed atomic.Pointer[CollapsedKeyState]
+	// wrapped carries how many indexed files were keyed from a path carrying
+	// directory levels above the dump root, in the load currently published. Same
+	// atomic, same reason, same recompute-never-persist argument; see
+	// wrapped_paths.go for why it is a separate number from collapsed and not a
+	// second field of it.
+	wrapped atomic.Pointer[WrappedPathState]
 	// cacheDir is the cache location this index was opened with, in NewIndex
 	// semantics (empty = the platform cache dir). Reload needs it to build the
 	// replacement generation under the SAME cache the current one lives in;

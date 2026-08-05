@@ -517,3 +517,89 @@ func elementText(b []byte, tag string) (string, bool) {
 	// becomes part of a docID, and a decomposed one would never match an NFC query.
 	return NFC(name), true
 }
+
+// ---------------------------------------------------------------------------
+// Reporting what the detection decided, and what it could not.
+// ---------------------------------------------------------------------------
+
+// ExtensionLayoutSummary is a dump root's extension layout, in the shape a caller
+// OUTSIDE this package can describe it in.
+//
+// THE SPLIT BETWEEN COUNTS AND NAMES IS THE POINT. Everything a customer-facing
+// sentence may contain is a number or a boolean. Dirs holds directory names read
+// off disk, and a directory name read off disk is untrusted text: a real customer
+// tree contains «Доработки — копия», so a name spliced into RU prose puts a тире in
+// it whatever the guard on that prose says. Dirs is for the operator log, where it
+// belongs in an attribute beside the message rather than inside it.
+type ExtensionLayoutSummary struct {
+	// SelfNamed reports that the inspected path is itself one extension.
+	SelfNamed bool
+	// Extensions is how many immediate child directories are extensions.
+	Extensions int
+	// Dirs are those child directories, sorted. OPERATOR LOG ONLY; see above.
+	Dirs []string
+	// The four ways a directory can be undecided, counted separately because the
+	// thing to do about each of them differs.
+	NotRegular    int // a Configuration.xml that is not a regular file
+	Unreadable    int // present, and the read failed
+	ReadTruncated int // <Properties> did not close inside the read window
+	NameRejected  int // declared a name that cannot be part of a key
+	// ScanTruncated reports that the child scan stopped at maxExtensionScan, so
+	// extensions below it were never looked for.
+	ScanTruncated bool
+}
+
+// Undecided is how many directories the detection could not answer for.
+func (s ExtensionLayoutSummary) Undecided() int {
+	return s.NotRegular + s.Unreadable + s.ReadTruncated + s.NameRejected
+}
+
+// Quiet reports that there is nothing at all to say about this layout.
+func (s ExtensionLayoutSummary) Quiet() bool {
+	return !s.SelfNamed && s.Extensions == 0 && s.Undecided() == 0 && !s.ScanTruncated
+}
+
+// summary renders the internal layout into the reportable one.
+func (l extensionLayout) summary() ExtensionLayoutSummary {
+	var s ExtensionLayoutSummary
+	s.SelfNamed = l.self != ""
+	s.Extensions = len(l.byDir)
+	for dir := range l.byDir {
+		s.Dirs = append(s.Dirs, dir)
+	}
+	slices.Sort(s.Dirs)
+	for _, d := range l.doubts {
+		switch d.reason {
+		case doubtManifestNotRegular:
+			s.NotRegular++
+		case doubtManifestUnreadable:
+			s.Unreadable++
+		case doubtManifestTruncated:
+			s.ReadTruncated++
+		case doubtNameRejected:
+			s.NameRejected++
+		case doubtScanTruncated:
+			s.ScanTruncated = true
+		}
+	}
+	return s
+}
+
+// InspectExtensionLayout reads dir and reports what its extension layout amounts
+// to. It is the startup-time entry point, used before an index exists; the index's
+// own answer, taken from the layout it actually keyed with, is ExtensionLayout.
+func InspectExtensionLayout(dir string) ExtensionLayoutSummary {
+	return detectExtensionLayout(dir).summary()
+}
+
+// ExtensionLayout reports the layout THIS INDEX derived its keys with, which is
+// the one a tool answer should describe. It is the layout read once behind
+// extLayoutOnce, so asking for it does not read the disk again and cannot disagree
+// with the keys already served.
+func (idx *Index) ExtensionLayout() ExtensionLayoutSummary {
+	if idx == nil {
+		return ExtensionLayoutSummary{}
+	}
+	idx.extLayoutOnce.Do(func() { idx.extLayout = detectExtensionLayout(idx.dir) })
+	return idx.extLayout.summary()
+}

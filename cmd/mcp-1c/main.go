@@ -279,7 +279,7 @@ func main() {
 		// puts it in front of the person who typed the flag; answering from the build
 		// goroutine would put it in a report that is not sequenced against the end of
 		// the process and goes missing outright over repeated starts.
-		reportNestedDumpRoots(*dumpDir)
+		reportDumpRootAndLayout(*dumpDir)
 
 		var err error
 		dumpIndex, err = openServeIndexLocal(serveBuildCtx, *dumpDir, *cacheDir, *reindex)
@@ -563,43 +563,126 @@ func dumpPathFault(dumpDir string) error {
 	return nil
 }
 
-// nestedDumpRootMessage is what to say when --dump points ABOVE the dump root, or
-// "" when there is nothing to say.
+// nestedDumpRootMessage is what to say when --dump does not point at the dump
+// root, or "" when there is nothing to say.
 //
 // SILENCE IS THE NORMAL ANSWER and is the shipped behaviour: a path that is itself
-// a dump root produces nothing at all, and so does a path that has no root under
-// it either, because then this code has learned nothing the operator does not
-// already know.
+// a dump root produces nothing at all.
 //
-// IT NAMES THE ROOTS AND STOPS THERE. Which of them the operator wants is not
-// something the server can observe, and descending into one silently would be the
-// same defect the customer reported, moved one level down and made harder to see.
-// So the message ends in an instruction to the person, not in an action.
+// IT REPORTS WHAT WAS MEASURED, AND STOPS THERE. The version this replaces asserted
+// that «модули расширения и конфигурации попадают в одно пространство ключей и
+// затирают друг друга», and on the tree that motivated the whole feature that
+// sentence is FALSE: two extension dumps side by side are recognised from their
+// manifests, keyed as ext.<Имя>., and the same process measures the overwrite as
+// zero. It then told the operator to point --dump at ONE of the roots, which for
+// that tree means throwing the other extension away. A message that misstates the
+// harm and prescribes a loss is worse than no message, so this one says which of
+// the children the server recognised and what it will do with them, and warns
+// about a shared keyspace only when the children are NOT extensions and really do
+// share one.
+//
+// IT NAMES NOTHING. Directory names are read off disk and a real customer tree
+// contains «Доработки — копия», so a name spliced into this sentence puts a тире in
+// customer-facing RU no matter what the guard on the sentence says. The names ride
+// in the slog attributes beside it, which is where data belongs and where the
+// operator can still read them.
 //
 // Customer-facing RU: no тире.
-func nestedDumpRootMessage(insp dump.DumpRootInspection) string {
-	if insp.IsRoot || len(insp.NestedRoots) == 0 {
+func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLayoutSummary) string {
+	if insp.IsRoot {
 		return ""
 	}
+	if len(insp.NestedRoots) == 0 {
+		// NOTHING BELOW LOOKS LIKE A ROOT EITHER, AND THIS SAYS NOTHING ABOUT IT.
+		// The tempting sentence here is «путь не выглядит корнем выгрузки», and one
+		// ReadDir cannot support it: a hand-made tree holding only CommonModules
+		// scores below minKindDirsForRoot and is indistinguishable, at this cost,
+		// from a path two levels above a real root, and its keys are perfectly
+		// correct. Guessing would put a warning in front of every operator with a
+		// partial but valid tree.
+		//
+		// The case that matters here, a --dump two levels too high, is reported on
+		// the other channel and by MEASUREMENT rather than by shape: every file in
+		// such a tree is keyed from a path the anchor scan had to move, which is
+		// what dump.WrappedPathState counts and what the notice in
+		// tools/index_notice.go carries. That number is zero for the partial tree
+		// above and is every file for this one.
+		return ""
+	}
+
 	msg := "путь в --dump указывает не на корень выгрузки, а на каталог выше него. "
 	if len(insp.NestedRoots) == 1 {
-		msg += "Внутри лежит готовый корень выгрузки: " + insp.NestedRoots[0] + ". " +
-			"Укажите в --dump именно его."
+		msg += "Внутри лежит готовый корень выгрузки (имя в поле roots). "
 	} else {
-		msg += "Внутри лежат готовые корни выгрузки: " + strings.Join(insp.NestedRoots, ", ") + ". " +
-			"Укажите в --dump один из них, тот, который вам нужен."
+		msg += "Внутри лежат готовые корни выгрузки, " + strconv.Itoa(len(insp.NestedRoots)) +
+			" штуки, их имена в поле roots. "
 	}
+
+	switch {
+	case layout.Extensions >= len(insp.NestedRoots):
+		// Every root below the path is a recognised extension. Their modules get
+		// their own namespace, so nothing collides and nothing is lost; saying so is
+		// what stops the operator from re-pointing the path and discarding the rest.
+		msg += "Все они опознаны как выгрузки расширений, и сервер проиндексирует " +
+			"каждую под её собственным именем, так что содержимое не потеряется. " +
+			"Указывать один из них в --dump нужно только если вам нужен именно он."
+	case layout.Extensions > 0:
+		msg += "Часть из них опознана как выгрузки расширений и получит собственные " +
+			"имена, остальные попадут в общее пространство ключей и могут затереть " +
+			"друг друга. Укажите в --dump тот корень, который вам нужен."
+	default:
+		msg += "Ни один из них не опознан как выгрузка расширения, поэтому их модули " +
+			"попадают в одно пространство ключей и затирают друг друга. Укажите в " +
+			"--dump тот корень, который вам нужен."
+	}
+
 	msg += " Сервер не переходит внутрь сам, потому что выбрать за вас не может, " +
-		"а молчаливый переход скрыл бы ошибку пути ровно так же, как она скрывалась до сих пор. " +
-		"Пока путь не исправлен, модули расширения и конфигурации попадают в одно " +
-		"пространство ключей и затирают друг друга."
+		"а молчаливый переход скрыл бы ошибку пути ровно так же, как она скрывалась до сих пор."
 	if insp.Truncated {
 		msg += " Просмотрены не все подкаталоги, поэтому список может быть неполным."
 	}
 	return msg
 }
 
-// reportNestedDumpRoots delivers that message, or says nothing.
+// extensionLayoutDoubtMessage is what to say about directories whose
+// extension-ness the server could not decide, or "" when it decided every one.
+//
+// A DOUBT IS NEVER A GUESS AND IS NEVER SILENCE. Detection has three answers, and
+// the third one leaves the keys exactly as they were before extensions were
+// recognised at all. That is the safe direction, and it is only safe because it is
+// said out loud: a namespace that quietly failed to appear looks identical to a
+// dump that never had one.
+//
+// Counts only, no names, for the reason nestedDumpRootMessage gives.
+//
+// Customer-facing RU: no тире.
+func extensionLayoutDoubtMessage(layout dump.ExtensionLayoutSummary) string {
+	if layout.Undecided() == 0 && !layout.ScanTruncated {
+		return ""
+	}
+	msg := "часть каталогов выгрузки сервер не смог отнести к расширениям. " +
+		"Их модули проиндексированы без имени расширения, то есть так же, как до " +
+		"появления этой возможности."
+	if n := layout.NotRegular; n > 0 {
+		msg += " Файл Configuration.xml оказался не обычным файлом, каталогов: " + strconv.Itoa(n) + "."
+	}
+	if n := layout.Unreadable; n > 0 {
+		msg += " Не удалось прочитать Configuration.xml, каталогов: " + strconv.Itoa(n) + "."
+	}
+	if n := layout.ReadTruncated; n > 0 {
+		msg += " Манифест не поместился в окно чтения, каталогов: " + strconv.Itoa(n) + "."
+	}
+	if n := layout.NameRejected; n > 0 {
+		msg += " Объявленное имя расширения нельзя использовать как часть ключа, каталогов: " +
+			strconv.Itoa(n) + "."
+	}
+	if layout.ScanTruncated {
+		msg += " Просмотрены не все подкаталоги, поэтому расширения могли остаться незамеченными."
+	}
+	return msg
+}
+
+// reportDumpRootAndLayout delivers both messages, or says nothing.
 //
 // slog.Error, and the level is the whole delivery. main installs the default
 // handler at LevelError (MCP clients render every stderr line as [error], so
@@ -614,24 +697,31 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection) string {
 // launch it is written to file descriptor 2, and under a pipe launch it goes to
 // stderr.log in the cache directory, because that is where main has pointed
 // stderr by then and writing to fd 2 mid-session is the very thing that redirect
-// exists to prevent. Both were run against the real trees on this machine and
-// both carried the sentence with the roots named; a correctly pointed --dump
-// produced nothing on either path.
+// exists to prevent.
 //
 // So under a pipe this line reaches a log, and a log nobody reads is not a
-// message. That is accepted here because it is not the only channel this
-// condition has: a --dump above the root collapses the keyspace, and the collapse
-// notice in tools/index_notice.go rides on EVERY tool response with the exact
-// counts. This one adds the precise diagnosis for the operator who can see
-// stderr, in the same place and by the same means as the dumpPathFault message
-// it sits beside.
-func reportNestedDumpRoots(dumpDir string) {
+// message. That is accepted here because it is not the only channel these
+// conditions have: the notices in tools/index_notice.go ride on EVERY tool
+// response with the exact counts. This one adds the precise diagnosis for the
+// operator who can see stderr, in the same place and by the same means as the
+// dumpPathFault message it sits beside.
+//
+// ONE LAYOUT DETECTION, used by both messages, so the two cannot describe
+// different readings of the same tree.
+func reportDumpRootAndLayout(dumpDir string) {
 	insp := dump.InspectDumpRoot(dumpDir)
-	msg := nestedDumpRootMessage(insp)
-	if msg == "" {
-		return
+	layout := dump.InspectExtensionLayout(dumpDir)
+
+	if msg := nestedDumpRootMessage(insp, layout); msg != "" {
+		slog.Error(msg, "dump", dumpDir,
+			"roots", strings.Join(insp.NestedRoots, ","),
+			"extensions", layout.Extensions,
+			"extension_dirs", strings.Join(layout.Dirs, ","))
 	}
-	slog.Error(msg, "dump", dumpDir, "roots", strings.Join(insp.NestedRoots, ","))
+	if msg := extensionLayoutDoubtMessage(layout); msg != "" {
+		slog.Error(msg, "dump", dumpDir, "undecided", layout.Undecided(),
+			"scan_truncated", layout.ScanTruncated)
+	}
 }
 
 // compareExtensionVersions orders two dotted numeric extension versions,

@@ -372,14 +372,18 @@ func (idx *Index) swapGeneration(
 	idx.setUnprotected(reg.protectionState())
 	idx.gensig = gensig
 	idx.names = names
+	idx.pathByName = pathByName
+	idx.pathToDocID = pathToDocID
 	// The collapse report follows the generation, in the same critical section that
 	// publishes it, exactly as the protection notice above does. A report left
 	// describing the RETIRED generation would state a number about a dump nobody is
 	// serving any more, and a reload is precisely how an operator fixes a collapse.
-	idx.noteCollapsedKeys(names)
-	idx.pathByName = pathByName
-	idx.pathToDocID = pathToDocID
+	//
+	// AFTER the two maps above, not before. It also publishes the wrap report, which
+	// is derived from pathToDocID, so taken one line earlier it would measure the
+	// generation this reload is replacing.
 	idx.pathIndex = pathIndex
+	idx.noteCollapsedKeys(names)
 	// The attached generation is always opened read-only, so an index that was
 	// serving a legacy read-write flat cache becomes read-only after its first
 	// reload. Runtime writes are rejected from here on, exactly as they are for a

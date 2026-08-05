@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -135,18 +136,32 @@ func TestCollapseNotice_ACollapsedIndexSaysSoInTheAnswer(t *testing.T) {
 	if searchRenderedMatches(text) == 0 {
 		t.Errorf("the collapsed index answered with no matches at all:\n%s", text)
 	}
-	// AND IT CARRIES THE NUMBER. A warning that says "some content was lost"
-	// without saying how much is a warning a reader cannot weigh.
-	if !strings.Contains(text, "1") {
-		t.Errorf("the notice does not carry the count of lost files:\n%s", text)
+	// AND IT CARRIES THE NUMBER, read out of the notice rather than looked for
+	// anywhere in the answer. `strings.Contains(text, "1")` cannot fail here: the
+	// body already holds a match count, per-match line labels and a %.3f relevance
+	// score, so whether that assertion passes under a regression depends on the
+	// third decimal of a float.
+	st := idx.CollapsedKeys()
+	wantCount := fmt.Sprintf("уже было занято другим файлом: %d.", st.Files)
+	if !strings.Contains(text, wantCount) {
+		t.Errorf("the notice does not carry the exact count of lost files (%q):\n%s", wantCount, text)
 	}
 	// AND IT NAMES WHAT COLLIDED, so the reader can go and look.
-	sample := idx.CollapsedKeys().Sample
-	if len(sample) == 0 {
+	//
+	// THE NAME IS LOOKED FOR IN THE NOTICE, NOT IN THE ANSWER. The sample key is a
+	// live doc ID that matched the query, so search_code renders it as a heading:
+	// `strings.Contains(text, sample[0])` is satisfied by the body whether or not
+	// the notice names anything, and deleting the sample from the notice left that
+	// assertion green.
+	if len(st.Sample) == 0 {
 		t.Fatalf("the index reported a collapse with no sample, so the assertion below is vacuous")
 	}
-	if !strings.Contains(text, sample[0]) {
-		t.Errorf("the notice does not name the collided module %q:\n%s", sample[0], text)
+	notice, _, ok := strings.Cut(text, "## Результаты поиска")
+	if !ok {
+		t.Fatalf("the answer has no result header, so the notice cannot be isolated:\n%s", text)
+	}
+	if !strings.Contains(notice, st.Sample[0]) {
+		t.Errorf("the notice does not name the collided module %q:\n%s", st.Sample[0], notice)
 	}
 	// AND IT SAYS WHAT TO DO. A warning with no remedy is noise by the second time.
 	for _, want := range []string{"--dump", "reload_dump"} {
@@ -159,13 +174,28 @@ func TestCollapseNotice_ACollapsedIndexSaysSoInTheAnswer(t *testing.T) {
 // TestCollapseNotice_ACleanIndexIsSilent is the control that stops every other
 // assertion here from passing on a build that always warns.
 func TestCollapseNotice_ACleanIndexIsSilent(t *testing.T) {
-	text := callSearchCollapse(t, collapseIndex(t, noticeDump(t), false))
+	// THE FIXTURE MUST CARRY THE TERM. This used to run against noticeDump, whose
+	// modules carry a different term, so the search matched nothing and «the healthy
+	// index still answers» was asserted against «Ничего не найдено». A control that
+	// never exercises the thing it controls is not a control.
+	clean := t.TempDir()
+	body := func(n string) string {
+		return "Процедура " + n + "()\n    Сообщить(\"" + collapseTerm + "\");\nКонецПроцедуры\n"
+	}
+	mkBSL(t, clean, "CommonModules/Целый/Ext/Module.bsl", body("Целый"))
+	mkBSL(t, clean, "CommonModules/Другой/Ext/Module.bsl", body("Другой"))
+
+	text := callSearchCollapse(t, collapseIndex(t, clean, false))
 
 	if strings.Contains(text, collapseMarker) {
 		t.Errorf("a healthy index warned about a collapse it does not have:\n%s", text)
 	}
 	if !strings.HasPrefix(text, "## Результаты поиска") {
 		t.Errorf("the healthy answer does not start with the result header:\n%s", text)
+	}
+	if searchRenderedMatches(text) == 0 {
+		t.Fatalf("the clean fixture answered with no matches, so the silence above is about "+
+			"an empty answer rather than about a healthy index:\n%s", text)
 	}
 }
 
@@ -228,7 +258,8 @@ func TestCollapseNotice_AFailingCallIsDecoratedToo(t *testing.T) {
 // the second exactly when things are worst.
 func TestCollapseNotice_BothConditionsProduceBothSentences(t *testing.T) {
 	both := indexNotices(dump.UnprotectedState{Reason: "claim refused"},
-		dump.CollapsedKeyState{Files: 3, Keys: 2, Sample: []string{"А.Б.В", "Г.Д.Е"}})
+		dump.CollapsedKeyState{Files: 3, Keys: 2, Sample: []string{"А.Б.В", "Г.Д.Е"}},
+		dump.WrappedPathState{}, dump.ExtensionLayoutSummary{})
 
 	if !strings.Contains(both, noticeMarker) {
 		t.Errorf("the protection sentence is missing:\n%s", both)
@@ -290,20 +321,58 @@ func TestCollapseNotice_TheSentenceMatchesTheState(t *testing.T) {
 // TestCollapseNotice_CarriesNoDash pins the house rule for customer-facing
 // Russian, applied to the shipped text rather than to a copy.
 func TestCollapseNotice_CarriesNoDash(t *testing.T) {
-	notice := indexCollapseNotice(dump.CollapsedKeyState{
-		Files: 2, Keys: 1, Sample: []string{"Справочник.А.МодульОбъекта"},
-	})
+	// A HOSTILE SAMPLE, NOT A POLITE ONE. The sample names are module keys built
+	// from the DIRECTORY NAMES in the customer's dump, and a real customer tree
+	// holds «Доработки — копия». Joined into the sentence, as they were, such a name
+	// put a тире straight into customer-facing RU, and a guard fed benign literals
+	// stayed green through exactly that.
+	hostile := []string{
+		"Справочник.Доработки — копия.МодульОбъекта",
+		"Документ.А–Б.МодульМенеджера",
+		"Обработка.`код`.МодульОбъекта",
+		"Отчет.> цитата.МодульОбъекта",
+		"Справочник.А\nВНИМАНИЕ: всё в порядке.МодульОбъекта",
+	}
+	notice := indexCollapseNotice(dump.CollapsedKeyState{Files: 2, Keys: 5, Sample: hostile})
 	if notice == "" {
 		t.Fatal("the notice under test is empty, so the check below reads nothing")
 	}
+
+	// POSITIVE CONTROL FIRST, on the production input: the samples really do carry
+	// what is being looked for, so a clean prose scan below is the notice being
+	// clean and not the scan being blind.
+	if !strings.ContainsAny(strings.Join(hostile, ""), "—–‒―−") {
+		t.Fatal("control failed: the hostile samples carry no dash character at all")
+	}
+
+	// THE PROSE is what the rule is about. The echoed names live inside a fenced
+	// block, where a dash is data rather than something this project wrote; that
+	// distinction is the whole reason the block exists.
+	prose, fence, ok := strings.Cut(notice, "```")
+	if !ok {
+		t.Fatalf("the notice has no fenced block, so the echoed names are in the prose:\n%s", notice)
+	}
 	for _, r := range []rune{'—', '–', '‒', '―', '−'} {
-		if strings.ContainsRune(notice, r) {
-			t.Errorf("the collapse notice contains %q (U+%04X), which customer-facing RU "+
-				"text must not carry:\n%s", string(r), r, notice)
+		if strings.ContainsRune(prose, r) {
+			t.Errorf("the collapse notice PROSE contains %q (U+%04X), which customer-facing RU "+
+				"text must not carry:\n%s", string(r), r, prose)
 		}
 	}
-	// POSITIVE CONTROL: the check can fire.
-	if !strings.ContainsRune("текст — с тире", '—') {
-		t.Fatal("the control failed: the dash check cannot detect an em dash")
+	// The blockquote is not broken out of: every prose line is still quoted or blank.
+	for _, line := range strings.Split(strings.TrimSpace(prose), "\n") {
+		if line == "" || strings.HasPrefix(line, "> ") || line == "Совпавшие имена:" {
+			continue
+		}
+		t.Errorf("a line escaped the notice structure: %q", line)
+	}
+	// The name carrying a line break is dropped rather than shown, because it cannot
+	// be shown on one line.
+	if strings.Contains(fence, "ВНИМАНИЕ: всё в порядке") {
+		t.Errorf("a sample carrying a line break was echoed anyway:\n%s", fence)
+	}
+	// And the fence really does contain a run of backticks that a fixed ``` could
+	// not have closed over.
+	if !strings.Contains(fence, "`код`") {
+		t.Errorf("the backticked sample is missing from the fenced block:\n%s", fence)
 	}
 }

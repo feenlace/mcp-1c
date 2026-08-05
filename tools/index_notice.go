@@ -136,14 +136,107 @@ func indexCollapseNotice(st dump.CollapsedKeyState) string {
 	notice := fmt.Sprintf("> ВНИМАНИЕ: индекс выгрузки потерял часть содержимого. "+
 		"Файлов, чьё имя модуля уже было занято другим файлом: %d. Совпавших имён: %d.",
 		st.Files, st.Keys)
-	if len(st.Sample) > 0 {
-		notice += " Например: " + strings.Join(st.Sample, ", ") + "."
-	}
 	notice += " Такие файлы сервер считает в общем числе модулей, но выдать их содержимое " +
 		"не может. Проверьте, что путь в `--dump` указывает на сам корень выгрузки, то есть " +
 		"на каталог, внутри которого лежат `Catalogs`, `Documents` и `Ext`, а не на каталог " +
 		"выше него. После исправления пути вызовите `reload_dump`.\n"
+	if sample := echoableSample(st.Sample); len(sample) > 0 {
+		notice += "\nСовпавшие имена:\n" + fenced(strings.Join(sample, "\n")) + "\n"
+	}
 	return notice
+}
+
+// echoableSample is the collided module names, in a form that can be shown.
+//
+// THE NAMES ARE NOT OURS. A module key is built from the directory names in the
+// dump, and a directory name is whatever the customer called it: a real customer
+// tree holds «Доработки — копия». Joined into the blockquote above, as they were,
+// such a name put a тире into customer-facing RU, and a name holding a backtick or
+// a newline left the structure it was placed in altogether.
+//
+// SO THEY MOVE OUT OF THE PROSE AND INTO A FENCE, one per line, with the fence
+// length computed from the payload by fenceLen so no run of backticks can close
+// it. Inside a fence a dash is data rather than prose, which is the distinction the
+// no-dash rule is about and the one a guard fed polite literals could never make.
+//
+// A name carrying a control character or a line break is DROPPED rather than
+// repaired: it cannot be shown on one line, and the counts above it are exact
+// whether or not the sample is complete.
+func echoableSample(names []string) []string {
+	var out []string
+	for _, n := range names {
+		if strings.ContainsFunc(n, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// indexWrappedNotice is the third standing condition: the index derived its module
+// names from paths carrying directory levels ABOVE the dump root.
+//
+// WHY IT IS NOT THE COLLAPSE NOTICE. The two are different measurements and either
+// can be zero while the other is not. A --dump two levels above a SINGLE extension
+// collides with nothing at all, so the collapse counter stays silent, while every
+// module in the dump is filed as though it belonged to the configuration and the
+// extension namespace has simply disappeared. That case had no channel: the startup
+// check cannot see it either, because one ReadDir cannot tell it from a hand-made
+// tree with one kind directory in it. This number can, because it is measured after
+// the keys are derived rather than guessed from the shape of a directory.
+//
+// The proportion is in it because it is what tells a reader which case they have:
+// a handful of odd files, or the whole dump.
+//
+// Customer-facing RU: no тире.
+func indexWrappedNotice(st dump.WrappedPathState) string {
+	if st.Files <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("> ВНИМАНИЕ: имена модулей выведены не от корня выгрузки. "+
+		"Файлов, у которых над корнем выгрузки оказались лишние каталоги: %d из %d. "+
+		"Имена таких модулей сервер восстанавливает, но пространство имён расширения "+
+		"при этом теряется: модули расширения попадают туда же, куда модули "+
+		"конфигурации. Укажите в `--dump` сам корень выгрузки и вызовите `reload_dump`.\n",
+		st.Files, st.Total)
+}
+
+// indexLayoutDoubtNotice is the fourth: directories whose extension-ness the
+// server could not decide.
+//
+// A DOUBT IS NEVER A GUESS AND IS NEVER SILENCE. Detection has three answers, and
+// the third leaves the keys exactly as they were before extensions were recognised
+// at all. That is the safe direction, and it is only safe because it is said out
+// loud: a namespace that quietly failed to appear looks identical to a dump that
+// never had one.
+//
+// COUNTS, NEVER NAMES, for the reason echoableSample gives at length.
+//
+// Customer-facing RU: no тире.
+func indexLayoutDoubtNotice(st dump.ExtensionLayoutSummary) string {
+	if st.Undecided() == 0 && !st.ScanTruncated {
+		return ""
+	}
+	notice := "> ВНИМАНИЕ: часть каталогов выгрузки сервер не смог отнести к расширениям. " +
+		"Их модули проиндексированы без имени расширения, то есть так же, как до появления " +
+		"этой возможности."
+	for _, part := range []struct {
+		n    int
+		text string
+	}{
+		{st.NotRegular, "Configuration.xml оказался не обычным файлом, каталогов: %d."},
+		{st.Unreadable, "Не удалось прочитать Configuration.xml, каталогов: %d."},
+		{st.ReadTruncated, "Манифест не поместился в окно чтения, каталогов: %d."},
+		{st.NameRejected, "Объявленное имя расширения нельзя использовать как часть ключа, каталогов: %d."},
+	} {
+		if part.n > 0 {
+			notice += " " + fmt.Sprintf(part.text, part.n)
+		}
+	}
+	if st.ScanTruncated {
+		notice += " Просмотрены не все подкаталоги, поэтому расширения могли остаться незамеченными."
+	}
+	return notice + "\n"
 }
 
 // indexNotices assembles every standing condition that is TRUE of the index into
@@ -158,8 +251,10 @@ func indexCollapseNotice(st dump.CollapsedKeyState) string {
 // they should do next; the collapse says part of the dump is missing, which
 // changes what they should believe about the answer. Both matter, and a stable
 // order is what lets a reader who sees these lines every call learn to skim them.
-func indexNotices(prot dump.UnprotectedState, collapse dump.CollapsedKeyState) string {
-	return indexProtectionNotice(prot) + indexCollapseNotice(collapse)
+func indexNotices(prot dump.UnprotectedState, collapse dump.CollapsedKeyState,
+	wrapped dump.WrappedPathState, layout dump.ExtensionLayoutSummary) string {
+	return indexProtectionNotice(prot) + indexCollapseNotice(collapse) +
+		indexWrappedNotice(wrapped) + indexLayoutDoubtNotice(layout)
 }
 
 // withIndexProtectionNotice wraps an index-backed tool handler so that every
@@ -193,7 +288,8 @@ func indexNotices(prot dump.UnprotectedState, collapse dump.CollapsedKeyState) s
 func withIndexProtectionNotice(index *dump.Index, h mcp.ToolHandler) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		res, err := h(ctx, req)
-		notice := indexNotices(index.Unprotected(), index.CollapsedKeys())
+		notice := indexNotices(index.Unprotected(), index.CollapsedKeys(),
+			index.WrappedPaths(), index.ExtensionLayout())
 		if notice == "" {
 			return res, err
 		}

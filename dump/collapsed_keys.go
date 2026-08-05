@@ -125,6 +125,19 @@ func collapsedKeysOf(names []string) CollapsedKeyState {
 func (idx *Index) noteCollapsedKeys(names []string) {
 	st := collapsedKeysOf(names)
 	idx.collapsed.Store(&st)
+	// The wrap report is published HERE and nowhere else, deliberately.
+	//
+	// It is a second measurement of the same freshly installed state, and it was
+	// briefly a second call beside this one at each install point. That is a fifth
+	// copy of a rule waiting to fall out of step: a loader added later would call
+	// one and forget the other, and the census in collapsed_keys_test.go, which
+	// polices callers of THIS function, would not notice. Folding it in makes that
+	// census cover both, so the two reports cannot describe different loads.
+	//
+	// It reads idx.pathToDocID, so every caller must have installed that map before
+	// getting here. Reload publishes its generation inside one critical section and
+	// this call sits after the assignment for exactly that reason.
+	idx.noteWrappedPaths()
 }
 
 // CollapsedKeys returns the whole report in one atomic load.
