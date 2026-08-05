@@ -288,6 +288,199 @@ var configModuleNames = map[string]string{
 // mirrors the base-config layout: Расширения/<ext>/<Kind>/<name>/Ext/<File>.bsl.
 const extensionDirName = "Расширения"
 
+// formSubdirName is the SINGULAR directory 1C writes between an object's "Ext"
+// and its form module (.../Forms/<f>/Ext/Form/Module.bsl, and
+// CommonForms/<f>/Ext/Form/Module.bsl). It is deliberately not an entry in
+// subdirSegmentNames: that table holds the PLURAL "Forms"/"Commands" segments
+// which insert a ".Форма.<имя>." infix into a key, and this one contributes
+// nothing to the key at all. It is named here because the anchor shape check
+// below has to allow it as the one segment that may sit inside a module's tail.
+const formSubdirName = "Form"
+
+// ---------------------------------------------------------------------------
+// Anchor scan: surviving a dump root pointed one level too high.
+//
+// THE DEFECT. A customer pointed --dump at the directory ABOVE the dump root.
+// Every relative path then carries one or more extra leading segments, and the
+// derivation below reads the WRAPPER as the metadata kind and the first real
+// directory as the object name. The keyspace collapses: measured on that
+// customer-shaped corpus of 13575 files wrapped in "Documents/dumps/", 2736
+// distinct keys with a worst bucket of 3396. The collapse is not cosmetic.
+// loadBSLFiles writes plain maps (contentByName[m.name], pathByName[m.name]), so
+// the second file under a key silently overwrites the first and its content is
+// genuinely lost, while ModuleCount() still counts every file it walked.
+//
+// THE RULE. anchorIndex returns the smallest index whose segment both NAMES a
+// dump root and has a dump-SHAPED path below it; the derivation then runs
+// unchanged on parts[anchorIndex:]. Nothing else about the derivation changes,
+// and baseConfigModuleName is untouched.
+//
+// WHY THE SHAPE CHECK CARRIES THE WHOLE THING. A root-marker test on its own is
+// nearly useless here: 13571 of those same 13575 real paths contain a marker name
+// at some index > 0, because every object subtree carries an inner "Ext"
+// directory. Anchoring on the first marker alone would re-key almost the entire
+// corpus. With the shape check, anchorIndex is 0 on all 13575 — the scan is a
+// measured no-op at a correctly pointed root, and the pinned key digest in
+// module_key_guard_test.go does not move.
+//
+// EVERY PREDICATE READS THE PACKAGE'S EXISTING TABLES (dumpDirNames,
+// configModuleDirName, extensionDirName, configModuleNames, moduleNameSuffixes,
+// subdirSegmentNames). A private mirror of any of them would drift the day a kind
+// is added to metadata_types.go and nobody would notice.
+//
+// TWO ACCEPTED BEHAVIOURS, stated because silence about them would be a claim
+// this code cannot support:
+//
+//  1. An extension subtree whose container is NOT named "Расширения" (say
+//     ext/<Имя>/Catalogs/Ном/Ext/ObjectModule.bsl) now anchors on the kind and
+//     merges into the BASE configuration, so it can collide with a same-named
+//     configuration module. Today the same layout yields a mangled key
+//     ("ext.<Имя>.МодульОбъекта") that buckets every module of that extension by
+//     suffix alone.
+//
+//     Measured, with the 13575-path corpus wrapped in "ext/Имя/": that tree ALONE
+//     goes from 2736 distinct keys / worst bucket 3396 / 10839 files lost to
+//     overwrite, to 13575 distinct / worst bucket 1 / none lost. A large gain.
+//
+//     But it is NOT a gain on every measure, and the losing one is stated rather
+//     than left out. Put a base configuration and such a tree in ONE keyspace
+//     (27150 paths) and the numbers go from 16311 distinct / worst 3396 / 10839
+//     lost, to 13575 distinct / worst 2 / 13575 lost: after the change the
+//     extension's modules land exactly on the base configuration's keys, so each
+//     one overwrites its twin instead of collapsing onto a suffix bucket. That
+//     union is the pathological case — it requires an extension carrying a full
+//     copy of the whole configuration — but the direction is real, and the merge
+//     was accepted deliberately with it in view.
+//
+//     The alternative — synthesising a namespace from whatever directory sits
+//     above the kind — was rejected: it fabricates an "ext.<name>." prefix out of
+//     any directory that merely looks the part, including a CommonForm that
+//     happens to be named "Расширения".
+//
+//  2. Two residual classes change key. Neither occurs in the 13575 real paths and
+//     neither is a shape 1C emits.
+//     (a) A .bsl named after one of the four configModuleNames files but sitting
+//     inside a NON-root "Ext" (Catalogs/Ном/Ext/ManagedApplicationModule.bsl)
+//     anchors on that inner "Ext" and is read as a configuration module. An
+//     object's Ext holds ObjectModule/ManagerModule/RecordSetModule/..., never
+//     one of those four.
+//     (b) A directory named "Расширения" that is NOT the extension container,
+//     with a full dump shape starting two segments below it
+//     (Catalogs/Расширения/Y/Catalogs/Ном/Ext/ObjectModule.bsl), anchors there
+//     and fabricates an "ext.Y." prefix. It needs an object literally named
+//     "Расширения" whose own subtree is a second dump.
+//     Both are pinned in module_key_anchor_test.go so a later change to them is
+//     visible rather than silent.
+// ---------------------------------------------------------------------------
+
+// dumpRootMarker reports whether a segment NAMES something that can legitimately
+// sit at the top of a dump: a metadata kind directory, the configuration's own
+// "Ext" directory, or the extension container. It is the cheap half of the test;
+// on its own it accepts almost every path's inner "Ext" too, which is why no
+// caller may use it without anchorShapeOK.
+func dumpRootMarker(s string) bool {
+	if _, ok := dumpDirNames[s]; ok {
+		return true
+	}
+	return s == configModuleDirName || s == extensionDirName
+}
+
+// anchorKindOK reports whether r is a complete base-configuration module path:
+// a kind directory, an object name, the object's "Ext", and a module file — or
+// the configuration-module root form "Ext/<one of the four files>".
+//
+// The distance d from the kind to the object's "Ext" is the discriminator. It is
+// 2 for a plain object module (Kind/Имя/Ext/File.bsl) and 4 for one reached
+// through a Forms or Commands subdirectory (Kind/Имя/Forms/Ф/Ext/Form/Module.bsl);
+// anything else is not a dump shape. The last segment must be a module file name
+// the package already knows.
+func anchorKindOK(r []string) bool {
+	if len(r) == 0 {
+		return false
+	}
+	// The extension container is handled one level up, by anchorShapeOK. It can
+	// never stand in the kind slot itself.
+	if r[0] == extensionDirName {
+		return false
+	}
+	_, isKind := dumpDirNames[r[0]]
+	if !isKind && r[0] != configModuleDirName {
+		return false
+	}
+
+	// The configuration's own modules: no object level at all, and the file name
+	// must be one of the four the platform defines. That last condition is what
+	// stops "Ext" being read as a root wherever an object's inner Ext appears —
+	// it holds ObjectModule.bsl and friends, none of which is in configModuleNames.
+	if r[0] == configModuleDirName {
+		if len(r) != 2 {
+			return false
+		}
+		_, ok := configModuleNames[r[1]]
+		return ok
+	}
+
+	// d: index of the first "Ext" below the kind, measured from r[0].
+	d := -1
+	for i := 1; i < len(r); i++ {
+		if r[i] == configModuleDirName {
+			d = i
+			break
+		}
+	}
+	if d != 2 && d != 4 {
+		return false
+	}
+	if d == 4 {
+		// The only thing that legitimately adds two segments between the object
+		// and its Ext is a Forms/Commands subdirectory plus the child's name.
+		if _, ok := subdirSegmentNames[r[2]]; !ok {
+			return false
+		}
+	}
+
+	// The tail is "Ext/<File>.bsl", or "Ext/Form/<File>.bsl" for a form module.
+	tail := r[d:]
+	if len(tail) != 2 && !(len(tail) == 3 && tail[1] == formSubdirName) {
+		return false
+	}
+
+	_, ok := moduleNameSuffixes[r[len(r)-1]]
+	return ok
+}
+
+// anchorShapeOK reports whether rest, taken as a whole, is a dump-shaped path
+// starting at a root. It differs from anchorKindOK only by admitting the
+// extension container, whose own two leading segments ("Расширения/<ext>/") are
+// skipped before the base-configuration shape below them is checked.
+func anchorShapeOK(rest []string) bool {
+	if len(rest) == 0 {
+		return false
+	}
+	if rest[0] == extensionDirName {
+		return len(rest) >= 4 && anchorKindOK(rest[2:])
+	}
+	return anchorKindOK(rest)
+}
+
+// anchorIndex returns the index at which the real dump root begins, or 0 when no
+// segment qualifies. 0 is both "the root is already correct" and "nothing here
+// looks like a dump", and the two want the same answer: derive from the path as
+// given rather than guess.
+//
+// The shortest shape anchorShapeOK accepts is two segments ("Ext/<file>.bsl"), so
+// a non-zero result always leaves at least two segments behind — which is what
+// lets bslPathToModuleName keep its len(parts) < 2 early return after the scan.
+// That invariant is pinned by TestAnchorScanNeverLeavesFewerThanTwoSegments.
+func anchorIndex(parts []string) int {
+	for i := range parts {
+		if dumpRootMarker(parts[i]) && anchorShapeOK(parts[i:]) {
+			return i
+		}
+	}
+	return 0
+}
+
 // bslPathToModuleName converts a relative file path from the dump to a human-readable module name.
 // Example: "Documents/РеализацияТоваров/Ext/ObjectModule.bsl" -> "Документ.РеализацияТоваров.МодульОбъекта"
 //
@@ -302,6 +495,12 @@ func bslPathToModuleName(relPath string) string {
 	// Normalise separators.
 	relPath = filepath.ToSlash(relPath)
 	parts := strings.Split(relPath, "/")
+
+	// Skip whatever sits ABOVE the real dump root, so a --dump pointed one level
+	// too high derives the same keys as a correctly pointed one instead of
+	// collapsing the keyspace. A no-op (anchorIndex == 0) at a correct root, on
+	// all 13575 paths of the measured corpus; see the anchor-scan block above.
+	parts = parts[anchorIndex(parts):]
 
 	// The returned name is the KEY for every downstream map (idx.names,
 	// contentByName, pathByName, pathToDocID, the Bleve doc id and the
