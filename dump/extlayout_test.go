@@ -2,8 +2,12 @@ package dump
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -22,13 +26,17 @@ import (
 // Both were verified against real output; ~/Downloads/extdump_vm holds two roots
 // of the flat kind side by side.
 //
-// THE NAME COMES FROM THE MANIFEST, NEVER FROM THE DIRECTORY, because in real EDT
-// projects the two are reported to disagree (src/cfe/yaxunit holding YAXUNIT), and
-// a directory-derived namespace would then key a module under a name nobody can
-// ask for. The fixture below is deliberately built with that disagreement, since
-// the two real dumps on this machine happen to have matching names and cannot
-// exercise it. No Configuration.mdo exists on this machine either, so the EDT rows
-// here are fixtures of the reported byte shape and not measurements of one.
+// THE NAME COMES FROM THE MANIFEST, NEVER FROM THE DIRECTORY, and that is measured
+// on this machine rather than reported from elsewhere: ~/Downloads/canon_vm
+// declares <Name>FeenlaceMCPService</Name> and ~/Downloads/mcp-modified declares
+// <Name>MCP_Polling</Name>. Two of the four real extension dumps here therefore
+// disagree with their own directory name, and a directory-derived namespace would
+// key their modules under a name nobody can ask for.
+//
+// THERE ARE NO EDT ROWS. No Configuration.mdo exists on this machine, so a fixture
+// written to the reported byte shape would be a fixture of a belief, and a test
+// built on one claims coverage it does not have. The detector has no EDT branch at
+// all; TestEDTIsNotClaimedAndNotDetected is the pin that says so out loud.
 
 // classicExtensionManifest is the real byte shape of an extension's
 // Configuration.xml, taken from ~/Downloads/extdump_vm/FeenlaceMCPService: UTF-8
@@ -50,20 +58,6 @@ func classicExtensionManifest(name string, withPurpose bool) string {
 		"\t</Configuration>\r\n</MetaDataObject>\r\n"
 }
 
-// edtExtensionManifest is the EDT shape: camelCase property names and the
-// xsi:type attribute that says the mdclass is an extension.
-func edtExtensionManifest(name string) string {
-	return "\ufeff<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-		"<mdclass:Configuration xmlns:mdclass=\"http://g5.1c.ru/v8/dt/metadata/mdclass\" " +
-		"xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" uuid=\"c1f8\">\n" +
-		"  <name>" + name + "</name>\n" +
-		"  <objectBelonging>Adopted</objectBelonging>\n" +
-		"  <extension xsi:type=\"mdclassExtension:ConfigurationExtension\">\n" +
-		"    <configurationExtensionPurpose>Customization</configurationExtensionPurpose>\n" +
-		"  </extension>\n" +
-		"</mdclass:Configuration>\n"
-}
-
 // baseConfigManifest is a CONFIGURATION's own Configuration.xml. Measured on
 // dumps/dump_2: 1 339 696 bytes, and it contains neither ObjectBelonging nor
 // ConfigurationExtensionPurpose anywhere. That absence is the discriminator.
@@ -80,13 +74,7 @@ func mkExtensionDump(t *testing.T, dir, manifestName, extName string, kinds ...s
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var body string
-	switch manifestName {
-	case extManifestEDT:
-		body = edtExtensionManifest(extName)
-	default:
-		body = classicExtensionManifest(extName, true)
-	}
+	body := classicExtensionManifest(extName, true)
 	if err := os.WriteFile(filepath.Join(dir, manifestName), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -111,10 +99,16 @@ func TestExtensionIsIdentifiedFromTheManifestNotTheDirectory(t *testing.T) {
 	if len(got.byDir) != 0 {
 		t.Errorf("byDir = %v, want empty: a flat extension root is not a container of them", got.byDir)
 	}
-	// Negative control: the directory name really does differ, so the assertion
-	// above is not satisfied by the two happening to agree.
-	if filepath.Base(root) == "YAXUNIT" {
-		t.Fatal("control broken: the fixture directory is named after the extension")
+	// CONTROL THAT EXERCISES THE PRODUCTION CODE. Comparing filepath.Base(root)
+	// with "YAXUNIT" would compare two literals and prove nothing about the
+	// detector. Removing the manifest from the SAME directory does: if the name
+	// were coming from the path, it would still be there.
+	if err := os.Remove(filepath.Join(root, extManifestClassic)); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectExtensionLayout(root); got.self != "" {
+		t.Errorf("with the manifest deleted, self = %q: the name is coming from "+
+			"somewhere other than the manifest", got.self)
 	}
 }
 
@@ -131,8 +125,6 @@ func TestExtensionMarkersAcrossBothFormats(t *testing.T) {
 			classicExtensionManifest("РасширениеА", true), "РасширениеА"},
 		{"classic XML with NO purpose element: the pre 2.16 export", extManifestClassic,
 			classicExtensionManifest("РасширениеБ", false), "РасширениеБ"},
-		{"EDT mdo, camelCase and xsi:type", extManifestEDT,
-			edtExtensionManifest("YAXUNIT"), "YAXUNIT"},
 		{"a base configuration is NOT an extension", extManifestClassic,
 			baseConfigManifest(), ""},
 		{"an empty manifest is not an extension", extManifestClassic, "", ""},
@@ -214,15 +206,23 @@ func TestBOMDoesNotHideTheMarker(t *testing.T) {
 	// head that still carried it would break any check anchored at the start,
 	// including one added later by somebody who read the doc comment and believed
 	// the head begins at the document.
-	head, ok := manifestHead(filepath.Join(dir, extManifestClassic))
-	if !ok {
-		t.Fatal("manifestHead could not read the manifest it just wrote")
+	path := filepath.Join(dir, extManifestClassic)
+	lst, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, complete, reason := readManifestHead(path, lst)
+	if reason != 0 {
+		t.Fatalf("readManifestHead refused the manifest it just wrote: reason %d", reason)
+	}
+	if !complete {
+		t.Error("a 464 byte manifest was reported as truncated")
 	}
 	if bytes.HasPrefix(head, []byte("\ufeff")) {
-		t.Error("manifestHead returned a head that still begins with U+FEFF")
+		t.Error("readManifestHead returned a head that still begins with U+FEFF")
 	}
 	if !bytes.HasPrefix(head, []byte("<?xml")) {
-		t.Errorf("manifestHead does not begin at the document: %.20q", head)
+		t.Errorf("readManifestHead does not begin at the document: %.20q", head)
 	}
 	// Positive control: the bytes on disk really do start with the BOM, so the two
 	// assertions above are about the strip and not about a fixture that never had
@@ -240,7 +240,7 @@ func TestBOMDoesNotHideTheMarker(t *testing.T) {
 func TestAllExtensionsShapeNamesEveryChild(t *testing.T) {
 	root := t.TempDir()
 	mkExtensionDump(t, filepath.Join(root, "dirA"), extManifestClassic, "РасширениеА", "Catalogs")
-	mkExtensionDump(t, filepath.Join(root, "dirB"), extManifestEDT, "YAXUNIT", "CommonModules")
+	mkExtensionDump(t, filepath.Join(root, "dirB"), extManifestClassic, "YAXUNIT", "CommonModules")
 	// A sibling that is not an extension at all.
 	if err := os.MkdirAll(filepath.Join(root, "notes"), 0o755); err != nil {
 		t.Fatal(err)
@@ -297,10 +297,38 @@ func TestExtensionKeysAreNamespacedInBothShapes(t *testing.T) {
 
 	// An empty layout changes nothing whatsoever: this is the property that keeps
 	// every base configuration on the keys it already had.
+	//
+	// MEASURED AGAINST THE PINNED DIGEST, not against bslPathToModuleName. Writing
+	// `none.moduleKey(p) != bslPathToModuleName(p)` compares two spellings of one
+	// expression the moment the empty layout falls through to that call, so the
+	// loop would run its 40 iterations and be incapable of failing. The literal
+	// below is the number module_key_guard_test.go pins for the same corpus, so a
+	// namespace appearing on an empty layout moves it.
+	var sb strings.Builder
 	for _, p := range unwrappedKeyDigestCorpus {
-		if got, want := none.moduleKey(p), bslPathToModuleName(p); got != want {
-			t.Errorf("empty layout moved %q: %q, want %q", p, got, want)
-		}
+		sb.WriteString(p)
+		sb.WriteByte('\t')
+		sb.WriteString(none.moduleKey(p))
+		sb.WriteByte('\n')
+	}
+	sum := sha256.Sum256([]byte(sb.String()))
+	if got := hex.EncodeToString(sum[:]); got != bslUnwrappedCorpusDigest {
+		t.Errorf("the empty layout moved a key over the unwrapped corpus:\ndigest %s\nwant   %s",
+			got, bslUnwrappedCorpusDigest)
+	}
+	// Positive control for the digest itself: a NON-empty layout must move it, or
+	// the comparison above would pass for every layout there is.
+	sb.Reset()
+	moved := extensionLayout{self: "Контроль"}
+	for _, p := range unwrappedKeyDigestCorpus {
+		sb.WriteString(p)
+		sb.WriteByte('\t')
+		sb.WriteString(moved.moduleKey(p))
+		sb.WriteByte('\n')
+	}
+	sum = sha256.Sum256([]byte(sb.String()))
+	if got := hex.EncodeToString(sum[:]); got == bslUnwrappedCorpusDigest {
+		t.Error("positive control failed: a self-named layout produced the unwrapped digest")
 	}
 }
 
@@ -338,10 +366,20 @@ func TestBaseConfigurationManifestIsNeverReadAsAnExtension(t *testing.T) {
 		t.Fatalf("a real base configuration was read as an extension layout: self=%q byDir=%v",
 			got.self, got.byDir)
 	}
-	// And the layout it produces changes no key at all.
+	// And the key it produces is the base-configuration one, written out as a
+	// literal. Comparing got.moduleKey(p) with bslPathToModuleName(p) here cannot
+	// fail: the Fatalf above has already established that the layout is empty, and
+	// an empty layout IS that call.
 	const p = "Catalogs/Номенклатура/Ext/ObjectModule.bsl"
-	if k, want := got.moduleKey(p), bslPathToModuleName(p); k != want {
-		t.Errorf("moduleKey = %q, want %q", k, want)
+	if k := got.moduleKey(p); k != "Справочник.Номенклатура.МодульОбъекта" {
+		t.Errorf("moduleKey(%q) = %q, want %q", p, k, "Справочник.Номенклатура.МодульОбъекта")
+	}
+	// The read is BOUNDED and the answer is still definite: this manifest is
+	// 1 339 696 bytes, far past the window, and its <Properties> closes at 12718,
+	// far inside it. So it is decided, and decided with no doubt recorded.
+	if len(got.doubts) != 0 {
+		t.Errorf("a base configuration produced doubts %v; its <Properties> closes "+
+			"inside the read window, so the answer is definite", got.doubts)
 	}
 }
 
@@ -388,6 +426,12 @@ func TestManifestReadingIsBoundedAndDegrades(t *testing.T) {
 	if got, ok := extensionNameOf(dir); ok {
 		t.Errorf("a marker beyond the %d byte window was found anyway (%q); the read is not bounded",
 			maxManifestHeadBytes, got)
+	}
+	// And it does not go quiet about it. The window is a limit of the reader, not
+	// a fact about the dump, so the answer is "undecided" and it is recorded.
+	if l := detectExtensionLayout(dir); len(l.doubts) != 1 || l.doubts[0].reason != doubtManifestTruncated {
+		t.Errorf("doubts = %v, want exactly one truncation doubt: a manifest the "+
+			"reader could not finish was silently demoted to the base keyspace", l.doubts)
 	}
 	// Positive control: the same manifest with the padding removed IS recognised,
 	// so the miss above is the window and not the parser.
@@ -470,6 +514,402 @@ func TestExtensionModulesNoLongerOverwriteTheBaseConfiguration(t *testing.T) {
 		}
 		if !strings.Contains(got, want) {
 			t.Errorf("GetContent(%q) = %q, want it to contain %q", name, got, want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The contract: three answers, evidence that is constrained before it is read,
+// and a name that has to be usable before it becomes one.
+// ---------------------------------------------------------------------------
+
+// TestEDTIsNotClaimedAndNotDetected is the pin on a deliberate absence.
+//
+// The removed branch gated on a NAKED SUBSTRING, so a document merely mentioning
+// "mdclassExtension:ConfigurationExtension" anywhere at all was an extension. The
+// head below is a BASE configuration that mentions it in a comment, and it was
+// accepted, under the configuration's own name. That false positive re-keys every
+// module in the dump.
+//
+// The branch is gone rather than tightened because there is no Configuration.mdo
+// on this machine: any strictness written for it would come from the same reported
+// byte shape as the loose version, and a guard invented from an unverifiable
+// specification is not a guard. NO TEST HERE CLAIMS EDT COVERAGE, and this one says
+// so by asserting the opposite.
+func TestEDTIsNotClaimedAndNotDetected(t *testing.T) {
+	const baseWithTheMarkerInAComment = "\ufeff<?xml version=\"1.0\"?>\n" +
+		"<mdclass:Configuration xmlns:mdclass=\"http://g5.1c.ru/v8/dt/metadata/mdclass\"\n" +
+		"  xmlns:mdclassExtension=\"http://g5.1c.ru/v8/dt/metadata/mdclass/extension\">\n" +
+		"  <name>УправлениеНебольшойФирмой</name>\n" +
+		"  <objectBelonging>Adopted</objectBelonging>\n" +
+		"  <comment>перенесено из mdclassExtension:ConfigurationExtension</comment>\n" +
+		"</mdclass:Configuration>\n"
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Configuration.mdo"),
+		[]byte(baseWithTheMarkerInAComment), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); ok {
+		t.Errorf("a Configuration.mdo was read as extension %q; there is no EDT branch "+
+			"and there must not be one written from a shape nothing on this machine can check", got)
+	}
+	if l := detectExtensionLayout(dir); !l.empty() {
+		t.Errorf("a Configuration.mdo produced a layout: self=%q byDir=%v", l.self, l.byDir)
+	}
+
+	// POSITIVE CONTROL: the reader is not simply broken. The classic manifest
+	// dropped into the same directory IS recognised, so the silence above is about
+	// the .mdo and not about the fixture.
+	if err := os.WriteFile(filepath.Join(dir, extManifestClassic),
+		[]byte(classicExtensionManifest("Настоящее", true)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); !ok || got != "Настоящее" {
+		t.Fatalf("positive control failed: the classic manifest beside the .mdo gave (%q, %v)", got, ok)
+	}
+}
+
+// TestASymlinkedManifestIsRefusedRatherThanFollowed closes the one read in this
+// package that no containment covered. Every other file the index opens goes
+// through pathWithinRoot; this one was a bare os.Open on a joined path, so a
+// symlink named Configuration.xml pointed the namespace of a whole dump at a
+// document outside the root.
+func TestASymlinkedManifestIsRefusedRatherThanFollowed(t *testing.T) {
+	outside := t.TempDir()
+	target := filepath.Join(outside, "someone_elses.xml")
+	if err := os.WriteFile(target, []byte(classicExtensionManifest("ЧужоеИмя", true)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(dir, extManifestClassic)); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); ok {
+		t.Errorf("a symlinked manifest was followed out of the root and named the dump %q", got)
+	}
+	l := detectExtensionLayout(dir)
+	if len(l.doubts) != 1 || l.doubts[0].reason != doubtManifestNotRegular {
+		t.Errorf("doubts = %v, want one non-regular-file doubt: refusing quietly is how "+
+			"the read came to have no containment in the first place", l.doubts)
+	}
+
+	// POSITIVE CONTROL: THE SAME BYTES, as a real file in the same place, are read.
+	// Without this the assertion above would also pass if the reader were broken.
+	if err := os.Remove(filepath.Join(dir, extManifestClassic)); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, extManifestClassic), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); !ok || got != "ЧужоеИмя" {
+		t.Fatalf("positive control failed: the same bytes as a regular file gave (%q, %v)", got, ok)
+	}
+}
+
+// TestAManifestNameIsMatchedByteExactly makes the two files agree about one
+// question. extlayout.go decided it by opening a joined path, which macOS answers
+// case-insensitively; dumproot.go decided it by comparing a directory entry, which
+// is byte-exact. So one tree was an extension to one file and an ordinary directory
+// to the other, and the disagreement INVERTS on a case-sensitive volume.
+func TestAManifestNameIsMatchedByteExactly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "configuration.xml"),
+		[]byte(classicExtensionManifest("Строчными", true)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, extManifestClassic)); err != nil {
+		t.Skip("this volume is case-sensitive, so the two rules cannot disagree here")
+	}
+
+	_, ok := extensionNameOf(dir)
+	isRoot := InspectDumpRoot(dir).IsRoot
+	if ok {
+		t.Error("a lowercase configuration.xml was read as an extension manifest")
+	}
+	if ok != isRoot {
+		t.Errorf("the two files disagree about the same tree: extensionNameOf=%v InspectDumpRoot.IsRoot=%v", ok, isRoot)
+	}
+
+	// POSITIVE CONTROL: the byte-exact name in a fresh directory IS read, and both
+	// files then say the same thing.
+	exact := t.TempDir()
+	if err := os.WriteFile(filepath.Join(exact, extManifestClassic),
+		[]byte(classicExtensionManifest("Точно", true)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(exact); !ok || got != "Точно" {
+		t.Fatalf("positive control failed: (%q, %v)", got, ok)
+	}
+	if !InspectDumpRoot(exact).IsRoot {
+		t.Error("the byte-exact manifest is an extension to one file and not a root to the other")
+	}
+}
+
+// TestAContainerThatCarriesItsOwnManifestDoesNotSwallowItsChildren.
+//
+// Detection stopped at the root: if the root declared a name, no child was looked
+// at, so EVERY module under EVERY child was filed under the container's name and
+// the children collided with each other. That is precedence standing in for a
+// decision. The children are examined now whatever the root says, and the more
+// specific evidence wins.
+func TestAContainerThatCarriesItsOwnManifestDoesNotSwallowItsChildren(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, extManifestClassic),
+		[]byte(classicExtensionManifest("Контейнер", true)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The container's own content, in the flat -Extension shape.
+	if err := os.MkdirAll(filepath.Join(root, "CommonModules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// And two nested extensions under their own directories.
+	mkExtensionDump(t, filepath.Join(root, "dirA"), extManifestClassic, "ИмяА", "Catalogs")
+	mkExtensionDump(t, filepath.Join(root, "dirB"), extManifestClassic, "ИмяБ", "Catalogs")
+
+	l := detectExtensionLayout(root)
+	if l.self != "Контейнер" {
+		t.Errorf("self = %q, want Контейнер", l.self)
+	}
+	if l.byDir["dirA"] != "ИмяА" || l.byDir["dirB"] != "ИмяБ" {
+		t.Fatalf("byDir = %v, want both nested extensions named", l.byDir)
+	}
+
+	const rel = "Catalogs/Ном/Ext/ObjectModule.bsl"
+	a := l.moduleKey("dirA/" + rel)
+	b := l.moduleKey("dirB/" + rel)
+	if a == b {
+		t.Errorf("both nested extensions key to %q: the container swallowed them", a)
+	}
+	if a != "ext.ИмяА.Справочник.Ном.МодульОбъекта" {
+		t.Errorf("dirA keyed as %q", a)
+	}
+	if b != "ext.ИмяБ.Справочник.Ном.МодульОбъекта" {
+		t.Errorf("dirB keyed as %q", b)
+	}
+	// What is left over is still the container's own.
+	if got, want := l.moduleKey("CommonModules/X/Ext/Module.bsl"), "ext.Контейнер.ОбщийМодуль.X.Модуль"; got != want {
+		t.Errorf("the container's own module keyed as %q, want %q", got, want)
+	}
+}
+
+// TestAKindDirectoryUnderAnExtensionRootIsNotANestedExtension is the other half of
+// the rule above: examining every child is only safe if a child that can only be
+// the root extension's own content is not eligible to be a nested one.
+func TestAKindDirectoryUnderAnExtensionRootIsNotANestedExtension(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, extManifestClassic),
+		[]byte(classicExtensionManifest("Плоское", true)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A planted manifest inside a metadata kind directory of the extension itself.
+	kind := filepath.Join(root, "Catalogs")
+	if err := os.MkdirAll(kind, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(kind, extManifestClassic),
+		[]byte(classicExtensionManifest("Подделка", true)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	l := detectExtensionLayout(root)
+	if _, ok := l.byDir["Catalogs"]; ok {
+		t.Errorf("a metadata kind directory of the root extension was admitted as a "+
+			"nested extension: byDir = %v", l.byDir)
+	}
+	if got, want := l.moduleKey("Catalogs/Ном/Ext/ObjectModule.bsl"),
+		"ext.Плоское.Справочник.Ном.МодульОбъекта"; got != want {
+		t.Errorf("moduleKey = %q, want %q", got, want)
+	}
+
+	// POSITIVE CONTROL: the same planted manifest under a NON-kind directory of a
+	// root that is not itself an extension IS admitted, so the exclusion above is
+	// the kind name and not a blanket refusal.
+	other := t.TempDir()
+	mkExtensionDump(t, filepath.Join(other, "Catalogs"), extManifestClassic, "Подделка", "Ext")
+	if got := detectExtensionLayout(other); got.byDir["Catalogs"] != "Подделка" {
+		t.Fatalf("positive control failed: byDir = %v", got.byDir)
+	}
+}
+
+// TestTheChildScanRecordsWhereItStopped. The cap turned a lossless tree lossy and
+// had no way to say so: extensions past the cap key into the base keyspace and
+// collide with each other. Measured on 70 extension directories, the loss was 5
+// files with a worst bucket of 6.
+func TestTheChildScanRecordsWhereItStopped(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < maxExtensionScan+6; i++ {
+		mkExtensionDump(t, filepath.Join(root, fmt.Sprintf("dir%02d", i)),
+			extManifestClassic, fmt.Sprintf("Расш%02d", i), "Catalogs")
+	}
+	l := detectExtensionLayout(root)
+	if len(l.byDir) != maxExtensionScan {
+		t.Errorf("byDir has %d entries, want %d", len(l.byDir), maxExtensionScan)
+	}
+	if !slices.ContainsFunc(l.doubts, func(d layoutDoubt) bool { return d.reason == doubtScanTruncated }) {
+		t.Errorf("doubts = %v, want a truncation doubt: 'no extension below this' and "+
+			"'no extension among the first %d directories' are different answers",
+			l.doubts, maxExtensionScan)
+	}
+
+	// POSITIVE CONTROL: below the cap, every directory is named and nothing is
+	// doubted, so the doubt above is the cap and not a constant.
+	small := t.TempDir()
+	for i := 0; i < 4; i++ {
+		mkExtensionDump(t, filepath.Join(small, fmt.Sprintf("dir%02d", i)),
+			extManifestClassic, fmt.Sprintf("Мало%02d", i), "Catalogs")
+	}
+	got := detectExtensionLayout(small)
+	if len(got.byDir) != 4 {
+		t.Fatalf("positive control failed: byDir = %v", got.byDir)
+	}
+	if len(got.doubts) != 0 {
+		t.Fatalf("positive control failed: doubts = %v on a tree well below the cap", got.doubts)
+	}
+}
+
+// TestAnUnusableExtensionNameIsRefusedRatherThanRepaired.
+//
+// The manifest is disk content and its <Name> went verbatim into a key and into a
+// rendered RU answer. THE SAMPLES BELOW ARE HOSTILE, not polite: a real customer
+// tree contains «Доработки — копия», and a guard fed benign literals is how a тире
+// reached rendered RU last time.
+//
+// Refusal, not repair. Replacing the offending runes would invent a name the user
+// cannot ask for; the extension keeps the keys it had before any of this existed.
+func TestAnUnusableExtensionNameIsRefusedRatherThanRepaired(t *testing.T) {
+	hostile := map[string]string{
+		"a тире, which customer-facing RU may never carry":   "Доработки — копия",
+		"a line break, which leaves the notice it is put in": "А\nВНИМАНИЕ: индекс в порядке",
+		"a dot, which moves every other key component along": "А.Б.В",
+		"a backtick, which opens a code span":                "`rm -rf`",
+		"a leading quote marker":                             "> цитата",
+		"a NUL":                                              "А\x00Б",
+		"a right-to-left override":                           "А‮Б",
+		"a leading digit":                                    "3D",
+		"longer than the bound":                              strings.Repeat("Д", maxExtensionNameRunes+1),
+		"empty":                                              "",
+		"whitespace only":                                    "   ",
+	}
+	for what, name := range hostile {
+		t.Run(what, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, extManifestClassic),
+				[]byte(classicExtensionManifest(name, true)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := extensionNameOf(dir); ok {
+				t.Fatalf("accepted %q as an extension name", got)
+			}
+			l := detectExtensionLayout(dir)
+			if l.self != "" {
+				t.Errorf("self = %q", l.self)
+			}
+			// The key is the one that shipped before extensions were detected at all.
+			const rel = "Catalogs/Ном/Ext/ObjectModule.bsl"
+			if got, want := l.moduleKey(rel), "Справочник.Ном.МодульОбъекта"; got != want {
+				t.Errorf("moduleKey = %q, want the un-namespaced %q", got, want)
+			}
+			// And nothing hostile survives into anything derived from it.
+			for _, r := range []rune{'‒', '–', '—', '―', '−', '\n', '\x00', '`'} {
+				if strings.ContainsRune(l.moduleKey(rel), r) {
+					t.Errorf("the key carries U+%04X", r)
+				}
+			}
+		})
+	}
+
+	// POSITIVE CONTROL: every extension name that exists on this machine passes,
+	// so the rule above is an allowlist of what a key component may be and not a
+	// refusal of everything.
+	for _, name := range []string{"FeenlaceMCPService", "mcp_service", "MCP_Polling", "Доработки3D", "YAXUNIT", "_A"} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, extManifestClassic),
+			[]byte(classicExtensionManifest(name, true)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := extensionNameOf(dir); !ok || got != name {
+			t.Errorf("a real extension name was refused: %q -> (%q, %v)", name, got, ok)
+		}
+	}
+}
+
+// TestLayoutDetectionCostIsBounded measures the budget as numbers rather than
+// arguing it, the way TestInspectionCostIsBoundedAndMeasured does for the other
+// file. Examining every child (which is what makes a container decidable) must not
+// turn into a read of every child's listing.
+func TestLayoutDetectionCostIsBounded(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, extManifestClassic), []byte(baseConfigManifest()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kinds := []string{"Catalogs", "Documents", "CommonModules", "Reports", "Enums"}
+	for _, k := range kinds {
+		// Each kind directory holds many children, which is exactly what must NOT
+		// be listed.
+		for i := 0; i < 40; i++ {
+			if err := os.MkdirAll(filepath.Join(root, k, fmt.Sprintf("Объект%02d", i)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	l := detectExtensionLayout(root)
+	if !l.empty() {
+		t.Fatalf("a base configuration produced a layout: self=%q byDir=%v", l.self, l.byDir)
+	}
+	// One listing of the root, plus one listing to confirm the root manifest's name
+	// byte-exactly. Not one per child.
+	if l.cost.ReadDirs != 2 {
+		t.Errorf("ReadDirs = %d, want 2: a listing per child directory would make the "+
+			"cost of detection grow with the size of the dump", l.cost.ReadDirs)
+	}
+	if want := 1 + len(kinds); l.cost.Lstats != want {
+		t.Errorf("Lstats = %d, want %d (the root and one per child directory)", l.cost.Lstats, want)
+	}
+	if l.cost.Reads != 1 {
+		t.Errorf("Reads = %d, want 1: only the root carries a manifest", l.cost.Reads)
+	}
+
+	// POSITIVE CONTROL: the counters move with the tree, so the numbers above are
+	// measurements and not constants.
+	deeper := t.TempDir()
+	for i := 0; i < 3; i++ {
+		mkExtensionDump(t, filepath.Join(deeper, fmt.Sprintf("dir%d", i)), extManifestClassic,
+			fmt.Sprintf("Р%d", i), "Catalogs")
+	}
+	got := detectExtensionLayout(deeper)
+	if got.cost.Reads != 3 || got.cost.Lstats != 4 {
+		t.Fatalf("positive control failed: cost = %+v, want 3 reads and 4 lstats", got.cost)
+	}
+}
+
+// TestRealFlatExtensionDumpsCarryTheirManifestName runs the whole thing against
+// the two real flat dumps on this machine, both of which have a directory name
+// that is NOT the extension name. They are the oracle for the central claim, and
+// they carry .bsl, so the served keys are real keys and not derivations.
+func TestRealFlatExtensionDumpsCarryTheirManifestName(t *testing.T) {
+	for root, want := range map[string]string{
+		"/Users/igoroot/Downloads/canon_vm":     "FeenlaceMCPService",
+		"/Users/igoroot/Downloads/mcp-modified": "MCP_Polling",
+	} {
+		if _, err := os.Stat(root); err != nil {
+			t.Skipf("%s is absent on this machine", root)
+		}
+		if filepath.Base(root) == want {
+			t.Fatalf("premise broken: %s is named after its extension, so it cannot "+
+				"show that the name comes from the manifest", root)
+		}
+		l := detectExtensionLayout(root)
+		if l.self != want {
+			t.Errorf("detectExtensionLayout(%s).self = %q, want %q", root, l.self, want)
+		}
+		if len(l.doubts) != 0 {
+			t.Errorf("%s produced doubts %v", root, l.doubts)
 		}
 	}
 }
