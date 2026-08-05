@@ -70,11 +70,21 @@ func (l extensionLayout) wrapDepth(relPath string) int {
 // loaders write it as they walk, and the manifest loader writes it from the
 // manifest, so a warm start reports the same number as a cold one. Callers may
 // hold idx.mu; the store itself is atomic.
+//
+// THE LAYOUT COMES FROM idx.layout() AND NEVER FROM THE FIELD. That sentence above
+// about a warm start reporting the same number as a cold one was FALSE for as long
+// as this function read idx.extLayout directly: the field is filled by a sync.Once
+// that only key derivation runs, and the warm paths derive no keys, so the warm
+// measurement was taken against an empty layout and every segment the layout
+// accounts for counted as a wrap. See the doc comment on Index.layout for the
+// numbers; TestWrappedPaths_WarmAndReadOnlyStartsAgreeWithTheColdOne is what now
+// holds the sentence shut.
 func (idx *Index) noteWrappedPaths() {
+	l := idx.layout()
 	var st WrappedPathState
 	st.Total = len(idx.pathToDocID)
 	for rel := range idx.pathToDocID {
-		if idx.extLayout.wrapDepth(rel) > 0 {
+		if l.wrapDepth(rel) > 0 {
 			st.Files++
 		}
 	}

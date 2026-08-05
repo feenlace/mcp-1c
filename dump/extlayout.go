@@ -592,6 +592,36 @@ func InspectExtensionLayout(dir string) ExtensionLayoutSummary {
 	return detectExtensionLayout(dir).summary()
 }
 
+// layout resolves this index's extension layout, reading the manifests the first
+// time and reusing that answer afterwards. It is the ONLY place idx.extLayout is
+// read, and TestExtensionLayoutIsNeverReadAroundItsOnce fails the build when a
+// second one appears.
+//
+// THE FIELD IS NOT THE LAYOUT UNTIL THE ONCE HAS RUN, and that distinction is not
+// pedantry; it was a shipped defect. noteWrappedPaths read idx.extLayout directly,
+// and the only caller that ever ran the Once was moduleKeyFor, which derives keys
+// FROM PATHS. A cold build goes through it for every file. The warm manifest start
+// and the read-only generation open take their DocIDs out of a manifest and never
+// derive a key at all, so on those paths the field was still the zero value: an
+// -AllExtensions container measured {Files:0 Total:2} cold and {Files:2 Total:2}
+// warm over byte-identical keys, and the wrapped-path notice then told the operator
+// on EVERY answer that the extension namespace was being lost and to restart
+// against the dump root, which reproduces it. Reading the field is therefore an
+// ordering assumption about a caller in another file, which is exactly the kind of
+// assumption a sync.Once exists to remove.
+//
+// Cost on the warm paths is what detectExtensionLayout's own COST paragraph states
+// and TestLayoutDetectionCostIsBounded measures, paid once per process. It was
+// already being paid: withIndexProtectionNotice in tools/index_notice.go asks this
+// index for ExtensionLayout on the first tool response either way.
+//
+// Safe to call with idx.mu held. detectExtensionLayout takes no index lock; it
+// reads the filesystem from idx.dir, which is fixed at construction.
+func (idx *Index) layout() extensionLayout {
+	idx.extLayoutOnce.Do(func() { idx.extLayout = detectExtensionLayout(idx.dir) })
+	return idx.extLayout
+}
+
 // ExtensionLayout reports the layout THIS INDEX derived its keys with, which is
 // the one a tool answer should describe. It is the layout read once behind
 // extLayoutOnce, so asking for it does not read the disk again and cannot disagree
@@ -600,6 +630,5 @@ func (idx *Index) ExtensionLayout() ExtensionLayoutSummary {
 	if idx == nil {
 		return ExtensionLayoutSummary{}
 	}
-	idx.extLayoutOnce.Do(func() { idx.extLayout = detectExtensionLayout(idx.dir) })
-	return idx.extLayout.summary()
+	return idx.layout().summary()
 }

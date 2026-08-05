@@ -873,8 +873,7 @@ type Index struct {
 // version that governs whether such a manifest may be adopted at all is
 // dumpIndexSchemaVersion, and the extension layout rides its v4 bump.
 func (idx *Index) moduleKeyFor(relPath string) string {
-	idx.extLayoutOnce.Do(func() { idx.extLayout = detectExtensionLayout(idx.dir) })
-	return idx.extLayout.moduleKey(relPath)
+	return idx.layout().moduleKey(relPath)
 }
 
 // Ready reports whether the index has finished building and is available for search.
