@@ -794,6 +794,19 @@ func TestAnUnusableExtensionNameIsRefusedRatherThanRepaired(t *testing.T) {
 		"longer than the bound":                              strings.Repeat("Д", maxExtensionNameRunes+1),
 		"empty":                                              "",
 		"whitespace only":                                    "   ",
+		// A NAME WITH NO VISIBLE CHARACTER. unicode.IsLetter is true for these:
+		// they are category Lo, and IsPrint and IsGraphic are true for all four, so
+		// every obvious guard misses them. A name made of one produced the served key
+		// «ext.<invisible>.Справочник.Ном.МодульОбъекта», a namespace the user can
+		// neither see nor retype, and the layout reported it as a confidently
+		// recognised extension with zero doubts.
+		"U+3164 HANGUL FILLER alone":            "ㅤ",
+		"U+115F HANGUL CHOSEONG FILLER alone":   "ᅟ",
+		"U+1160 HANGUL JUNGSEONG FILLER alone":  "ᅠ",
+		"U+FFA0 HALFWIDTH HANGUL FILLER alone":  "ﾠ",
+		"all four fillers":                      "ㅤᅟᅠﾠ",
+		"a filler hidden inside a normal name":  "Доработкиㅤ",
+		"a filler that makes a homograph of _A": "_Aㅤ",
 	}
 	for what, name := range hostile {
 		t.Run(what, func(t *testing.T) {
@@ -835,6 +848,225 @@ func TestAnUnusableExtensionNameIsRefusedRatherThanRepaired(t *testing.T) {
 		if got, ok := extensionNameOf(dir); !ok || got != name {
 			t.Errorf("a real extension name was refused: %q -> (%q, %v)", name, got, ok)
 		}
+	}
+}
+
+// TestAMarkerInACommentIsNotEvidence.
+//
+// This file criticises the branch it deleted for accepting a marker found «anywhere
+// at all, a comment included», and then did the same thing one scope down: the
+// surviving check is scoped to <Properties>, which constrains WHERE in the document
+// a match may sit and says nothing about WHAT KIND OF NODE it is. An XML comment
+// sits inside <Properties> perfectly happily.
+//
+// Every row below was measured against the real detector before the fix, and none
+// of them is a mere false positive in the harmless direction: two mint an extension
+// out of a document that declares none, and the third RENAMES a genuine extension,
+// because bytes.Index takes the first hit and a commented block can be placed before
+// the real one.
+func TestAMarkerInACommentIsNotEvidence(t *testing.T) {
+	const props = "<ObjectBelonging>Adopted</ObjectBelonging>"
+	wrap := func(inner string) string {
+		return "\ufeff<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+			"<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\n" +
+			"\t<Configuration uuid=\"aaaa\">\n" + inner + "\n\t</Configuration>\n</MetaDataObject>\n"
+	}
+
+	for what, body := range map[string]string{
+		"the marker only inside a comment": wrap(
+			"\t\t<Properties>\n\t\t\t<!-- было: " + props + " -->\n" +
+				"\t\t\t<Name>УправлениеТорговлей</Name>\n\t\t</Properties>"),
+		"the whole <Properties> commented out": wrap(
+			"\t\t<!--\n\t\t<Properties>\n\t\t\t" + props + "\n" +
+				"\t\t\t<Name>Призрак</Name>\n\t\t</Properties>\n\t\t-->"),
+		"the marker inside CDATA": wrap(
+			"\t\t<Properties>\n\t\t\t<Comment><![CDATA[" + props + "]]></Comment>\n" +
+				"\t\t\t<Name>УправлениеТорговлей</Name>\n\t\t</Properties>"),
+	} {
+		t.Run(what, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, extManifestClassic), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := extensionNameOf(dir); ok {
+				t.Errorf("a marker that is not part of the document structure minted the "+
+					"extension %q", got)
+			}
+			if l := detectExtensionLayout(dir); l.self != "" {
+				t.Errorf("self = %q", l.self)
+			}
+		})
+	}
+
+	// A COMMENTED BLOCK BEFORE THE REAL ONE MUST NOT RENAME THE EXTENSION. This is
+	// the row that is not about false positives at all: the document declares one
+	// genuine extension, and the answer has to be its name.
+	dir := t.TempDir()
+	shadow := wrap("\t\t<!-- <Properties>" + props + "<Name>Подставное</Name></Properties> -->\n" +
+		"\t\t<Properties>\n\t\t\t" + props + "\n\t\t\t<Name>Настоящее</Name>\n\t\t</Properties>")
+	if err := os.WriteFile(filepath.Join(dir, extManifestClassic), []byte(shadow), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); !ok || got != "Настоящее" {
+		t.Errorf("extensionNameOf = (%q, %v), want (\"Настоящее\", true): a name taken from "+
+			"a comment was served for a real extension", got, ok)
+	}
+
+	// POSITIVE CONTROLS. «Refuses a marker in a comment» is satisfied by a detector
+	// that has stopped recognising extensions at all, so a genuine manifest, and a
+	// genuine manifest that merely CONTAINS a harmless comment, must both still work.
+	for what, body := range map[string]string{
+		"a genuine manifest": classicExtensionManifest("Настоящее", true),
+		"a genuine manifest with a harmless comment": wrap("\t\t<!-- экспортировано конфигуратором -->\n" +
+			"\t\t<Properties>\n\t\t\t" + props + "\n\t\t\t<Name>СКомментарием</Name>\n\t\t</Properties>"),
+	} {
+		t.Run(what, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, extManifestClassic), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := extensionNameOf(dir); !ok {
+				t.Errorf("a genuine extension manifest was refused")
+			}
+		})
+	}
+}
+
+// TestAnUnterminatedCommentIsUndecidedAndSaysWhichKind.
+//
+// A comment that never closes leaves everything after it unknown, which is the
+// third answer and not «no marker found». It gets its OWN counter rather than
+// borrowing ReadTruncated: that one means the READ WINDOW ended mid-document, and
+// what an operator does about a window that is too small is not what they do about
+// a manifest that is broken. Reusing it would have made its own doc comment false,
+// which is the defect class this whole branch is about.
+func TestAnUnterminatedCommentIsUndecidedAndSaysWhichKind(t *testing.T) {
+	dir := t.TempDir()
+	body := "\ufeff<MetaDataObject>\n\t<Configuration>\n\t\t<Properties>\n" +
+		"\t\t\t<!-- не закрыт\n\t\t\t<ObjectBelonging>Adopted</ObjectBelonging>\n" +
+		"\t\t\t<Name>Призрак</Name>\n\t\t</Properties>\n\t</Configuration>\n</MetaDataObject>\n"
+	if err := os.WriteFile(filepath.Join(dir, extManifestClassic), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); ok {
+		t.Fatalf("an unterminated comment produced the extension %q", got)
+	}
+	s := detectExtensionLayout(dir).summary()
+	if s.Malformed != 1 {
+		t.Errorf("summary = %+v, want Malformed:1", s)
+	}
+	if s.ReadTruncated != 0 {
+		t.Errorf("summary = %+v: a broken document was reported as a read that did not "+
+			"fit in the window, and those are different problems with different remedies", s)
+	}
+	if s.Undecided() != 1 {
+		t.Errorf("Undecided() = %d, want 1: a new reason that no counter adds up is a "+
+			"doubt that both delivery channels stay silent about", s.Undecided())
+	}
+}
+
+// TestAMarkerAssembledOutOfTwoHalvesIsNotMinted is why stripMarkupNoise writes a
+// SPACE where a comment was rather than closing the gap.
+//
+// The input below carries NO marker: the string is interrupted mid-element by a
+// comment. A strip that joined the surviving halves would produce one out of two
+// pieces nobody wrote, turning a guard against forged evidence into a machine for
+// manufacturing it.
+func TestAMarkerAssembledOutOfTwoHalvesIsNotMinted(t *testing.T) {
+	const split = "<Properties><Object<!--x-->Belonging>Adopted</ObjectBelonging>" +
+		"<Name>Собранное</Name></Properties>"
+
+	// PREMISE: the raw bytes really do not contain the marker, or there is nothing
+	// to assemble and the test is about nothing.
+	if strings.Contains(split, "<ObjectBelonging>Adopted</ObjectBelonging>") {
+		t.Fatal("premise broken: the fixture already contains the marker")
+	}
+	// POSITIVE CONTROL: joining the halves DOES produce it, so the space below is
+	// load bearing and not decoration.
+	if joined := strings.ReplaceAll(split, "<!--x-->", ""); !strings.Contains(joined, "<ObjectBelonging>Adopted</ObjectBelonging>") {
+		t.Fatal("control failed: closing the gap does not assemble the marker, so this " +
+			"test cannot show the space doing anything")
+	}
+
+	out, ok := stripMarkupNoise([]byte(split))
+	if !ok {
+		t.Fatal("the comment is closed; the strip should not report an open one")
+	}
+	if bytes.Contains(out, []byte("<ObjectBelonging>Adopted</ObjectBelonging>")) {
+		t.Errorf("the strip assembled a marker out of two halves: %q", out)
+	}
+	if v, _, _ := classifyManifest([]byte(split), true); v == manifestExtension {
+		t.Error("a manifest whose marker exists only across a comment boundary was " +
+			"accepted as an extension")
+	}
+}
+
+// TestTheLegacyDirectoryNameIsPathDataAndIsNotGatedLikeAManifestName records a
+// DECISION, and the measurement that decided it.
+//
+// «Расширения/<Имя>/» keys off the DIRECTORY while the two real shapes key off the
+// MANIFEST. The obvious tidy-up is to run the directory name through
+// validExtensionName too, one rule for one key slot. It was tried and it is wrong,
+// for a reason that only shows up when the refusal is actually executed: a refused
+// name falls through to baseConfigModuleName over the WHOLE path, so
+// «Расширения/Доработки — копия/...» becomes «Расширения.Доработки — копия....». The
+// offending rune is still in the key. Validation there does not remove it, it moves
+// which slot it sits in, and it pays for that by moving keys customers already have.
+//
+// The rule the tree actually follows is the one tools/search.go states: a name read
+// off a customer's disk is DATA and is CONTAINED rather than corrected.
+// baseConfigModuleName validates no object name either, so a catalog directory with
+// a тире in it produces a key with a тире in it and always has.
+// validExtensionName governs something different: a name a MANIFEST declares, where
+// accepting it is a claim this server makes about a whole tree from one file's
+// contents.
+//
+// So this test pins the asymmetry as intended, in both directions, and pins the
+// residual it leaves rather than pretending there is none.
+func TestTheLegacyDirectoryNameIsPathDataAndIsNotGatedLikeAManifestName(t *testing.T) {
+	const tail = "Catalogs/Ном/Ext/ObjectModule.bsl"
+
+	// The name comes from the DIRECTORY and keeps coming from it, including for
+	// names the manifest gate refuses.
+	for what, name := range map[string]string{
+		"an ordinary name": "Доработки3D",
+		"underscored":      "MCP_Polling",
+		"Cyrillic":         "МоёРасш",
+		"a тире, which the manifest gate would refuse": "Доработки — копия",
+		"a leading digit, likewise":                    "3D",
+	} {
+		t.Run(what, func(t *testing.T) {
+			rel := extensionDirName + "/" + name + "/" + tail
+			want := "ext." + name + ".Справочник.Ном.МодульОбъекта"
+			if got := bslPathToModuleName(rel); got != want {
+				t.Errorf("bslPathToModuleName(%q) = %q, want %q", rel, got, want)
+			}
+		})
+	}
+
+	// CONTROL THAT THE TWO RULES REALLY ARE DIFFERENT. The same «Доработки — копия»
+	// declared by a MANIFEST is refused and produces no namespace, so the paragraph
+	// above is describing two rules and not one rule with a hole in it.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, extManifestClassic),
+		[]byte(classicExtensionManifest("Доработки — копия", true)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); ok {
+		t.Errorf("the manifest gate accepted %q; the two rules are supposed to differ", got)
+	}
+
+	// THE RESIDUAL, PINNED AS A RESIDUAL. An invisible name still reaches a served
+	// key through a directory. This is not an oversight this test is papering over:
+	// it is the same defect at base-configuration scope, older than extensions, and
+	// the line below says so by showing an ordinary CATALOG doing it too. Whoever
+	// closes that class should close both and delete this block.
+	invisible := extensionDirName + "/ㅤ/" + tail
+	if got := bslPathToModuleName(invisible); got != "ext.ㅤ.Справочник.Ном.МодульОбъекта" {
+		t.Errorf("the residual moved: bslPathToModuleName(%q) = %q", invisible, got)
+	}
+	if got := bslPathToModuleName("Catalogs/ㅤ/Ext/ObjectModule.bsl"); got != "Справочник.ㅤ.МодульОбъекта" {
+		t.Errorf("the base-configuration half of the same residual moved: %q", got)
 	}
 }
 

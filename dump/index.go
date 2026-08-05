@@ -575,6 +575,44 @@ func bslPathToModuleName(relPath string) string {
 	// A path too short to carry a full <Kind>/<name>/<File> remainder
 	// (len(parts) < 4) falls through to the base parser unchanged, which keeps
 	// the previous behaviour and never panics.
+	//
+	// THIS SHAPE KEYS OFF THE DIRECTORY, THE OTHER TWO KEY OFF THE MANIFEST, AND
+	// THAT ASYMMETRY IS INTENDED. Stated here because the question gets asked of
+	// this line, not of extlayout.go, and because the answer is not the obvious one.
+	//
+	// IT CANNOT READ A MANIFEST. The platform never writes a "Расширения" directory;
+	// it is a hand made tree. detectExtensionLayout Lstats a child's
+	// Configuration.xml at depth 1, whereas this layout would put one at depth 2, so
+	// there is nothing for the manifest rule to consult even in principle. Reaching
+	// down a level would cost a listing per grandchild, which is the growth
+	// TestLayoutDetectionCostIsBounded exists to forbid, and a hand made tree
+	// normally carries no manifest at all, so the rule would find nothing and every
+	// pinned Расширения key would lose its namespace.
+	//
+	// AND IT DELIBERATELY DOES NOT RUN validExtensionName OVER parts[1]. That gate
+	// exists for a name a MANIFEST declares, where accepting one is a claim this
+	// server makes about a whole tree from the contents of a single file, and the
+	// contract at the top of extlayout.go turns on refusing to invent such a claim.
+	// A directory name is not a claim; it is the path, and this function keys every
+	// other path segment off the disk without asking permission: baseConfigModuleName
+	// validates no object name either, so «Справочник.Доработки — копия.МодульОбъекта»
+	// is an ordinary key today. tools/search.go says why in as many words, that the
+	// тире in such a name is the CUSTOMER'S DATA and that stripping it would be
+	// corruption dressed as compliance, and it contains the name rather than
+	// correcting it.
+	//
+	// Gating this branch was tried and MEASURED, and it does not do what it looks
+	// like it does: a refused name falls through to baseConfigModuleName over the
+	// whole path, which yields «Расширения.Доработки — копия.МодульОбъекта». The тире
+	// is still in the key. Validation here does not remove the offending rune, it
+	// relabels the slot it sits in, and it pays for that by moving keys and by
+	// treating one path segment differently from its neighbours.
+	//
+	// The residual is real and is NOT closed here: an invisible name, the class
+	// extlayout.go's own validator now refuses, still reaches a served key through a
+	// directory called «ㅤ» — and equally through a CATALOG called «ㅤ», which is the
+	// same defect at base-configuration scope and older than any of this. Closing it
+	// belongs where every path-derived component is made, not in this one branch.
 	if parts[0] == extensionDirName && len(parts) >= 4 {
 		extName := parts[1]
 		return NFC("ext." + extName + "." + baseConfigModuleName(parts[2:]))

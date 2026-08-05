@@ -695,6 +695,10 @@ func extensionLayoutDoubtMessage(layout dump.ExtensionLayoutSummary) string {
 		msg += " Объявленное имя расширения нельзя использовать как часть ключа, каталогов: " +
 			strconv.Itoa(n) + "."
 	}
+	if n := layout.Malformed; n > 0 {
+		msg += " В Configuration.xml не закрыт комментарий или блок CDATA, каталогов: " +
+			strconv.Itoa(n) + "."
+	}
 	if layout.ScanTruncated {
 		msg += " Просмотрены не все подкаталоги, поэтому расширения могли остаться незамеченными."
 	}

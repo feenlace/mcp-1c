@@ -163,6 +163,12 @@ const (
 	doubtManifestTruncated
 	doubtNameRejected
 	doubtScanTruncated
+	// doubtManifestMalformed is a COMPLETE manifest head carrying an XML comment or
+	// a CDATA section that never closes. It is not doubtManifestTruncated, which
+	// means the READ WINDOW ended mid-document: here the whole document was read and
+	// the document itself is broken, so the operator's next move is different and the
+	// counter that reports it has to be different too.
+	doubtManifestMalformed
 )
 
 // layoutDoubt is one recorded "I do not know".
@@ -423,6 +429,27 @@ func readManifestHead(path string, lst os.FileInfo) ([]byte, bool, layoutDoubtRe
 func classifyManifest(head []byte, complete bool) (manifestVerdict, string, layoutDoubtReason) {
 	const openProps, closeProps = "<Properties>", "</Properties>"
 
+	// A MARKER THAT IS NOT PART OF THE DOCUMENT STRUCTURE IS NOT EVIDENCE, and this
+	// file already says so about the branch it deleted: the EDT check gated on a
+	// naked substring, so a base configuration mentioning the marker «anywhere at
+	// all, a comment included» was accepted as an extension under the
+	// configuration's own name. Scoping the surviving check to <Properties>
+	// constrains WHERE in the document a match may sit, not WHAT KIND OF NODE it is,
+	// and an XML comment sits inside <Properties> perfectly happily. Measured on the
+	// real detector before this: a base configuration whose <Properties> merely
+	// quotes «<ObjectBelonging>Adopted</ObjectBelonging>» in a comment served
+	// «ext.УправлениеТорговлей.Справочник.Ном.МодульОбъекта», a commented-out
+	// <Properties> minted an extension out of a document that declares none, and a
+	// commented block placed BEFORE the real one renamed a genuine extension,
+	// because bytes.Index takes the first hit. CDATA is a fourth way in.
+	head, whole := stripMarkupNoise(head)
+	if !whole {
+		if complete {
+			return manifestUndecided, "", doubtManifestMalformed
+		}
+		return manifestUndecided, "", doubtManifestTruncated
+	}
+
 	i := bytes.Index(head, []byte(openProps))
 	if i < 0 {
 		if complete {
@@ -473,6 +500,24 @@ func classifyManifest(head []byte, complete bool) (manifestVerdict, string, layo
 // A REJECTED NAME IS NOT REPAIRED. Replacing the offending runes would invent a
 // name the user cannot ask for and cannot recognise; the extension simply keeps the
 // keys it had before this file existed, and the refusal is reported.
+//
+// A LETTER IS NOT THE SAME THING AS A VISIBLE CHARACTER, and the gap between the
+// two was wide enough to drive a whole namespace through. unicode.IsLetter is true
+// for the Hangul fillers, which are category Lo and have no glyph: U+3164 ALONE
+// passed every clause above and produced the served key
+// «ext.<nothing you can see>.Справочник.Ном.МодульОбъекта». That is exactly the harm
+// the three-valued contract at the top of this file exists to prevent, and it did
+// not even land in the third value: the layout reported one recognised extension
+// and zero doubts, so nothing was said either.
+//
+// The predicate that separates them is Other_Default_Ignorable_Code_Point and
+// nothing else. Measured over all 0x110000 code points: IsPrint and IsGraphic are
+// TRUE for all four fillers, and none of them is in Zs, Cf or Mn, so every obvious
+// test misses them; the default-ignorable property catches exactly four runes that
+// this allowlist would otherwise admit (U+115F, U+1160, U+3164, U+FFA0) and not one
+// more. It rejects a name that CONTAINS one rather than only a name made entirely of
+// them, because «A» and «A<filler>» render identically and would be two distinct
+// served keys.
 func validExtensionName(s string) bool {
 	if s == "" {
 		return false
@@ -481,6 +526,9 @@ func validExtensionName(s string) bool {
 	for i, r := range s {
 		n++
 		if n > maxExtensionNameRunes {
+			return false
+		}
+		if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
 			return false
 		}
 		switch {
@@ -495,6 +543,54 @@ func validExtensionName(s string) bool {
 		}
 	}
 	return true
+}
+
+// stripMarkupNoise replaces every XML comment and CDATA section in b with a single
+// SPACE, so a marker that is character data or a remark cannot be read as element
+// structure. ok is false when a comment or CDATA section was OPENED and never
+// closed: everything after that point is unknown, which is the third answer and not
+// "no marker found".
+//
+// A SPACE AND NOT NOTHING, and that is not tidiness. Removing a comment outright
+// JOINS the bytes on either side of it, so
+// «<Object<!--x-->Belonging>Adopted</ObjectBelonging>» carries no marker but a
+// closing strip would MINT one out of two halves nobody wrote. Measured both ways:
+// with the bytes joined the marker appears, with the space it does not, and
+// TestAMarkerAssembledOutOfTwoHalvesIsNotMinted is the pin.
+//
+// It is still a byte scan, for the reason classifyManifest gives: the input is a
+// bounded head that may end mid-document, which a real XML parser rejects outright.
+// Comments and CDATA are the two node kinds whose CONTENT is not markup, and they
+// are both delimited by fixed byte sequences that cannot nest, so a scan is enough
+// to find their extent exactly.
+func stripMarkupNoise(b []byte) ([]byte, bool) {
+	var out bytes.Buffer
+	out.Grow(len(b))
+	for {
+		ci := bytes.Index(b, []byte("<!--"))
+		di := bytes.Index(b, []byte("<![CDATA["))
+		var (
+			i             int
+			open, closing string
+		)
+		switch {
+		case ci < 0 && di < 0:
+			out.Write(b)
+			return out.Bytes(), true
+		case di < 0 || (ci >= 0 && ci < di):
+			i, open, closing = ci, "<!--", "-->"
+		default:
+			i, open, closing = di, "<![CDATA[", "]]>"
+		}
+		out.Write(b[:i])
+		out.WriteByte(' ')
+		rest := b[i+len(open):]
+		j := bytes.Index(rest, []byte(closing))
+		if j < 0 {
+			return out.Bytes(), false
+		}
+		b = rest[j+len(closing):]
+	}
 }
 
 // elementText returns the text of the first <tag>...</tag> in b.
@@ -538,12 +634,13 @@ type ExtensionLayoutSummary struct {
 	Extensions int
 	// Dirs are those child directories, sorted. OPERATOR LOG ONLY; see above.
 	Dirs []string
-	// The four ways a directory can be undecided, counted separately because the
+	// The five ways a directory can be undecided, counted separately because the
 	// thing to do about each of them differs.
 	NotRegular    int // a Configuration.xml that is not a regular file
 	Unreadable    int // present, and the read failed
 	ReadTruncated int // <Properties> did not close inside the read window
 	NameRejected  int // declared a name that cannot be part of a key
+	Malformed     int // an XML comment or CDATA section that never closes
 	// ScanTruncated reports that the child scan stopped at maxExtensionScan, so
 	// extensions below it were never looked for.
 	ScanTruncated bool
@@ -551,7 +648,7 @@ type ExtensionLayoutSummary struct {
 
 // Undecided is how many directories the detection could not answer for.
 func (s ExtensionLayoutSummary) Undecided() int {
-	return s.NotRegular + s.Unreadable + s.ReadTruncated + s.NameRejected
+	return s.NotRegular + s.Unreadable + s.ReadTruncated + s.NameRejected + s.Malformed
 }
 
 // Quiet reports that there is nothing at all to say about this layout.
@@ -578,6 +675,8 @@ func (l extensionLayout) summary() ExtensionLayoutSummary {
 			s.ReadTruncated++
 		case doubtNameRejected:
 			s.NameRejected++
+		case doubtManifestMalformed:
+			s.Malformed++
 		case doubtScanTruncated:
 			s.ScanTruncated = true
 		}

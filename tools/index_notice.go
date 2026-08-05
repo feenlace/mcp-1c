@@ -253,6 +253,7 @@ func indexLayoutDoubtNotice(st dump.ExtensionLayoutSummary) string {
 		{st.Unreadable, "Не удалось прочитать Configuration.xml, каталогов: %d."},
 		{st.ReadTruncated, "Манифест не поместился в окно чтения, каталогов: %d."},
 		{st.NameRejected, "Объявленное имя расширения нельзя использовать как часть ключа, каталогов: %d."},
+		{st.Malformed, "В Configuration.xml не закрыт комментарий или блок CDATA, каталогов: %d."},
 	} {
 		if part.n > 0 {
 			notice += " " + fmt.Sprintf(part.text, part.n)
