@@ -230,14 +230,45 @@ var subdirSegmentNames = map[string]string{
 // forms; for these kinds the same file name is the object module and the suffix
 // must be "Модуль" instead.
 //
-// CommonModules was the original and, for a while, the only member. HTTPServices
-// and WebServices behave identically: the handler code of an HTTP or web service
-// lives in <Kind>/<name>/Ext/Module.bsl. Membership here only ever narrows a
-// suffix from "МодульФормы" to "Модуль"; the prefix is unaffected.
+// MEMBERSHIP IS A RULE NOW, NOT A LIST OF THREE THINGS THAT TURNED UP. The three
+// original members were added one at a time as each was noticed, which is a
+// process with no end and no way to tell whether it has one. The property that
+// actually decides it is in the platform's own type reference: a metadata object
+// gets a plain "Модуль" here exactly when its ОбъектМетаданных page carries a
+// «Модуль» property and no «Формы» property.
+//
+//	ОбщийМодуль  Модуль yes  Формы no      HTTPСервис  Модуль yes  Формы no
+//	WebСервис    Модуль yes  Формы no      Бот         Модуль yes  Формы no
+//	Справочник   Модуль no   Формы yes     Обработка   Модуль no   Формы yes
+//
+// The property tables those rows are read from are snapshotted in
+// testdata/metadata_kind_properties.txt and checked against this map by
+// TestPlainModuleDirsIsTheKindsWithAModuleAndNoForms, so the fourth member is not
+// a fourth thing that turned up either.
+//
+// Bots is that fourth member. «Объект метаданных: Бот» has properties Имя,
+// Комментарий, ОбъектРасширяемойКонфигурации, ПринадлежностьОбъекта, Синоним,
+// СтандартныеРеквизиты, Картинка, МОДУЛЬ, Предопределенный, and no Формы; the
+// platform also documents a «Модуль бота» type with five handler methods. Without
+// this entry Bots/<Имя>/Ext/Module.bsl keyed as "Бот.<Имя>.МодульФормы", a wrong
+// module type on the half of the key a user reads.
+//
+// NOT EXERCISED AGAINST A REAL ARTEFACT, and that is stated rather than left out.
+// No dump on this machine contains a Bots directory and dumps/dump_2's
+// Configuration.xml does not declare the kind, so the evidence is the platform type
+// reference and nothing else.
+//
+// CommonForms is deliberately NOT here, and the reason is the path and not the
+// property: its module is Ext/FORM/Module.bsl, one segment deeper, and it really
+// is a form module.
+//
+// Membership here only ever narrows a suffix from "МодульФормы" to "Модуль"; the
+// prefix is unaffected.
 var plainModuleDirs = map[string]bool{
 	"CommonModules": true,
 	"HTTPServices":  true,
 	"WebServices":   true,
+	"Bots":          true,
 }
 
 // configModuleDirName is the top-level dump directory that holds the modules of

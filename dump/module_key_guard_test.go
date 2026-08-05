@@ -242,7 +242,8 @@ func TestDumpDirNamesCoversDeclaredChildObjectKinds(t *testing.T) {
 // what canonicalises subsystem membership against the live 1C platform full name,
 // so agreeing with them is agreeing with the platform.
 //
-// Bots is the single documented exception and is asserted separately below.
+// Bots is the single documented exception and is asserted separately below: its
+// source is the platform TYPE reference rather than a subsystem table.
 func TestDumpDirRussianNamesMatchTheKindTables(t *testing.T) {
 	pairs := readConfigChildObjectDirs(t)
 
@@ -280,20 +281,20 @@ func TestDumpDirRussianNamesMatchTheKindTables(t *testing.T) {
 	}
 }
 
-// TestBotsIsTheOneDerivedRussianName states, in the tree, the one Russian name in
-// dumpDirNames that is NOT copied from another table in this package.
+// TestBotsRussianNameIsCitedNotDerived. This entry used to be the one Russian name
+// in dumpDirNames reduced from a plural by a rule instead of copied from a table,
+// and the tree said so out loud. It is no longer.
 //
-// The repository knows the collection property «Боты» — it is in
-// testdata/config_metadata_properties.txt, the snapshot of the platform type
-// ОбъектМетаданныхКонфигурация that configModuleNames also draws its four names
-// from. It does not know the singular anywhere, because no subsystem table lists a
-// bot. The singular is therefore derived by the rule this package already applies
-// and documents in subsystem_kinds.go, where ЭлементыСтиля gives ЭлементСтиля and
-// ВнешниеИсточникиДанных gives ВнешнийИсточникДанных.
+// The platform's own type reference carries a page titled «ОбъектМетаданных: Бот»,
+// whose property table is snapshotted in testdata/metadata_kind_properties.txt.
+// The singular is that page's own word, not a plural with its ending taken off, so
+// the entry is now a citation like every other one in this table.
 //
-// The test exists so the derivation is visible rather than buried, and so that
-// anyone who obtains the real platform full name has one place to correct.
-func TestBotsIsTheOneDerivedRussianName(t *testing.T) {
+// It is still an exception to the cross-check in
+// TestDumpDirRussianNamesMatchTheKindTables, because the table it is cited from is
+// the type reference and not a subsystem table. That is what the second half below
+// asserts: the day serviceKindEnToRu gains Bot, this exception should go.
+func TestBotsRussianNameIsCitedNotDerived(t *testing.T) {
 	const dir = "Bots"
 	got, ok := dumpDirNames[dir]
 	if !ok {
@@ -302,16 +303,27 @@ func TestBotsIsTheOneDerivedRussianName(t *testing.T) {
 	if got != "Бот" {
 		t.Errorf("dumpDirNames[%q] = %q, want %q", dir, got, "Бот")
 	}
-	// The plural it is derived FROM must really be in the snapshot; without that
-	// the derivation has no source at all.
+	// The page it is cited FROM must really be in the snapshot; without that the
+	// citation has no source at all.
+	if _, ok := kindProperties(t)["Бот"]; !ok {
+		t.Fatalf("%s no longer carries the «Бот» property table, so the singular in "+
+			"dumpDirNames rests on a reduction rule again; re-take the snapshot or drop "+
+			"the entry", kindPropertiesFixture)
+	}
+	// The plural collection is still «Боты» and is still the wrong register for
+	// this table, whose values are singular.
 	const snapshot = "testdata/config_metadata_properties.txt"
 	data, err := os.ReadFile(filepath.FromSlash(snapshot))
 	if err != nil {
 		t.Fatalf("open %s: %v", snapshot, err)
 	}
-	if !slices.Contains(strings.Split(strings.TrimSpace(string(data)), "\n"), "Боты") {
-		t.Fatalf("%s no longer lists «Боты», so the singular in dumpDirNames is derived from "+
-			"nothing; re-take the snapshot or drop the entry", snapshot)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if !slices.Contains(lines, "Боты") {
+		t.Errorf("%s no longer lists «Боты»", snapshot)
+	}
+	if slices.Contains(lines, "Бот") {
+		t.Errorf("%s lists the SINGULAR «Бот»; that file holds collection properties, and the "+
+			"distinction between the two registers is why this entry needed its own source", snapshot)
 	}
 	// And it is genuinely absent from the kind tables, or it would not be an
 	// exception and this test would be describing a state that no longer holds.

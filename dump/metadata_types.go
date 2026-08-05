@@ -154,22 +154,26 @@ func init() {
 
 	// Bots stands apart, and the difference is stated rather than hidden.
 	//
-	// It is a genuine configuration child class — a real EDT manifest carries
-	// <bots>Bot.ОфисМенеджер</bots> beside a live src/Bots directory — but it is
-	// absent from the ERP manifest measured above, so it is not in the fixture, and
-	// it is the ONE kind here whose Russian singular is not copied from another
-	// table: no subsystem table lists a bot.
+	// It is a genuine configuration child class, but it is absent from the ERP
+	// manifest measured above, so it is not in the fixture, and it is the ONE kind
+	// here whose Russian singular is not copied from a subsystem table: no subsystem
+	// table lists a bot.
 	//
-	// The plural collection «Боты» IS known to this repository, in
-	// testdata/config_metadata_properties.txt, the snapshot of the platform type
-	// ОбъектМетаданныхКонфигурация that configModuleNames also draws its four names
-	// from. The singular below is that plural reduced by the same rule
-	// subsystem_kinds.go already applies and documents (ЭлементыСтиля gives
-	// ЭлементСтиля, ВнешниеИсточникиДанных gives ВнешнийИсточникДанных).
+	// IT IS READ ALL THE SAME, and the wording here used to say otherwise. The
+	// platform type reference carries a page titled «ОбъектМетаданных: Бот»,
+	// snapshotted in testdata/metadata_kind_properties.txt, and the singular below
+	// is that page's own word rather than the collection plural «Боты» with its
+	// ending taken off. TestBotsRussianNameIsCitedNotDerived is where that source
+	// is asserted; the plural still appears in
+	// testdata/config_metadata_properties.txt and is still the wrong register for
+	// this table, whose values are singular.
 	//
-	// So it is derived, not read, and TestBotsIsTheOneDerivedRussianName says so in
-	// the tree: if the platform full name ever turns out to spell it otherwise,
-	// that test is the single place to correct.
+	// The DIRECTORY name is the half that is still a convention rather than an
+	// observation: no dump on this machine holds a Bots directory and dumps/dump_2's
+	// Configuration.xml declares no such kind, so the plural English spelling below
+	// follows the same rule every other entry uses and nothing has confirmed it. If
+	// it is wrong the entry is inert, not harmful: no folder matches it and the kind
+	// keeps the raw-English prefix it has today.
 	//
 	// ExternalDataProcessors is deliberately NOT here. It is not a configuration
 	// child class at all but a standalone root mdclass, and its projects carry no
