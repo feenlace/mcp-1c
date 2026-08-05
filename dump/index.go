@@ -1091,11 +1091,13 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 				}()
 				return idx, nil
 			} else {
-				// Cache corrupt — remove and rebuild.
-				if err := os.RemoveAll(cpath); err != nil {
-					slog.Warn("could not remove corrupt index cache before rebuild; "+
-						"the rebuild may fail or mix stale shards",
-						"path", cpath, "error", err)
+				// A corrupt FLAT cache costs the FLAT cache. It used to cost the whole
+				// per-dump arena, generations included, silently and with exit code 0;
+				// dropFlatCacheForRecovery carries both halves of that fix and the rule
+				// for a cache another process still holds. When it declines, this start
+				// builds WITHOUT the cache rather than into a peer's files.
+				if !dropFlatCacheForRecovery(cpath, fmt.Sprintf("opening the flat shards failed: %v", err)) {
+					useCache = false
 				}
 			}
 		}
@@ -1491,11 +1493,19 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 				s.Close()
 			}
 		}
-		if cpath != "" {
-			if err := os.RemoveAll(cpath); err != nil {
-				slog.Warn("could not remove partial index cache after build failure",
-					"path", cpath, "error", err)
-			}
+		// Clean up after THIS build and nothing else. Two bounds, both of them
+		// corrections. basePath rather than cpath: a build that never used the cache
+		// (the in-memory degrade, or no writable cache at all) wrote nothing there
+		// and has nothing to clean up, yet this branch used to delete the directory
+		// anyway. And removeFlatCacheContents rather than os.RemoveAll: the partial
+		// shards this build left are the flat cache's, while the immutable
+		// generations beside them were written by other runs, are sealed, and may be
+		// memory-mapped by a live reader right now.
+		if basePath != "" {
+			removed := removeFlatCacheContents(basePath)
+			slog.Error("index build failed; removed the partial flat index cache it had "+
+				"written. The immutable generations under g/ were kept",
+				"path", basePath, "removed", strings.Join(removed, " "), "error", firstErr)
 		}
 		idx.setBuildErr(firstErr)
 		return
