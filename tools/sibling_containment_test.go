@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -212,5 +213,115 @@ func TestUnknownMetadataKeyHeadingIsContained(t *testing.T) {
 	if strings.Contains(kh[1], "`") {
 		t.Errorf("a compiled-in category title was wrapped in code marks, so this package "+
 			"now presents its own words as customer data: %q", kh[1])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// THE SINK DOES NOT HAVE TO BE A HEADING.
+// ---------------------------------------------------------------------------
+//
+// The census this file was built from asked which format literals OPEN a heading,
+// and the two tests below are the sites that question could not see. A LINE BREAK
+// puts the remainder of a payload at COLUMN ZERO whatever construct it was printed
+// into, so `- **%s**` and `- ` forge a heading exactly as `## %s` does, and neither
+// of them looks like a heading in the source.
+//
+// Both were driven on the shipped renderer before the fix and both forged
+// «## ВНИМАНИЕ: подделка» at column zero.
+//
+// THE CONTAINMENT IS THE BREAK REPLACER AND NOT inlineCode, which is the same
+// distinction diagnosticCauses already draws one file over. A code span is what a
+// HEADING needs, because a heading's payload is a datum that must be delimited
+// inside a line built of our own words. A list item is delimited by the `- ` that
+// opens it; what no list marker survives is the end of the line, and the break
+// replacer is exactly the set of runes no container holds. Choosing inlineCode here
+// would put backticks around EVERY object name of EVERY metadata answer, and both
+// tests below assert that it does not.
+
+// TestMetadataSummaryUnknownKeyCannotForgeAHeading is the summary half. The key
+// reaches `- **%s**` through a bare %s; the %q on the SAME LINE is escaped by
+// strconv and is why this looked contained on a reading.
+func TestMetadataSummaryUnknownKeyCannotForgeAHeading(t *testing.T) {
+	breaker := hostileQueries["a line break, which ends the heading it is printed on"]
+
+	// POSITIVE CONTROL on the raw shape this fix replaces, including the escaped %q
+	// that made it look safe: the escaped copy is on the line the break already left.
+	raw := fmt.Sprintf("- **%s** (1) — filter=%q\n", breaker, breaker)
+	if n := len(headingLines(raw)); n != 1 {
+		t.Fatalf("control failed: the raw list item leaks a heading and the counter did "+
+			"not see it (counted %d, want 1):\n%s", n, raw)
+	}
+
+	for what, key := range hostileQueries {
+		t.Run(what, func(t *testing.T) {
+			out := formatMetadataSummary(map[string][]string{key: {"Объект1"}}, nil)
+			// ONE heading: this renderer's own «# Метаданные конфигурации 1С (сводка)».
+			// A second is the key having escaped its list item.
+			if heads := headingLines(out); len(heads) != 1 {
+				t.Fatalf("an unknown key carrying %s produced %d heading lines, want 1:\n%s\n"+
+					"--- lines ---\n%q", what, len(heads), out, heads)
+			}
+			// The key is MARKED, not deleted and not re-quoted: containment that
+			// dropped the key would pass the count above, and containment that wrapped
+			// it in a code span would change every summary that has one.
+			want := fmt.Sprintf("- **%s** (1) — filter=%q\n", breakMarked(key), key)
+			if !strings.Contains(out, want) {
+				t.Errorf("the unknown-key row is not the contained row.\n want: %q\n  in:\n%s",
+					want, out)
+			}
+		})
+	}
+
+	// THE OTHER HALF: an ordinary summary is BYTE-IDENTICAL. A known category and an
+	// ordinary unknown key both carry no break, so nothing about them may move.
+	ordinary := formatMetadataSummary(map[string][]string{
+		"Справочники": {"Номенклатура"},
+		"НовыйВид":    {"Объект1"},
+	}, nil)
+	for _, want := range []string{
+		"- **Справочники** (1) — filter=\"Справочники\"\n",
+		"- **НовыйВид** (1) — filter=\"НовыйВид\"\n",
+	} {
+		if !strings.Contains(ordinary, want) {
+			t.Errorf("an ordinary summary row moved; want %q in:\n%s", want, ordinary)
+		}
+	}
+}
+
+// TestMetadataSectionItemCannotForgeAHeading is the other half, and it is the
+// worse one: it needs NO unknown key at all. The items writeSection prints are
+// ORDINARY OBJECT NAMES from the 1C response, on the path every get_metadata_tree
+// call with a filter takes.
+func TestMetadataSectionItemCannotForgeAHeading(t *testing.T) {
+	breaker := hostileQueries["a line break, which ends the heading it is printed on"]
+
+	// POSITIVE CONTROL on the raw shape: `- ` + name, which is what writeSection wrote.
+	raw := "## Справочники\n- " + breaker + "\n"
+	if n := len(headingLines(raw)); n != 2 {
+		t.Fatalf("control failed: the raw list item leaks a heading and the counter did "+
+			"not see it (counted %d, want 2):\n%s", n, raw)
+	}
+
+	for what, name := range hostileQueries {
+		t.Run(what, func(t *testing.T) {
+			out := formatMetadataTree(map[string][]string{"Справочники": {name}}, nil, "")
+			// TWO headings: the «# Метаданные конфигурации 1С» title and the one
+			// `## Справочники` section. A third is the object name having escaped.
+			if heads := headingLines(out); len(heads) != 2 {
+				t.Fatalf("an object name carrying %s produced %d heading lines, want 2:\n%s\n"+
+					"--- lines ---\n%q", what, len(heads), out, heads)
+			}
+			if want := "- " + breakMarked(name) + "\n"; !strings.Contains(out, want) {
+				t.Errorf("the object name is not the contained name.\n want: %q\n  in:\n%s",
+					want, out)
+			}
+		})
+	}
+
+	// THE OTHER HALF: an ordinary object name is BYTE-IDENTICAL, with no code marks
+	// added. This is the assertion that refuses inlineCode here.
+	ordinary := formatMetadataTree(map[string][]string{"Справочники": {"Номенклатура"}}, nil, "")
+	if !strings.Contains(ordinary, "## Справочники\n- Номенклатура\n") {
+		t.Errorf("an ordinary metadata section moved:\n%s", ordinary)
 	}
 }

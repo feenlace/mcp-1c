@@ -345,7 +345,18 @@ func formatMetadataSummary(tree map[string][]string, warnings []string) string {
 	if len(unknown) > 0 {
 		b.WriteString("\n" + unknownKeyNotice + "\n\n")
 		for _, key := range unknown {
-			fmt.Fprintf(&b, "- **%s** (%d) — filter=%q\n", key, len(tree[key]), key)
+			// A LIST ITEM IS A LINE CONSTRUCT TOO. The heading census that fixed
+			// formatMetadataTree asked which format literals OPEN a heading and could
+			// not see this one, but a break in the key puts the rest of it at COLUMN
+			// ZERO, where `## ` is a heading again. The %q at the end of this same line
+			// is escaped by strconv and is why this row read as contained.
+			//
+			// The replacer and not inlineCode: the `- **` that opens the row is the
+			// delimiter, and the end of the line is the one bound it does not survive.
+			// Wrapping the key in a code span here would also duplicate the escaped
+			// copy the same row already prints as filter=.
+			fmt.Fprintf(&b, "- **%s** (%d) — filter=%q\n",
+				headingBreakReplacer.Replace(key), len(tree[key]), key)
 		}
 	}
 
@@ -353,11 +364,21 @@ func formatMetadataSummary(tree map[string][]string, warnings []string) string {
 }
 
 // writeSection writes a markdown section with the given title and items.
+//
+// THE ITEMS ARE THE 1C RESPONSE'S, at both call sites, so the break replacer runs
+// HERE rather than at the call site: the title is the one argument whose owner
+// differs between callers (a compiled-in cat.title, or an unknown key already
+// wrapped by its caller), and the items never are.
+//
+// This one needs no unknown key and no filter. An ordinary object name carrying a
+// break ends its list item and writes free markdown into an answer a model reads
+// as this server's own words. The replacer is a no-op on every name that does not,
+// so an ordinary tree renders byte for byte as it did.
 func writeSection(b *strings.Builder, title string, items []string) {
 	fmt.Fprintf(b, "## %s\n", title)
 	for _, name := range items {
 		b.WriteString("- ")
-		b.WriteString(name)
+		b.WriteString(headingBreakReplacer.Replace(name))
 		b.WriteByte('\n')
 	}
 	b.WriteByte('\n')
