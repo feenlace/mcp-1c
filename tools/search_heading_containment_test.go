@@ -53,23 +53,42 @@ func headingLines(text string) []string {
 	return out
 }
 
-// codeSpanContent decodes the code span that carries the module name out of a
-// `### ` heading line and returns its content, undoing CommonMark's one-space
-// padding strip. It is a DECODE, not a substring match: the test compares what a
-// renderer would actually show against the name that went in.
+// codeSpanContent decodes the code span that carries a datum out of an ATX
+// heading line and returns its content, undoing CommonMark's one-space padding
+// strip. It is a DECODE, not a substring match: the test compares what a renderer
+// would actually show against the text that went in.
+//
+// It reads the heading level off the line rather than pinning `### `, because
+// there are now TWO headings carrying a code span (the `## ` result header holds
+// the caller's query, the `### ` match heading holds the customer's module key)
+// and a second copy of this decoder is how one of them keeps a defect the other
+// one is fixed for.
 func codeSpanContent(t *testing.T, headingLine string) string {
 	t.Helper()
-	rest, ok := strings.CutPrefix(headingLine, "### ")
-	if !ok {
-		t.Fatalf("not a level-3 heading: %q", headingLine)
+	level := 0
+	for level < len(headingLine) && headingLine[level] == '#' {
+		level++
 	}
+	if level == 0 {
+		t.Fatalf("not an ATX heading: %q", headingLine)
+	}
+	rest, ok := strings.CutPrefix(headingLine[level:], " ")
+	if !ok {
+		t.Fatalf("heading marker is not followed by a space: %q", headingLine)
+	}
+	// The span does not have to start at the marker. In the `### ` match heading it
+	// does; in the `## ` result header our own words «Результаты поиска » come
+	// first. Those words are OURS and carry no backtick, so the first backtick on
+	// the line opens the datum's span in both.
+	open := strings.IndexByte(rest, '`')
+	if open < 0 {
+		t.Fatalf("the datum in this heading is NOT inside a code span, so every "+
+			"markdown-active rune in it is live: %q", headingLine)
+	}
+	rest = rest[open:]
 	n := 0
 	for n < len(rest) && rest[n] == '`' {
 		n++
-	}
-	if n == 0 {
-		t.Fatalf("the module name in this heading is NOT inside a code span, so every "+
-			"markdown-active rune in it is live: %q", headingLine)
 	}
 	delim := rest[:n]
 	body := rest[n:]

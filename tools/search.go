@@ -218,10 +218,11 @@ func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, q
 	noun := countNoun(stats.Unit, mode)
 
 	if stats.Unreadable > 0 {
-		fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%s с совпадениями в индексе: %d, показано %d)\n\n",
-			query, noun, stats.Total, len(matches))
+		b.WriteString(searchResultHeading(query, fmt.Sprintf(
+			"%s с совпадениями в индексе: %d, показано %d", noun, stats.Total, len(matches))))
 	} else {
-		fmt.Fprintf(&b, "## Результаты поиска \"%s\" (%s с совпадениями: %d)\n\n", query, noun, stats.Total)
+		b.WriteString(searchResultHeading(query, fmt.Sprintf(
+			"%s с совпадениями: %d", noun, stats.Total)))
 	}
 
 	if len(matches) == 0 {
@@ -307,6 +308,58 @@ func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, q
 	}
 
 	return b.String()
+}
+
+// searchResultHeading renders the `## ` line that opens a search answer.
+//
+// THE QUERY IN IT IS THE CALLER'S, AND IT REACHED THIS LINE THROUGH A BARE %s
+// BETWEEN TWO ASCII QUOTES. Quotes are not a container: they are two ordinary
+// characters that no renderer treats as a boundary. Measured on the real binary,
+// against a two module dump, ALL EIGHT of the break spellings headingBreakReplacer
+// knows escaped this heading, each of them putting the rest of the query on its own
+// line as free markdown:
+//
+//	## Результаты поиска "Процедура
+//	## ВНИМАНИЕ QCRINJECT" (строк с совпадениями: 0)
+//
+// THIS ONE IS REFLECTED, which is what makes it worse than the module name beside
+// it. searchHitHeading renders a name that had to be created on the customer's disk
+// first; this line renders whatever arrived in the tool call, so it needs no index
+// content at all and the same request produces the forgery on any server.
+//
+// WHY inlineCode AND NOT ONLY THE BREAK REPLACER. The replacer answers the end of
+// the line and nothing else, and the query is the one argument in this package most
+// likely to carry live markup for entirely innocent reasons: in regex mode it IS a
+// pattern, so `*`, `[`, `]`, `#` and a backtick are ordinary content of a correct
+// query. Measured on the same binary, all three went through raw:
+//
+//	## Результаты поиска "**QCRINJECT**" (...)
+//	## Результаты поиска "[QCRINJECT](http://x)" (...)
+//
+// A lone backtick is the sharpest of them: it opens a span this file never closes,
+// and the answer below is built of fenced blocks. So the query is contained by the
+// SAME mechanism the module name is, for the same reason, and inlineCode explains
+// which bound each half of it answers.
+//
+// THE ASCII QUOTES ARE GONE WITH IT, deliberately, and this changes what an
+// ordinary answer looks like: `## Результаты поиска "Процедура" (...)` becomes
+// `## Результаты поиска ` + "`Процедура`" + ` (...)`. Keeping both would delimit the
+// datum twice and would leave a reader unable to tell which pair is ours. The code
+// span is the quoting, exactly as it is in searchHitHeading.
+//
+// AN EMPTY QUERY RENDERS AS NOTHING, since inlineCode("") is "". search_code cannot
+// produce that (the handler rejects an empty query before this is reached), but
+// FormatSearchResult is exported for callers outside this module, so the behaviour
+// is pinned by a test rather than left to be discovered.
+//
+// ONE SEAM. This used to be two Fprintf calls carrying two copies of the query, and
+// two copies is how one of them keeps the old behaviour after the other is fixed.
+// counts is what goes in the parentheses and is built by the caller from numbers and
+// from countNoun, all of them ours.
+//
+// Customer-facing RU: no тире.
+func searchResultHeading(query, counts string) string {
+	return fmt.Sprintf("## Результаты поиска %s (%s)\n\n", inlineCode(query), counts)
 }
 
 // searchHitHeading renders the `### ` line for one rendered match.
