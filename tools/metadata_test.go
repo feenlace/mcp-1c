@@ -106,7 +106,10 @@ func TestFormatMetadataTree_UnknownCategory(t *testing.T) {
 	}
 
 	// Unknown category should also be rendered.
-	if !strings.Contains(result, "## НовыйТип") {
+	// The unknown key is the caller's side of this answer, so it is rendered as a
+	// contained datum; the known category above stays our own words. See
+	// tools/sibling_containment_test.go:TestUnknownMetadataKeyHeadingIsContained.
+	if !strings.Contains(result, "## `НовыйТип`") {
 		t.Errorf("expected unknown category 'НовыйТип' to be rendered, got:\n%s", result)
 	}
 	if !strings.Contains(result, "ОбъектНовогоТипа") {
@@ -131,7 +134,7 @@ func TestFormatMetadataTree_Order(t *testing.T) {
 	idxSpravochniki := strings.Index(result, "## Справочники")
 	idxDocuments := strings.Index(result, "## Документы")
 	idxRoles := strings.Index(result, "## Роли")
-	idxUnknown := strings.Index(result, "## НеизвестнаяКатегория")
+	idxUnknown := strings.Index(result, "## `НеизвестнаяКатегория`")
 
 	if idxSpravochniki < 0 || idxDocuments < 0 || idxRoles < 0 || idxUnknown < 0 {
 		t.Fatalf("expected all sections to be present, got:\n%s", result)

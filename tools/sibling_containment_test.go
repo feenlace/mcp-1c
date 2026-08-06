@@ -173,3 +173,44 @@ func TestDiagnosticCausesIsOneSeam(t *testing.T) {
 		}
 	}
 }
+
+// TestUnknownMetadataKeyHeadingIsContained covers the last REFLECTED heading in
+// this package.
+//
+// An unknown metadata key becomes an `## ` heading, and on the filtered path the
+// key rendered is byte-identical to the caller's own filter argument, so the
+// forgery needs no agreement from 1С beyond that key appearing in the tree. The
+// KNOWN categories are compiled-in constants and deliberately stay outside the
+// span; both halves are asserted, because containing everything would be as wrong
+// as containing nothing.
+func TestUnknownMetadataKeyHeadingIsContained(t *testing.T) {
+	for what, key := range hostileQueries {
+		t.Run(what, func(t *testing.T) {
+			out := formatMetadataTree(map[string][]string{key: {"Объект1"}}, nil, key)
+			heads := headingLines(out)
+			// TWO headings: this renderer's own `# Метаданные конфигурации 1С` title
+			// and the one `## ` section. A third would be the key having escaped.
+			if len(heads) != 2 {
+				t.Fatalf("an unknown key carrying %s produced %d heading lines, want 2:\n%s",
+					what, len(heads), out)
+			}
+			if got := codeSpanContent(t, heads[1]); got != breakMarked(key) {
+				t.Errorf("the key was altered beyond the break markers.\n want: %q\n  got: %q",
+					breakMarked(key), got)
+			}
+		})
+	}
+
+	// THE OTHER HALF: a KNOWN category is ours and is NOT wrapped in code marks.
+	// Without this the test above would also pass on a change that put every
+	// heading in this file inside a span.
+	known := formatMetadataTree(map[string][]string{"Справочники": {"Номенклатура"}}, nil, "")
+	kh := headingLines(known)
+	if len(kh) != 2 {
+		t.Fatalf("a known category produced %d heading lines, want 2:\n%s", len(kh), known)
+	}
+	if strings.Contains(kh[1], "`") {
+		t.Errorf("a compiled-in category title was wrapped in code marks, so this package "+
+			"now presents its own words as customer data: %q", kh[1])
+	}
+}

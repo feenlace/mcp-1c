@@ -277,7 +277,13 @@ func formatMetadataTree(tree map[string][]string, warnings []string, filter stri
 	if len(unknown) > 0 {
 		b.WriteString(unknownKeyNotice + "\n\n")
 		for _, key := range unknown {
-			writeSection(&b, key, tree[key])
+			// AN UNKNOWN KEY IS NOT OURS, and on the filtered path it is byte-identical
+			// to the caller's own filter argument, so this heading is reflected exactly
+			// as the search header was. The known categories a few lines above pass
+			// cat.title, which is a compiled-in constant, and stay outside the span:
+			// containment belongs at the call site that knows whose bytes these are,
+			// not inside writeSection where the two would be indistinguishable.
+			writeSection(&b, inlineCode(key), tree[key])
 			shown++
 		}
 	}
