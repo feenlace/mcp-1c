@@ -213,6 +213,28 @@ const smartOneLinePerModuleNote = "> Режим smart ранжирует мод�
 // remedies are opposite: a limit that truncated is fixed by a bigger limit, a
 // module that cannot be re-read is fixed by re-running the dump and calling
 // reload_dump. Neither remedy does anything for the other cause.
+//
+// WHAT AN ORDINARY ANSWER LOOKS LIKE MOVED, IN MORE THAN ONE PLACE, and this list
+// is here because a shorter account of it was written first and was false. It is
+// not a summary «except for X»: every entry below changes a rendered answer that
+// carries nothing hostile at all, and each one is named with the test that pins
+// it, so reverting any of them turns that test red rather than editing this list.
+//
+//   - The query in the header lost its ASCII quotes and gained a code span
+//     (searchResultHeading; TestSearchResultHeaderKeepsTheCallersQuery).
+//   - The module key in each hit heading gained a code span
+//     (searchHitHeading; TestSearchHeadingKeepsTheCustomerText).
+//   - The count label stopped saying «совпадений» and now names its unit, as
+//     «модулей с совпадениями: N» or «строк с совпадениями: N»
+//     (countNoun; TestSearchHeaderNamesWhatItCounted).
+//   - The shortfall note carries the SAME unit noun instead of «совпадений»
+//     (searchShortfallNote; TestSearchShortfallNoteNamesTheSameUnitAsTheHeader).
+//   - A hit whose module matched on more than one line gained a field,
+//     «, строк с совпадениями в модуле: K»
+//     (TestSmartHitSaysHowManyLinesOfTheModuleMatched).
+//
+// The fenced module body is the one change that is NOT in this list, because it is
+// byte-identical on a body carrying no backtick; see tools/toolerror.go:fencedAs.
 func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, query string, mode dump.SearchMode, displayFn MatchDisplayFunc) string {
 	var b strings.Builder
 	noun := countNoun(stats.Unit, mode)

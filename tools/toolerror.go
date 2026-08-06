@@ -954,7 +954,14 @@ func fenced(text string) string { return fencedAs(text, "") }
 //
 // A PAYLOAD WITH NO BACKTICK PRODUCES BYTE-IDENTICAL OUTPUT to the fixed three this
 // replaced, because fenceLen floors at three. That is what makes this safe to put
-// under search_code: the ordinary answer does not move.
+// under search_code: THIS BLOCK does not move.
+//
+// It is stated about the block and NOT about the answer, which is the correction
+// this sentence needed. A search answer built around this block DID move, in
+// several places at once, and a reader who took «the ordinary answer does not
+// move» from here would have been told the opposite of what ships. The changes are
+// enumerated, each with the test that pins it, at
+// tools/search.go:FormatSearchResultWithStats.
 func fencedAs(text, info string) string {
 	f := strings.Repeat("`", fenceLen(text))
 	return f + info + "\n" + text + "\n" + f

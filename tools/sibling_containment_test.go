@@ -10,15 +10,39 @@ import (
 
 // The search header was not the only place a caller's own argument reached a
 // heading through a bare %s, and it was not the only construct a break could end.
-// This file covers the two siblings that were fixed with it, found by an AST census
-// of every render call in this package whose format literal opens an ATX heading or
-// a `> ` blockquote.
+// This file covers the siblings that were fixed with it, found by an AST census of
+// every render call in this package whose format literal opens an ATX heading or a
+// `> ` blockquote.
 //
-// The census also found sites that are NOT covered here, and they are recorded in
-// the commit rather than left to be rediscovered: the `## %s` headings fed from a
-// subsystem name, a form name, an object name and a tabular part name are the same
-// class as the module key, but every one of them changes what an ORDINARY answer
-// looks like, and that is a rendering decision rather than a containment fix.
+// THAT CENSUS ASKED THE WRONG QUESTION, and this note is the correction rather than
+// a footnote to it. Opening a heading is not what makes a sink dangerous. A LINE
+// BREAK in the payload puts the remainder at COLUMN ZERO, and `## ` at column zero
+// is a heading whatever construct it escaped from, so a list item, a table cell and
+// a bold run are all sinks and NOT ONE OF THEM matches a census keyed on heading
+// literals. Two live injections in tools/metadata.go were found this way, after the
+// census had already run and reported itself complete.
+//
+// SO THE CLASS IS NOT CLOSED, and nothing in this package may say that it is. The
+// sinks that remain open are not a short list of `## %s` headings: they include the
+// attribute and enum rows of object_structure (`- **%s** (%s) — %s`), its ambiguity
+// list, its Состав, Состав типа and Подсистемы bullets, the subsystem membership
+// and orphan lists of analyze_subsystems, the form element table and the command,
+// handler and element-event lists of form.go, the configuration_info table cells,
+// the query result table, the event log fields and the validate_query error list,
+// as well as the object, form, subsystem and tabular part names in the headings
+// that carry them, which sit at three different heading levels and so were never
+// one `## %s` list either.
+//
+// THE SIZE OF THE RESIDUAL IS MEASURED AND NOT WRITTEN HERE. It is counted per
+// renderer, against a hostile payload, by
+// tools/heading_forgery_residual_test.go:TestHeadingForgeryResidualIsMeasured,
+// whose numbers are assertions: a sink that is contained, or one that is added,
+// turns that test red instead of leaving this paragraph quietly wrong.
+//
+// NONE OF THEM IS CONTAINED IN THIS BRANCH, deliberately. Every one prints a datum
+// inside a line of ordinary answer text, so containing them changes what almost
+// every answer looks like, and that is a rendering decision about the product
+// rather than a containment fix.
 
 // quotedLines returns every line of an answer that opens a `> ` blockquote. A
 // payload that ended the quote shows up as a MISSING line rather than an extra one,
