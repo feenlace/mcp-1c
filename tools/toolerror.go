@@ -1051,8 +1051,11 @@ var headingBreakReplacer = strings.NewReplacer(
 // The space padding is CommonMark's code-span rule, not decoration: when the raw
 // content both begins and ends with a space it loses one from each end, so a
 // payload starting or ending with a backtick or a space is padded to survive
-// that strip byte-exactly. Content that is ALL spaces is not stripped at all, so
-// it is not padded either.
+// that strip byte-exactly. The all-spaces clause is the exception the same rule
+// carries, and it is PINNED rather than described here, in
+// tools/search_heading_containment_test.go:TestSearchHeadingKeepsTheCustomerText:
+// this comment used to assert the behaviour in a sentence, and deleting the clause
+// left the whole run at real exit 0 because no fixture was all spaces.
 func inlineCode(text string) string {
 	text = headingBreakReplacer.Replace(text)
 	if text == "" {

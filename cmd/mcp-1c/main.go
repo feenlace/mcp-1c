@@ -147,16 +147,24 @@ func main() {
 		return
 	}
 
-	// Three modes of stderr handling (outside of --debug):
-	//   1. effectiveTTY=true  => show info logs and progress in terminal (v1.6.0 behaviour)
-	//   2. effectiveTTY=false => redirect stderr to a file to protect strict MCP
-	//      clients (Kilo Code 7.x, Issue #14) from any third-party stderr writes
-	//      (v1.6.1 behaviour)
-	//   3. effectiveTTY=false and the log file cannot be opened => redirect to
-	//      os.DevNull anyway, because the pipe must be cleared whether or not a log
-	//      exists. This one was counted in the heading and then not listed, which
-	//      made the mode that runs on a full disk look like it was not there.
-	// --debug overrides all three and writes everything to server.log at INFO level.
+	// Stderr handling outside of --debug. The branches are ENUMERATED AND NOT
+	// COUNTED, because the total was wrong twice running and the leaf it left out
+	// both times is the LAST one below, the only branch that does NOT clear the
+	// pipe, which is the outcome the whole block exists to prevent. A written total
+	// over an adjacent if/else can only rot, and no figure is restated here for the
+	// next reader to mistake for a current one.
+	//   - effectiveTTY=true => show info logs and progress in terminal (v1.6.0
+	//     behaviour).
+	//   - effectiveTTY=false => redirect stderr to a file to protect strict MCP
+	//     clients (Kilo Code 7.x, Issue #14) from any third-party stderr writes
+	//     (v1.6.1 behaviour).
+	//   - the log file cannot be opened => redirect to os.DevNull anyway, because
+	//     the pipe must be cleared whether or not a log exists. This is the mode
+	//     that runs on a full disk.
+	//   - os.DevNull cannot be opened either => keep the real stderr and warn. This
+	//     is the ONLY leaf that leaves third-party writes on the client pipe, and
+	//     it appeared neither in the heading's count nor in the list below it.
+	// --debug overrides all of them and writes everything to server.log at INFO level.
 	if !*debug {
 		if effectiveTTY {
 			// Terminal launch: show info-level logs and progress to the user.

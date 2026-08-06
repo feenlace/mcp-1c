@@ -202,11 +202,16 @@ func TestSearchHeadingKeepsTheCustomerText(t *testing.T) {
 		"Справочник.Товары\tи услуги.МодульОбъекта",
 		"Справочник.№17.МодульОбъекта",
 		// CommonMark strips one space from each end of a code span whose raw
-		// content begins AND ends with one, so these three come back altered
+		// content begins AND ends with one, so the names below come back altered
 		// unless the span pads them.
 		"`Справочник.Товары.МодульОбъекта",
 		"Справочник.Товары.МодульОбъекта`",
 		" Справочник.Товары.МодульОбъекта ",
+		// AND THE EXCEPTION THE SAME RULE CARRIES: content that is ALL spaces is not
+		// stripped, so padding it would ADD two spaces to a name nobody typed. That
+		// clause of inlineCode had no fixture at all, and deleting it left the whole
+		// run at real exit 0.
+		"   ",
 	}
 	// POSITIVE CONTROL FIRST, on the production input: the names really carry the
 	// characters this test is about, so a clean result is the answer being clean

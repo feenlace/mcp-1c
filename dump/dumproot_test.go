@@ -24,9 +24,16 @@ import (
 //	/Applications, /Library, /System        0
 //	/opt, /private/tmp, /usr/share, /usr/lib 0
 //
-// Twenty directories, one of which scores 1 and none of which scores 2. So at
-// N=1 the detector fires on the user's home directory, and at N=2 it fires on
-// none of them. The real roots on the same machine score 41, 23, 8, 2 and 1.
+// Exactly one of them scores 1 and none scores 2. So at N=1 the detector fires on
+// the user's home directory, and at N=2 it fires on none of them.
+//
+// THE SIZE OF THAT SWEEP AND THE SCORES OF THE REAL ROOTS ARE NOT WRITTEN DOWN,
+// for the reason dump/dumproot.go:minKindDirsForRoot already gives after the same
+// figure rotted there: it was a one-time walk over the paths of one machine,
+// nothing in this tree re-derives it, and the dumps it scored are not all still on
+// disk. What survives is what the tests below check on whatever machine they run
+// on: $HOME must not inspect as a root, and the threshold and not luck must be
+// what keeps it out.
 //
 // That last one is why the manifest branch is not optional: the extension dump at
 // ~/Downloads/extdump_vm/mcp_service has exactly ONE kind directory (Languages)

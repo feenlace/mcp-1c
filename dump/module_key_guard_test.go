@@ -412,16 +412,26 @@ var unwrappedKeyDigestCorpus = []string{
 // exist. TestAnchoredCorpusRowsReallyAnchor asserts that property directly, so a
 // row that stopped anchoring could not sit here contributing nothing.
 //
-// Eight of the rows are wrappers and they are adversarial rather than convenient:
-// four of them open with a name the scan must recognise and then REJECT on shape,
-// drawn from three distinct such names ("Documents", "Ext", "Catalogs"). That is
+// MOST ROWS ARE WRAPPERS, and they are adversarial rather than convenient: several
+// of them open with a name the scan must RECOGNISE and then REJECT on shape, and
+// "Documents", "Ext" and "Catalogs" all appear in that opening position. That is
 // exactly the case a marker test alone gets wrong.
 //
-// The last two rows are not wrappers. They are the two residual classes the anchor
-// scan is documented to move (see the anchor block in index.go and
-// module_key_anchor_test.go): neither occurs in the 13575 measured paths and
+// THE ROWS THAT ARE NOT WRAPPERS ARE NAMED, not counted and not pointed at by
+// position: "Catalogs/Ном/Ext/ManagedApplicationModule.bsl" and
+// "Catalogs/Расширения/Y/Catalogs/Ном/Ext/ObjectModule.bsl". They are the residual
+// classes the anchor scan is documented to move (see the anchor block in index.go
+// and module_key_anchor_test.go): neither occurs in the measured corpus paths and
 // neither is a shape 1C emits, and they are pinned here so a later change to them
 // moves the digest instead of passing unnoticed.
+//
+// THE COUNTS THAT USED TO BE HERE ARE DELETED RATHER THAN REPAIRED. They described
+// a literal a reader can simply look at, they said how many rows were wrappers and
+// which two were not, and appending one row to the slice below made every one of
+// them wrong in the same edit, including the claim that the last row is not a
+// wrapper when its own comment says it is. A written count over an adjacent literal
+// can only rot; TestAnchoredCorpusRowsReallyAnchor already asserts the property
+// that matters, for every row, on whatever the slice holds.
 var anchoredKeyDigestCorpus = []string{
 	"dump_bsl/Catalogs/Номенклатура/Ext/ObjectModule.bsl",
 	"Documents/dumps/Catalogs/Номенклатура/Forms/ФормаСписка/Ext/Form/Module.bsl",

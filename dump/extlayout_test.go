@@ -29,9 +29,10 @@ import (
 // THE NAME COMES FROM THE MANIFEST, NEVER FROM THE DIRECTORY, and that is measured
 // on this machine rather than reported from elsewhere: ~/Downloads/canon_vm
 // declares <Name>FeenlaceMCPService</Name> and ~/Downloads/mcp-modified declares
-// <Name>MCP_Polling</Name>. Two of the four real extension dumps here therefore
-// disagree with their own directory name, and a directory-derived namespace would
-// key their modules under a name nobody can ask for.
+// <Name>MCP_Polling</Name>. Both therefore disagree with their own directory name,
+// and a directory-derived namespace would key their modules under a name nobody can
+// ask for. They are NAMED and not counted against a total for this machine: the
+// named pair is checkable, a machine-wide total is not.
 //
 // THERE ARE NO EDT ROWS. No Configuration.mdo exists on this machine, so a fixture
 // written to the reported byte shape would be a fixture of a belief, and a test
@@ -1120,10 +1121,15 @@ func TestLayoutDetectionCostIsBounded(t *testing.T) {
 	}
 }
 
-// TestRealFlatExtensionDumpsCarryTheirManifestName runs the whole thing against
-// the two real flat dumps on this machine, both of which have a directory name
-// that is NOT the extension name. They are the oracle for the central claim, and
-// they carry .bsl, so the served keys are real keys and not derivations.
+// TestRealFlatExtensionDumpsCarryTheirManifestName runs the whole thing against the
+// real flat dumps NAMED IN THE TABLE BELOW, each of which has a directory name that
+// is NOT the extension name. They are the oracle for the central claim, and they
+// carry .bsl, so the served keys are real keys and not derivations.
+//
+// The table is not claimed to be every such dump on this machine, and it used to
+// be: a later sweep found another directory meeting the same criteria that the
+// table does not name. What the table is, is a set of real dumps that all must
+// key by manifest, and it fails if any of them stops doing so.
 func TestRealFlatExtensionDumpsCarryTheirManifestName(t *testing.T) {
 	for root, want := range map[string]string{
 		"/Users/igoroot/Downloads/canon_vm":     "FeenlaceMCPService",
@@ -1232,7 +1238,9 @@ func TestAMarkerInAProcessingInstructionIsNotEvidence(t *testing.T) {
 // sequence: the bracketed internal subset may hold both "]" and ">" inside quoted
 // literals, so a scan cannot find where it ends, and a strip that guessed would be
 // the invention this file exists to refuse. Refusing costs nothing that exists: not
-// one of the six real Configuration.xml files on this machine contains "<!" at all.
+// one real Configuration.xml on this machine contains "<!" at all, on every sweep
+// that has looked. How many files that was is deliberately not written here; see
+// dump/extlayout.go:unscannableOpen for why the earlier figure was removed.
 func TestAMarkupDeclarationIsUndecidedRatherThanScanned(t *testing.T) {
 	const props = "<ObjectBelonging>Adopted</ObjectBelonging>"
 	const real = "<MetaDataObject>\n\t<Configuration>\n\t\t<Properties>\n\t\t\t" + props +

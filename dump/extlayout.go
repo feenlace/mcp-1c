@@ -36,8 +36,10 @@ import (
 // THE NAME COMES FROM THE MANIFEST, NEVER FROM THE DIRECTORY, and that is measured
 // here rather than reported from elsewhere: ~/Downloads/canon_vm declares
 // <Name>FeenlaceMCPService</Name> and ~/Downloads/mcp-modified declares
-// <Name>MCP_Polling</Name>, so two of the four real extension dumps on this machine
-// have a directory name that is not the extension name. A directory-derived
+// <Name>MCP_Polling</Name>, so a real extension dump can and does have a directory
+// name that is not the extension name. The two dumps are NAMED rather than counted
+// against a total for this machine: the named pair is checkable, a machine-wide
+// total is not. A directory-derived
 // namespace would file their modules under a name nobody can ask for. It also keeps
 // the old hazard shut: a real configuration contains a CommonForm literally named
 // «Расширения», and nothing here reads that word as evidence of anything.
@@ -138,7 +140,11 @@ const (
 	maxExtensionNameRunes = 128
 )
 
-// manifestVerdict is the three-valued answer described in the contract above.
+// manifestVerdict is the answer described in the contract above. It is not
+// numbered here: the contract groups «absent» and «present but not an extension»
+// into a single answer while the constants below keep them apart, so the two ways
+// of counting this type do not agree, and a written total picks whichever reading
+// the next reader did not have.
 type manifestVerdict uint8
 
 const (
@@ -583,8 +589,8 @@ func validExtensionName(s string) bool {
 // and CDATA were «the two node kinds whose CONTENT is not markup». A PROCESSING
 // INSTRUCTION is a third, it is ordinary well-formed XML, and 1C writes one into
 // every manifest on this machine (the XML declaration, which shares the syntax).
-// Measured on the real detector before this, with the four real manifests as the
-// control: a <?...?> inside <Properties> carrying
+// Measured on the real detector before this, with the real manifests on this
+// machine as the control: a <?...?> inside <Properties> carrying
 // «<ObjectBelonging>Adopted</ObjectBelonging>» minted an extension out of a base
 // configuration, and one placed BEFORE the real <Properties> renamed a genuine
 // extension to «ЛОЖНОЕ» while the layout reported Extensions:1 Undecided:0. Full
@@ -614,11 +620,13 @@ var markupNoiseKinds = [...]struct{ open, closing string }{
 // reported Extensions:1 Undecided:0, exactly as the processing instruction did.
 // A DOCTYPE is legal XML; nothing about it is malformed.
 //
-// MEASURED IN THE OTHER DIRECTION TOO, which is what makes refusing it cheap: of
-// the six real Configuration.xml files on this machine (the four extension dumps,
-// the base configuration of dumps/dump_2 read to the full 256 KiB window, and this
-// repository's own extension source) NOT ONE contains "<!" at all, in any form, and
-// every one contains exactly one "<?", the XML declaration at offset 0 or 3. So the
+// MEASURED IN THE OTHER DIRECTION TOO, which is what makes refusing it cheap: over
+// the real Configuration.xml files this machine holds, NOT ONE contains "<!" at
+// all, in any form, and every one contains exactly one "<?", the XML declaration at
+// offset 0 or 3. HOW MANY FILES THAT WAS IS NOT WRITTEN DOWN: the figure that stood
+// here counted the handful the author had open, a later sweep of the same machine
+// reached far more, and nothing in this tree resolves either. What the refusal
+// rests on is the property, which held on every file both sweeps looked at. So the
 // strip must accept "<?" and the refusal below costs nothing that exists.
 const unscannableOpen = "<!"
 

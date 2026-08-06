@@ -21,8 +21,13 @@ import (
 //	regex  total=203718  returned=500  distinct modules=36   max line=4228
 //	exact  total=204795  returned=500  distinct modules=36   max line=4228
 //
-// Three numbers, one label. 11788 is modules; 203718 and 204795 are lines. The
-// «max line=17» over 500 smart hits is his «максимум 19-20» exactly.
+// Three numbers, one label. 11788 is modules; 203718 and 204795 are lines.
+//
+// A sentence here used to add that the smart max line above is the customer's
+// «максимум 19-20» EXACTLY. It is deleted rather than repaired: the measured value
+// in the table is neither of the numbers in his phrase, so «exactly» claimed an
+// agreement they do not have. tools/search.go states the weaker thing that is true
+// of both, that the count never went past twenty.
 
 // searchModeNouns is what each mode's header must call its own number, and what
 // it must NOT call it. Written out per mode rather than derived, so a change to

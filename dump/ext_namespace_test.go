@@ -18,9 +18,10 @@ import (
 // the floor. A caller filtering by «Справочник», which is the vocabulary
 // tools/search.go documents for that filter, got nothing back for any extension.
 //
-// That is one defect with three copies, because the same eight-line switch is
-// written out three times (parseModuleName, NewPathIndex and PathIndex.AddEntry).
-// They are one function now.
+// That is one defect with three copies, because the same switch was written out in
+// parseModuleName, NewPathIndex and PathIndex.AddEntry. Its length is not stated:
+// the three copies were not all the same length, so no single figure was true of
+// all of them. They are one function now.
 
 // TestAnExtensionKeyFillsTheSameSlotsAsABaseKey is the whole claim: the same
 // logical module answers the same filters whether it lives in the configuration

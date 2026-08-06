@@ -6,11 +6,16 @@ import (
 	"testing"
 )
 
-// The three search modes count three different things and used to hand all three
+// The search modes do not all count the same thing, and every answer used to come
 // back in one unlabelled int. MEASURED on dumps/dump_bsl with one query
-// «Процедура» and limit 500: smart 11788, regex 203718, exact 204795. The first
-// is modules, the other two are lines. This file pins the unit at the source, so
-// the renderer never has to guess which number it was given.
+// «Процедура» and limit 500: smart 11788, regex 203718, exact 204795. Smart counts
+// modules, regex and exact count lines, which is why SearchUnit has exactly those
+// two values and no third. This file pins the unit at the source, so the renderer
+// never has to guess which number it was given.
+//
+// The opening sentence used to publish a total for how many different things the
+// modes count, and that total agreed neither with dump/index.go:SearchUnit beside
+// it nor with this comment's own next sentence. The stale figure is not restated.
 
 // writeSearchFixture writes one .bsl under root and returns root.
 func writeSearchFixture(t *testing.T, root, rel, body string) {

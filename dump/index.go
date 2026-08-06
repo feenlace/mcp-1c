@@ -312,11 +312,17 @@ const configModulePrefix = "Конфигурация"
 const configModuleSuffix = "Модуль"
 
 // configModuleNames maps the file names found directly under configModuleDirName
-// to the Russian names of the configuration modules they hold. These four are the
-// .bsl files that directory holds; it is NOT limited to them, and saying so was
-// wrong: dumps/dump_bsl/Ext holds exactly these four, while dumps/dump_2/Ext holds
-// nineteen entries, the same four plus XML descriptions, Help/, Logo/, Splash/ and
-// two .bin. The map is keyed by name, so the extra entries never reach it.
+// to the Russian names of the configuration modules they hold. They are the .bsl
+// files that directory holds; it is NOT limited to them, and saying that it was
+// limited to them was wrong: a real dump keeps XML descriptions, sub-directories
+// and .bin files beside them. The map is keyed by name, so the extra entries never
+// reach it.
+//
+// HOW MANY ENTRIES THAT DIRECTORY HAS IS DELIBERATELY NOT WRITTEN DOWN. It is a
+// property of one machine's dumps, nothing in this tree resolves it, and the
+// figure that stood here disagreed with the breakdown printed beside it in both
+// directions at once: it counted a macOS .DS_Store as a dump entry, and its own
+// list left a sub-directory out. Neither figure is restated.
 //
 // The Russian names are the property names of the platform type
 // ОбъектМетаданныхКонфигурация, recorded in

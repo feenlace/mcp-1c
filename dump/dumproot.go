@@ -42,7 +42,8 @@ const (
 	// dumpManifestConfigDumpInfo and dumpManifestConfiguration are the two files
 	// DumpConfigToFiles writes at the top of its output. Either one present is
 	// enough: an extension dump carries both (measured at 798 B and 316 B for
-	// ConfigDumpInfo.xml on the two real extension dumps on hand), and a
+	// ConfigDumpInfo.xml on the two extension dumps under ~/Downloads/extdump_vm,
+	// which are named rather than counted because they are not the only ones), and a
 	// configuration's own can be very large (20 591 903 B in dumps/dump_2), which is
 	// exactly why only their PRESENCE is consulted here and never their contents.
 	dumpManifestConfigDumpInfo = "ConfigDumpInfo.xml"
