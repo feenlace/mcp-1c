@@ -1274,9 +1274,13 @@ func buildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*readerReg
 // claimBuiltGeneration takes an ordinary post-adopt claim on an already-published
 // generation, or nothing at all when the caller did not ask for one.
 //
-// Its three callers all reach it holding a generation this process did NOT produce
-// — the content-addressed build no-op, the loser of an adopt race, and the migration
-// that found the generation already there — so it goes through the same
+// Its callers all reach it holding a generation this process did NOT produce: the
+// content-addressed build no-op, the loser of an adopt race, the migration that
+// found the generation already there, and the migration in adoptFlatShards whose
+// rename lost to a concurrent adopter. That last one used to be missing from this
+// list, which also said «three callers» over four call sites; the situations are
+// enumerated and not counted now, so the sentence cannot disagree with itself.
+// They all go through the same
 // claimOrServeUnprotected as the serve fast path rather than through registerReader
 // directly. MEASURED, and it is why: with the bare registerReader here, `--reindex`
 // against a read-only cache refused to serve ("force-rebuilding ... permission

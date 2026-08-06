@@ -312,8 +312,11 @@ const configModulePrefix = "Конфигурация"
 const configModuleSuffix = "Модуль"
 
 // configModuleNames maps the file names found directly under configModuleDirName
-// to the Russian names of the configuration modules they hold. On a real dump
-// that directory contains exactly these four files and nothing else.
+// to the Russian names of the configuration modules they hold. These four are the
+// .bsl files that directory holds; it is NOT limited to them, and saying so was
+// wrong: dumps/dump_bsl/Ext holds exactly these four, while dumps/dump_2/Ext holds
+// nineteen entries, the same four plus XML descriptions, Help/, Logo/, Splash/ and
+// two .bin. The map is keyed by name, so the extra entries never reach it.
 //
 // The Russian names are the property names of the platform type
 // ОбъектМетаданныхКонфигурация, recorded in

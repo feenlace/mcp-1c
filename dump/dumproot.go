@@ -52,13 +52,19 @@ const (
 	// directories for a directory with no manifest to count as a dump root.
 	//
 	// TWO is measured, not chosen for looking reasonable. Counting kind-named
-	// children over twenty directories that are not dumps ($HOME and six paths
-	// under it, the repository checkout and its dump/ package, /usr/local, /usr,
-	// /etc, /, /Users, /Applications, /Library, /System, /opt, /private/tmp,
-	// /usr/share, /usr/lib), exactly one scores at all: $HOME scores 1, because
-	// «Documents» is both an ordinary home directory and a 1C metadata kind. None
-	// scores 2. So 1 fires on the user's home directory and 2 fires on none of
-	// them, and the real roots on the same machine score 41, 23, 8, 2 and 1.
+	// children over the ordinary directories of a developer machine ($HOME and
+	// paths under it, the repository checkout, and the usual system roots), exactly
+	// one scores at all: $HOME scores 1, because «Documents» is both an ordinary
+	// home directory and a 1C metadata kind. None scores 2. So 1 fires on the
+	// user's home directory and 2 fires on none of them.
+	//
+	// The size of that sweep is deliberately NOT written down here. It was a
+	// one-time count over paths that belong to one machine, so nothing in this tree
+	// can resolve it and a written figure could only rot; the previous one had
+	// already stopped agreeing with the breakdown printed beside it. What survives
+	// is the part a test can check, and dumproot_test.go checks it on whatever
+	// machine it runs: $HOME must not inspect as a root, and it must be the
+	// threshold rather than luck that keeps it out.
 	//
 	// The root that scores 1 is a real extension dump and is NOT sacrificed to this
 	// threshold: it carries a manifest, and that is the branch that recognises it.

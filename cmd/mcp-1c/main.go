@@ -152,7 +152,11 @@ func main() {
 	//   2. effectiveTTY=false => redirect stderr to a file to protect strict MCP
 	//      clients (Kilo Code 7.x, Issue #14) from any third-party stderr writes
 	//      (v1.6.1 behaviour)
-	// --debug overrides both and writes everything to server.log at INFO level.
+	//   3. effectiveTTY=false and the log file cannot be opened => redirect to
+	//      os.DevNull anyway, because the pipe must be cleared whether or not a log
+	//      exists. This one was counted in the heading and then not listed, which
+	//      made the mode that runs on a full disk look like it was not there.
+	// --debug overrides all three and writes everything to server.log at INFO level.
 	if !*debug {
 		if effectiveTTY {
 			// Terminal launch: show info-level logs and progress to the user.

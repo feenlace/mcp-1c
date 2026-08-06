@@ -157,10 +157,14 @@ func TestBothNewNoticesCarryNoDashAndNoDiskContent(t *testing.T) {
 	}
 	// THE COUNT THAT SAYS THE SCAN REACHED THE BRANCHES IT NAMES. The wrapped notice
 	// does not vary with the layout: it is the same non-empty sentence on every turn
-	// of the loop, so counting it into `produced` made the total reach six with every
-	// doubt branch silent. A scan «over every branch» that reports six while checking
-	// none of the six is the shape this file exists to refuse, so the doubt branches
-	// are counted apart and all of them must speak.
+	// of the loop, so counting it into `produced` let the total reach len(layouts)
+	// with every doubt branch silent. A scan «over every branch» that reports a full
+	// count while checking none of the branches is the shape this file exists to
+	// refuse, so the doubt branches are counted apart and all of them must speak.
+	//
+	// The number is taken from len(layouts) and not written out, because the two
+	// disagreed: the prose said six while the literal below holds the six doubt
+	// kinds plus a truncation row plus a combined row.
 	if doubts != len(layouts) {
 		t.Fatalf("scanned %d doubt notices, want %d: a branch that produced nothing is a "+
 			"branch this scan did not check", doubts, len(layouts))

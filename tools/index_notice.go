@@ -113,8 +113,8 @@ func indexProtectionNotice(st dump.UnprotectedState) string {
 // everything they have to say in a fixed sentence; this one is worth reading only
 // with its numbers in it. A reader deciding whether to re-point a path needs to
 // know whether a couple of files are missing or most of the dump: measured on the
-// customer-shaped corpus, a root pointed one level too high lost 10839 modules out
-// of 13575. A notice that said "some content" would push that reader back to the
+// customer-shaped corpus wrapped in "Documents/dumps/", a root pointed TWO levels
+// too high lost 10839 modules out of 13575. A notice that said "some content" would push that reader back to the
 // log this whole mechanism exists to replace.
 //
 // WHAT IT DOES NOT SAY. It does not name a cause. The server observed a

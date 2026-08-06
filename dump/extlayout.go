@@ -714,7 +714,7 @@ type ExtensionLayoutSummary struct {
 	Extensions int
 	// Dirs are those child directories, sorted. OPERATOR LOG ONLY; see above.
 	Dirs []string
-	// The five ways a directory can be undecided, counted separately because the
+	// The ways a directory can be undecided, counted separately because the
 	// thing to do about each of them differs.
 	NotRegular    int // a Configuration.xml that is not a regular file
 	Unreadable    int // present, and the read failed
