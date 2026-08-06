@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -285,7 +287,9 @@ func TestStartupMessagesCarryNoDashAndNoDiskContent(t *testing.T) {
 	for _, layout := range []dump.ExtensionLayoutSummary{
 		{}, {Extensions: 1}, {Extensions: 2}, {Extensions: 1, ScanTruncated: true},
 		{NotRegular: 1}, {Unreadable: 2}, {ReadTruncated: 3}, {NameRejected: 4},
-		{NotRegular: 1, Unreadable: 1, ReadTruncated: 1, NameRejected: 1, ScanTruncated: true},
+		{Malformed: 5}, {Unscannable: 6},
+		{NotRegular: 1, Unreadable: 1, ReadTruncated: 1, NameRejected: 1,
+			Malformed: 1, Unscannable: 1, ScanTruncated: true},
 	} {
 		layout.Dirs = hostile
 		for _, insp := range []dump.DumpRootInspection{
@@ -297,22 +301,35 @@ func TestStartupMessagesCarryNoDashAndNoDiskContent(t *testing.T) {
 		msgs = append(msgs, extensionLayoutDoubtMessage(layout))
 	}
 
-	// Positive control FIRST: the samples really do carry what is being looked for,
-	// so a clean scan below is the messages being clean and not the scan being blind.
+	// PREMISE: the set the scan reads is populated. Emptied, every comparison below is
+	// vacuously false and a sentence made entirely of тире passes.
+	if len(dashRunes) < 5 {
+		t.Fatalf("dashRunes holds %d runes; the scan is only as wide as this set",
+			len(dashRunes))
+	}
+	// Positive control FIRST, over the SAME set the scan uses: the samples really do
+	// carry what is being looked for, so a clean scan below is the messages being
+	// clean and not the scan being blind. Two spellings of one set is how a control
+	// keeps passing after the set it guards is emptied.
 	joined := strings.Join(hostile, "")
-	if !strings.ContainsAny(joined, "\u2012\u2013\u2014\u2015\u2212") {
+	if !strings.ContainsAny(joined, string(dashRunes)) {
 		t.Fatal("control failed: the hostile samples carry none of the dash characters")
 	}
 
-	produced := 0
+	produced, scanned := 0, 0
 	for _, m := range msgs {
 		if m == "" {
 			continue
 		}
 		produced++
-		for _, r := range []rune{'\u2012', '\u2013', '\u2014', '\u2015', '\u2212'} {
-			if strings.ContainsRune(m, r) {
-				t.Errorf("customer-facing RU carries U+%04X:\n%s", r, m)
+		// PER CODEPOINT, not per substring, so the answer stays «no codepoint of this
+		// sentence is one of them» when a rune is added to dashRunes.
+		for _, got := range m {
+			scanned++
+			for _, bad := range dashRunes {
+				if got == bad {
+					t.Errorf("customer-facing RU carries U+%04X:\n%s", bad, m)
+				}
 			}
 		}
 		for _, name := range hostile {
@@ -324,7 +341,10 @@ func TestStartupMessagesCarryNoDashAndNoDiskContent(t *testing.T) {
 	if produced == 0 {
 		t.Fatal("no branch produced a sentence, so the scan measured nothing")
 	}
-	t.Logf("scanned %d non-empty sentences across every branch", produced)
+	if scanned == 0 {
+		t.Fatal("the per-codepoint scan visited no codepoint at all")
+	}
+	t.Logf("scanned %d codepoints across %d non-empty sentences", scanned, produced)
 }
 
 // TestTheDoubtMessageCountsAndNamesNothing pins the third answer reaching the
@@ -342,6 +362,8 @@ func TestTheDoubtMessageCountsAndNamesNothing(t *testing.T) {
 		{dump.ExtensionLayoutSummary{Unreadable: 1}, "Не удалось прочитать"},
 		{dump.ExtensionLayoutSummary{ReadTruncated: 5}, "окно чтения"},
 		{dump.ExtensionLayoutSummary{NameRejected: 1}, "нельзя использовать как часть ключа"},
+		{dump.ExtensionLayoutSummary{Malformed: 1}, "не закрыт комментарий, блок CDATA или инструкция обработки"},
+		{dump.ExtensionLayoutSummary{Unscannable: 1}, "объявление DOCTYPE или другое объявление разметки"},
 		{dump.ExtensionLayoutSummary{ScanTruncated: true}, "не все подкаталоги"},
 	} {
 		got := extensionLayoutDoubtMessage(tc.layout)
@@ -487,4 +509,92 @@ func TestASymlinkedDumpPathIsReportedRatherThanApproved(t *testing.T) {
 			}
 		}
 	}
+}
+
+// dashRunes is the ONE set both the scan and its control read, for the reason the
+// tools package gives at its own copy: two spellings of one intention is how a
+// control keeps passing after the set it guards is emptied.
+var dashRunes = []rune{'‒', '–', '—', '―', '−'}
+
+// doubtCounterFields names every counter of ExtensionLayoutSummary that Undecided()
+// adds up, discovered BY VALUE FLOW: set one int field and ask Undecided(). A
+// counter added to the type is discovered on the next run, which is the property the
+// hand-written table below cannot have.
+func doubtCounterFields(t *testing.T, n int) []string {
+	t.Helper()
+	typ := reflect.TypeOf(dump.ExtensionLayoutSummary{})
+	var names []string
+	for i := range typ.NumField() {
+		if typ.Field(i).Type.Kind() != reflect.Int {
+			continue
+		}
+		v := reflect.New(typ).Elem()
+		v.Field(i).SetInt(int64(n))
+		if v.Interface().(dump.ExtensionLayoutSummary).Undecided() == n {
+			names = append(names, typ.Field(i).Name)
+		}
+	}
+	return names
+}
+
+// summaryWith builds a summary with one named int counter set to n.
+func summaryWith(t *testing.T, field string, n int) dump.ExtensionLayoutSummary {
+	t.Helper()
+	v := reflect.New(reflect.TypeOf(dump.ExtensionLayoutSummary{})).Elem()
+	f := v.FieldByName(field)
+	if !f.IsValid() {
+		t.Fatalf("ExtensionLayoutSummary has no field %q", field)
+	}
+	f.SetInt(int64(n))
+	return v.Interface().(dump.ExtensionLayoutSummary)
+}
+
+// TestTheDoubtMessageHasASentencePerCounter is the operator-log half of the guard
+// the tools package carries for the MCP half.
+//
+// The two channels drifted apart exactly once and it was not noticed: Malformed had
+// a counter, a reason and a branch in extensionLayoutDoubtMessage, and the table in
+// TestTheDoubtMessageCountsAndNamesNothing listed the other four. Deleting the
+// branch left ./cmd/mcp-1c green. So the branches are not listed here: every counter
+// Undecided() adds up must produce a non-empty sentence CARRYING ITS COUNT, and the
+// sentences must be pairwise distinct.
+func TestTheDoubtMessageHasASentencePerCounter(t *testing.T) {
+	const n = 7
+	fields := doubtCounterFields(t, n)
+
+	// PREMISE: the discovery found the counters. A loop over nothing is green for
+	// every possible implementation.
+	if len(fields) < 6 {
+		t.Fatalf("discovered %v as the counters Undecided() adds up; there are six such "+
+			"counters (the seventh reason, doubtScanTruncated, sets a bool and is not "+
+			"one), so this walk is not seeing the type", fields)
+	}
+	// PREMISE: the discriminator discriminates. Extensions is an int and is not a
+	// doubt, so it must not be picked up.
+	if slices.Contains(fields, "Extensions") {
+		t.Fatalf("discovered %v: Extensions is not a doubt and Undecided() must not "+
+			"add it up", fields)
+	}
+
+	seen := map[string]string{}
+	for _, f := range fields {
+		got := extensionLayoutDoubtMessage(summaryWith(t, f, n))
+		if got == "" {
+			t.Errorf("%s = %d produced no sentence at all, so this doubt never reaches "+
+				"the operator", f, n)
+			continue
+		}
+		if !strings.Contains(got, strconv.Itoa(n)) {
+			t.Errorf("%s = %d produced a sentence that does not carry the count, so no "+
+				"clause in it read that counter:\n%s", f, n, got)
+			continue
+		}
+		if other, dup := seen[got]; dup {
+			t.Errorf("%s and %s produce the SAME sentence, so one of them has no "+
+				"sentence of its own:\n%s", f, other, got)
+			continue
+		}
+		seen[got] = f
+	}
+	t.Logf("counters Undecided() adds up: %v", fields)
 }

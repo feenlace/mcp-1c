@@ -1,11 +1,24 @@
 package tools
 
 import (
+	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/feenlace/mcp-1c/dump"
 )
+
+// dashRunes is the ONE set both the scan and its control read.
+//
+// They used to be two spellings of the same intention, a rune slice in the scan and
+// a string literal in the control, and two spellings is how a control keeps passing
+// after the thing it guards is emptied: delete every rune from the scan and the
+// control still found its dash in its own literal. Sharing the set makes the
+// control's own premise depend on the set being populated, and doubtCounterFields'
+// neighbours below assert that it is.
+var dashRunes = []rune{'‒', '–', '—', '―', '−'}
 
 // The two notices added beside the collapse one, and the case that had no channel
 // at all.
@@ -64,6 +77,8 @@ func TestDoubtNotice_TheSentenceMatchesTheState(t *testing.T) {
 		{dump.ExtensionLayoutSummary{Unreadable: 1}, "Не удалось прочитать Configuration.xml, каталогов: 1."},
 		{dump.ExtensionLayoutSummary{ReadTruncated: 5}, "не поместился в окно чтения, каталогов: 5."},
 		{dump.ExtensionLayoutSummary{NameRejected: 3}, "как часть ключа, каталогов: 3."},
+		{dump.ExtensionLayoutSummary{Malformed: 4}, "не закрыт комментарий, блок CDATA или инструкция обработки, каталогов: 4."},
+		{dump.ExtensionLayoutSummary{Unscannable: 6}, "объявление DOCTYPE или другое объявление разметки, границы которого сервер не определяет, каталогов: 6."},
 		{dump.ExtensionLayoutSummary{ScanTruncated: true}, "не все подкаталоги"},
 	} {
 		got := indexLayoutDoubtNotice(tc.layout)
@@ -79,18 +94,26 @@ func TestDoubtNotice_TheSentenceMatchesTheState(t *testing.T) {
 // TestBothNewNoticesCarryNoDashAndNoDiskContent. Neither of these two ever echoes
 // anything read off disk, and this is the scan that says so over every branch.
 func TestBothNewNoticesCarryNoDashAndNoDiskContent(t *testing.T) {
+	// PREMISE: the set the scan reads is populated. Emptied, every ContainsRune below
+	// is vacuously false and a notice made entirely of тире passes.
+	if len(dashRunes) < 5 {
+		t.Fatalf("dashRunes holds %d runes; the scan is only as wide as this set",
+			len(dashRunes))
+	}
 	hostile := []string{"Доработки — копия", "ext–2", "A−B"}
-	// POSITIVE CONTROL FIRST: the samples carry what is looked for.
-	if !strings.ContainsAny(strings.Join(hostile, ""), "—–‒―−") {
+	// POSITIVE CONTROL FIRST, over the SAME set the scan uses: the samples carry what
+	// is looked for, and the looking is done by the code under test's own rule.
+	if !strings.ContainsAny(strings.Join(hostile, ""), string(dashRunes)) {
 		t.Fatal("control failed: the hostile names carry no dash character")
 	}
 
 	layouts := []dump.ExtensionLayoutSummary{
 		{NotRegular: 1}, {Unreadable: 1}, {ReadTruncated: 1}, {NameRejected: 1},
-		{ScanTruncated: true},
-		{NotRegular: 1, Unreadable: 2, ReadTruncated: 3, NameRejected: 4, ScanTruncated: true},
+		{Malformed: 1}, {Unscannable: 1}, {ScanTruncated: true},
+		{NotRegular: 1, Unreadable: 2, ReadTruncated: 3, NameRejected: 4,
+			Malformed: 5, Unscannable: 6, ScanTruncated: true},
 	}
-	produced, doubts := 0, 0
+	produced, doubts, scanned := 0, 0, 0
 	for _, layout := range layouts {
 		layout.Dirs = hostile
 		layout.SelfNamed = true
@@ -108,9 +131,15 @@ func TestBothNewNoticesCarryNoDashAndNoDiskContent(t *testing.T) {
 				continue
 			}
 			produced++
-			for _, r := range []rune{'—', '–', '‒', '―', '−'} {
-				if strings.ContainsRune(m, r) {
-					t.Errorf("customer-facing RU carries U+%04X:\n%s", r, m)
+			// PER CODEPOINT, not per substring: a dash is a rune and the answer has to
+			// be «no codepoint of this sentence is one of them», which is also the only
+			// form that stays true if a rune is added to dashRunes.
+			for _, got := range m {
+				scanned++
+				for _, bad := range dashRunes {
+					if got == bad {
+						t.Errorf("customer-facing RU carries U+%04X:\n%s", bad, m)
+					}
 				}
 			}
 			for _, name := range hostile {
@@ -139,7 +168,107 @@ func TestBothNewNoticesCarryNoDashAndNoDiskContent(t *testing.T) {
 	if produced == 0 {
 		t.Fatal("no branch produced a sentence, so the scan measured nothing")
 	}
-	t.Logf("scanned %d non-empty notices, %d of them doubt branches", produced, doubts)
+	// THE CODEPOINTS THE SCAN ACTUALLY VISITED. «No dash found» over zero codepoints
+	// is the same green as «no dash found» over all of them.
+	if scanned == 0 {
+		t.Fatal("the per-codepoint scan visited no codepoint at all")
+	}
+	t.Logf("scanned %d codepoints across %d non-empty notices, %d of them doubt branches",
+		scanned, produced, doubts)
+}
+
+// doubtCounterFields names every counter of ExtensionLayoutSummary that Undecided()
+// actually adds up, discovered BY VALUE FLOW and not by a list written out here.
+//
+// The discriminator is the value, not the spelling: set one int field to n and ask
+// Undecided(). Extensions is an int too and does not move it, so it is not a doubt
+// counter and is not returned. A counter ADDED to the type is discovered on the next
+// run without anybody remembering to extend a table, which is the property a
+// hand-written list cannot have and the reason Malformed sat uncovered.
+func doubtCounterFields(t *testing.T, n int) []string {
+	t.Helper()
+	typ := reflect.TypeOf(dump.ExtensionLayoutSummary{})
+	var names []string
+	for i := range typ.NumField() {
+		if typ.Field(i).Type.Kind() != reflect.Int {
+			continue
+		}
+		v := reflect.New(typ).Elem()
+		v.Field(i).SetInt(int64(n))
+		if v.Interface().(dump.ExtensionLayoutSummary).Undecided() == n {
+			names = append(names, typ.Field(i).Name)
+		}
+	}
+	return names
+}
+
+// summaryWith builds a summary with one named int counter set to n.
+func summaryWith(t *testing.T, field string, n int) dump.ExtensionLayoutSummary {
+	t.Helper()
+	v := reflect.New(reflect.TypeOf(dump.ExtensionLayoutSummary{})).Elem()
+	f := v.FieldByName(field)
+	if !f.IsValid() {
+		t.Fatalf("ExtensionLayoutSummary has no field %q", field)
+	}
+	f.SetInt(int64(n))
+	return v.Interface().(dump.ExtensionLayoutSummary)
+}
+
+// TestDoubtNotice_EveryCounterUndecidedAddsUpHasItsOwnSentence is the guard the
+// hand-written table above could not be.
+//
+// Malformed had been a counter, a doubt reason and a row in indexLayoutDoubtNotice
+// for a whole branch, and DELETING THAT ROW LEFT ./tools GREEN, because the table in
+// TestDoubtNotice_TheSentenceMatchesTheState listed the other four and nobody added
+// the fifth. A table that has to be extended by hand is a table that documents which
+// rows somebody remembered.
+//
+// So the rows are not listed. Every counter Undecided() adds up must produce a
+// non-empty notice CARRYING ITS COUNT, and the notices must be pairwise DISTINCT:
+// the count is what proves the sentence read the state, and the distinctness is what
+// stops one generic sentence from covering every reason at once. Delete a row and
+// its counter's notice loses the number; write two rows the same and the pair
+// collides.
+func TestDoubtNotice_EveryCounterUndecidedAddsUpHasItsOwnSentence(t *testing.T) {
+	const n = 7
+	fields := doubtCounterFields(t, n)
+
+	// PREMISE: the discovery found the counters. Zero of them means the walk failed,
+	// and a loop over nothing is green for every possible implementation.
+	if len(fields) < 6 {
+		t.Fatalf("discovered %v as the counters Undecided() adds up; there are six such "+
+			"counters (the seventh reason, doubtScanTruncated, sets a bool and is not "+
+			"one), so this walk is not seeing the type", fields)
+	}
+	// PREMISE: the discriminator discriminates. Extensions is an int and must NOT be
+	// picked up, or «every counter has a sentence» would demand one for a count that
+	// is not a doubt at all.
+	if slices.Contains(fields, "Extensions") {
+		t.Fatalf("discovered %v: Extensions is not a doubt and Undecided() must not "+
+			"add it up", fields)
+	}
+
+	seen := map[string]string{}
+	for _, f := range fields {
+		got := indexLayoutDoubtNotice(summaryWith(t, f, n))
+		if got == "" {
+			t.Errorf("%s = %d produced no notice at all: a doubt that both delivery "+
+				"channels stay silent about", f, n)
+			continue
+		}
+		if !strings.Contains(got, strconv.Itoa(n)) {
+			t.Errorf("%s = %d produced a notice that does not carry the count, so no "+
+				"sentence in it read that counter:\n%s", f, n, got)
+			continue
+		}
+		if other, dup := seen[got]; dup {
+			t.Errorf("%s and %s produce the SAME sentence, so one of them has no "+
+				"sentence of its own:\n%s", f, other, got)
+			continue
+		}
+		seen[got] = f
+	}
+	t.Logf("counters Undecided() adds up: %v", fields)
 }
 
 // TestWrappedNotice_ADumpTwoLevelsUpIsReported is the end-to-end case: a real tree,

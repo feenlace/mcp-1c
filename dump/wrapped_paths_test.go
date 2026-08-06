@@ -303,6 +303,16 @@ func TestWrappedPaths_TheWarmParityControlCanStillCountAWrap(t *testing.T) {
 // and the traversal below accepts only *ast.SelectorExpr. Both counts are asserted
 // while the non-test files it parses spell the field out in prose, which is the
 // standing proof rather than an argument.
+//
+// IT FOLLOWS THE FIELD, IT DOES NOT WALK THE FUNCTIONS. The first version collected
+// *ast.FuncDecl out of f.Decls and inspected those, so it asked «is this read inside
+// a function other than the accessor» when the question is «is this read anywhere
+// other than the accessor». A package-level «var _ = someIndex.extLayout» is a
+// GenDecl, it is legal Go, it runs at init before any Once, and it walked straight
+// past a census whose whole job was to catch it. Every declaration is inspected now,
+// and a read that belongs to no function is reported as one at package level.
+// collectExtLayoutReads is the shared collector, and the control below runs it over
+// a source file written to contain exactly that shape.
 func TestExtensionLayoutIsNeverReadAroundItsOnce(t *testing.T) {
 	const field, accessor = "extLayout", "layout"
 
@@ -327,26 +337,9 @@ func TestExtensionLayoutIsNeverReadAroundItsOnce(t *testing.T) {
 
 	var offenders, inAccessor []string
 	for name, f := range pkg.Files {
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			ast.Inspect(fn, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok || sel.Sel == nil || sel.Sel.Name != field {
-					return true
-				}
-				at := fset.Position(sel.Sel.Pos())
-				where := filepath.Base(name) + ":" + itoa(at.Line) + " in " + fn.Name.Name
-				if fn.Name.Name == accessor {
-					inAccessor = append(inAccessor, where)
-				} else {
-					offenders = append(offenders, where)
-				}
-				return true
-			})
-		}
+		o, a := collectExtLayoutReads(fset, filepath.Base(name), f, field, accessor)
+		offenders = append(offenders, o...)
+		inAccessor = append(inAccessor, a...)
 	}
 
 	// PREMISE: the accessor itself is still there and still reads the field. If it
@@ -365,5 +358,85 @@ func TestExtensionLayoutIsNeverReadAroundItsOnce(t *testing.T) {
 			"and a read-only generation open derive no keys, so a read there silently "+
 			"measures against an empty layout instead of the one the index keyed with. "+
 			"Call Index.%s.", field, accessor, offenders, accessor)
+	}
+}
+
+// collectExtLayoutReads returns every read of .field in f, split into the ones
+// inside the accessor and the ones anywhere else.
+//
+// EVERY DECLARATION, not every function. A selector expression can sit in a var, a
+// const or a type declaration as well as in a function body, and the ones outside a
+// function are the dangerous ones here: they run at init, before any Once.
+func collectExtLayoutReads(fset *token.FileSet, file string, f *ast.File,
+	field, accessor string) (offenders, inAccessor []string) {
+	for _, decl := range f.Decls {
+		owner := "(package level)"
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name != nil {
+			owner = fn.Name.Name
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel == nil || sel.Sel.Name != field {
+				return true
+			}
+			where := file + ":" + itoa(fset.Position(sel.Sel.Pos()).Line) + " in " + owner
+			if owner == accessor {
+				inAccessor = append(inAccessor, where)
+			} else {
+				offenders = append(offenders, where)
+			}
+			return true
+		})
+	}
+	return offenders, inAccessor
+}
+
+// TestTheExtLayoutCensusSeesAReadThatBelongsToNoFunction is the control that says
+// the census above is following the FIELD and not merely walking the functions.
+//
+// It is not a restatement of the collector in a second form. The source below is
+// compiled by go/parser exactly as the real package is, it carries one read at
+// package level and one inside an ordinary function, and both have to be reported.
+// Restore the old «only *ast.FuncDecl» traversal and the package-level row
+// disappears while the real census stays green, because no production file happens
+// to contain that shape today. That is precisely how the hole survived: the guard
+// was checking a place rather than a value.
+func TestTheExtLayoutCensusSeesAReadThatBelongsToNoFunction(t *testing.T) {
+	const field, accessor = "extLayout", "layout"
+	const src = `package dump
+
+var packageLevelRead = shared.extLayout
+
+func layout() int { return shared.extLayout }
+
+func somethingElse() int { return shared.extLayout }
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "control.go", src, 0)
+	if err != nil {
+		t.Fatalf("parsing the control source: %v", err)
+	}
+
+	offenders, inAccessor := collectExtLayoutReads(fset, "control.go", f, field, accessor)
+
+	// The accessor's own read is exempted, so the control also proves the exemption
+	// is not exempting everything.
+	if len(inAccessor) != 1 {
+		t.Errorf("inAccessor = %v, want exactly the read inside %s", inAccessor, accessor)
+	}
+	if len(offenders) != 2 {
+		t.Fatalf("offenders = %v, want two: the package-level read and the one in "+
+			"somethingElse", offenders)
+	}
+	var atPackageLevel bool
+	for _, o := range offenders {
+		if strings.HasSuffix(o, "in (package level)") {
+			atPackageLevel = true
+		}
+	}
+	if !atPackageLevel {
+		t.Errorf("offenders = %v: none of them is the package-level read, so the census "+
+			"is still asking which FUNCTION a read is in rather than whether the field "+
+			"is read at all", offenders)
 	}
 }
