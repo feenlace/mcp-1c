@@ -208,7 +208,7 @@ func writeObjectWarnings(b *strings.Builder, obj *onec.ObjectStructure) {
 		return
 	}
 	fmt.Fprintf(b, "> Диагностика: состав подсистемы неполный, предупреждений: %d. Причины: %s\n\n",
-		len(obj.Warnings), strings.Join(obj.Warnings, "; "))
+		len(obj.Warnings), diagnosticCauses(obj.Warnings))
 }
 
 // writeSubsystemTree renders a subsystem tree as an indented ASCII list. Each

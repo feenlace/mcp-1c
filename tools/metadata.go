@@ -194,7 +194,7 @@ func writeMetadataWarnings(b *strings.Builder, warnings []string) {
 		return
 	}
 	fmt.Fprintf(b, "> Диагностика: дерево метаданных неполное, пропущено коллекций: %d. Причины: %s\n\n",
-		len(warnings), strings.Join(warnings, "; "))
+		len(warnings), diagnosticCauses(warnings))
 }
 
 // unknownKeyNotice introduces the keys this server does not recognise.

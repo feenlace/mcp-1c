@@ -269,3 +269,78 @@ func TestSearchResultHeaderIsOneSeam(t *testing.T) {
 		t.Errorf("neither branch contained the query: %q", want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DISCLOSED RESIDUAL: format codepoints and bidi.
+// ---------------------------------------------------------------------------
+//
+// THE FINDING, measured on the real binary. Every FORMAT codepoint (category Cf)
+// passes through containment unchanged, from the caller's query and from a dump
+// directory name alike: U+202E RLO, U+202B RLE, U+2066 LRI, U+061C ALM, U+200D ZWJ
+// and U+00AD SHY were all reflected raw into the heading. An unclosed
+// right-to-left override therefore keeps acting PAST the closing backtick of the
+// span, because a code span is a markdown construct and bidi is a display
+// property, so a dump directory can make a module name DISPLAY as other text:
+//
+//	### `Обычное<U+202E>ЕИНЕЩЕРЗАР.ОбщийМодуль.М.Модуль` (строка 2)
+//
+// THE DECISION IS NOT TO CLOSE IT HERE, in one sentence: a code span contains
+// markdown STRUCTURE and not display order, and the only fix that does not destroy
+// bytes is to inject balanced isolate codepoints into a name the customer owns and
+// that this package's own tests require to come back byte-identical, so the
+// residual is disclosed and pinned rather than closed with the rune-replacing
+// filter that was already ruled out for these keys.
+//
+// WHY IT IS A DIFFERENT THREAT FROM THE ONE THIS FILE FIXES, which is the part
+// worth keeping straight. The forgery this branch removed put FREE MARKDOWN into a
+// channel the MODEL reads as the server's own words: the model's parse was wrong.
+// Bidi does not move a single byte of what the model receives; it misleads a HUMAN
+// reading a rendered heading. Fixing one with the mechanism of the other is how a
+// containment claim ends up wider than the containment.
+//
+// The module-name half is already a deliberate choice elsewhere: U+202E, U+200D,
+// U+00AD and U+2060 sit in containedRunes, whose test asserts they come back
+// UNALTERED. What was NOT recorded anywhere is that the query now carries the same
+// property, and that the consequence above is accepted rather than unnoticed. That
+// is what the test below is for.
+
+// TestFormatCodepointsAreADisclosedResidual pins the residual so a later change to
+// it has to be deliberate: if someone starts filtering Cf, this test fails and the
+// decision gets made again rather than drifting.
+func TestFormatCodepointsAreADisclosedResidual(t *testing.T) {
+	formatRunes := map[string]rune{
+		"right-to-left override": '‮',
+		"right-to-left embed":    '‫',
+		"left-to-right isolate":  '⁦',
+		"arabic letter mark":     '؜',
+		"zero width joiner":      '‍',
+		"soft hyphen":            '­',
+	}
+	for what, r := range formatRunes {
+		query := "Процедура" + string(r) + "ЕЩЁТЕКСТ"
+		heads := headingLines(renderQuery(query))
+
+		// STRUCTURE still holds. This is the half that IS fixed: a format codepoint
+		// cannot end the heading and cannot close the span.
+		if len(heads) != 1 {
+			t.Errorf("%s produced %d heading lines, want 1: a format codepoint escaped "+
+				"the STRUCTURE, which would be a real defect and not this residual",
+				what, len(heads))
+			continue
+		}
+
+		// DISPLAY does not. The codepoint comes back byte-identical, which is the
+		// residual being disclosed, and is also what makes the customer's own name
+		// survive intact.
+		got := codeSpanContent(t, heads[0])
+		if got != query {
+			t.Errorf("%s: the query no longer round-trips.\n want: %q\n  got: %q\n"+
+				"If this is a deliberate new filter over format codepoints, update the "+
+				"disclosure above; do not just update this expectation.", what, query, got)
+		}
+		if !strings.ContainsRune(got, r) {
+			t.Errorf("control failed: %s (U+%04X) is absent from %q, so the round-trip "+
+				"check above compared two strings that never held it", what, r, got)
+		}
+	}
+}

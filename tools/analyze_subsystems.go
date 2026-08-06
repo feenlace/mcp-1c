@@ -287,7 +287,7 @@ func writeForestWarnings(b *strings.Builder, forest onec.SubsystemForest) {
 		return
 	}
 	fmt.Fprintf(b, "> Диагностика: универсум объектов неполный, пропущено коллекций: %d. Причины: %s\n\n",
-		len(forest.Warnings), strings.Join(forest.Warnings, "; "))
+		len(forest.Warnings), diagnosticCauses(forest.Warnings))
 }
 
 // computeOrphans lists objects that belong to no subsystem. The universe is
@@ -375,7 +375,11 @@ func computeContaining(forest onec.SubsystemForest, object, objectType string) s
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Подсистемы, содержащие %s (%d)\n\n", object, total)
+	// object IS THE CALLER'S, reached this H1 through a bare %s, and needs no index
+	// content to get here: the heading is written before anything is matched, so a
+	// name that exists nowhere is still rendered. Same defect and same containment as
+	// the search result header; see tools/search.go:searchResultHeading.
+	fmt.Fprintf(&b, "# Подсистемы, содержащие %s (%d)\n\n", inlineCode(object), total)
 	writeForestWarnings(&b, forest)
 	if len(matched) == 0 {
 		b.WriteString("Объект не найден ни в одной подсистеме.\n")

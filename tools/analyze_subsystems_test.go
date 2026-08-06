@@ -143,7 +143,7 @@ func TestComputeOrphans_WarningsDiagnostics(t *testing.T) {
 func TestComputeContaining_FullName(t *testing.T) {
 	out := computeContaining(sampleForest(), "Справочник.Контрагенты", "")
 	mustContain(t, out,
-		"# Подсистемы, содержащие Справочник.Контрагенты (2)",
+		"# Подсистемы, содержащие `Справочник.Контрагенты` (2)",
 		"## Справочник.Контрагенты",
 		"Продажи",
 		"Розница",
@@ -234,14 +234,14 @@ func TestComputeContaining_ObjectTypeCaseFold(t *testing.T) {
 
 func TestComputeContaining_ZeroMatches(t *testing.T) {
 	out := computeContaining(sampleForest(), "НесуществующийОбъект", "")
-	mustContain(t, out, "# Подсистемы, содержащие НесуществующийОбъект (0)", "не найден")
+	mustContain(t, out, "# Подсистемы, содержащие `НесуществующийОбъект` (0)", "не найден")
 	mustNotContain(t, out, "## ")
 }
 
 func TestComputeContaining_FullNameNotInAnySubsystem(t *testing.T) {
 	// A valid applied object that is not a member of any subsystem => zero.
 	out := computeContaining(sampleForest(), "Справочник.Валюты", "")
-	mustContain(t, out, "# Подсистемы, содержащие Справочник.Валюты (0)", "не найден")
+	mustContain(t, out, "# Подсистемы, содержащие `Справочник.Валюты` (0)", "не найден")
 }
 
 // ---- intersections ----
