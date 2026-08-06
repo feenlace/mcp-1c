@@ -283,9 +283,20 @@ func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, q
 			continue
 		}
 
-		b.WriteString("```bsl\n")
-		b.WriteString(m.Context)
-		b.WriteString("\n```\n\n")
+		// THE BODY IS THE CUSTOMER'S TOO, and it was the one thing in this loop that
+		// was not contained. searchHitHeading, called at the top of this same
+		// iteration, runs the module NAME through inlineCode, whose delimiter is
+		// measured from the payload; the body went between a FIXED three backticks. A .bsl line that is three backticks at the
+		// left margin closes that block, and everything after it in the answer is free
+		// markdown in a channel the model reads as this server's own words. It is not
+		// hypothetical content: of the 13575 modules of dumps/dump_bsl exactly one
+		// carries ```, on two lines inside a 1C multi-line string literal, so the shape
+		// occurs in real sources. That file is harmless TODAY for reasons that belong
+		// to it and not to this renderer: both lines open with eight tabs and a «|»
+		// continuation marker, and a closing fence must hold nothing but backticks.
+		// The corpus has no backticks-only line at all and its longest run is three.
+		b.WriteString(fencedAs(m.Context, "bsl"))
+		b.WriteString("\n\n")
 	}
 
 	if stats.Total > len(matches) {

@@ -941,9 +941,23 @@ func detailWindow(s string) (shown, notice string) {
 // isError content is the channel a model is trained to act on, so a payload that
 // escaped its fence would be free markdown in the caller's context. The length is
 // computed FROM THE PAYLOAD, never fixed at three.
-func fenced(text string) string {
+func fenced(text string) string { return fencedAs(text, "") }
+
+// fencedAs is fenced with an info string on the opening delimiter, for the callers
+// that want the block tagged (```bsl) rather than bare.
+//
+// THE INFO STRING IS OURS AND THE DELIMITER IS THE PAYLOAD'S. info is a compiled-in
+// literal at every call site, so it can carry no backtick of its own; a CommonMark
+// backtick fence forbids one there and a payload-derived info string would be a
+// second way out of the same block. The length still comes from fenceLen, so a
+// module body holding ``` cannot close what wraps it.
+//
+// A PAYLOAD WITH NO BACKTICK PRODUCES BYTE-IDENTICAL OUTPUT to the fixed three this
+// replaced, because fenceLen floors at three. That is what makes this safe to put
+// under search_code: the ordinary answer does not move.
+func fencedAs(text, info string) string {
 	f := strings.Repeat("`", fenceLen(text))
-	return f + "\n" + text + "\n" + f
+	return f + info + "\n" + text + "\n" + f
 }
 
 // fenceLen is the longest run of backticks in text plus one, never below three.
