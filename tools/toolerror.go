@@ -1006,10 +1006,18 @@ func longestBacktickRun(text string) int {
 // two: strings.Replacer compares its old strings in argument order and never
 // overlaps a match.
 //
-// The seven spellings are CR, CRLF, LF, VT, FF, U+0085 NEL, U+2028 and U+2029.
-// The last three are the ones that matter most here, because strings.Split(s,
-// "\n") cannot see them: a guard that counted lines would report a name carrying
-// U+2028 as perfectly contained.
+// The spellings are CRLF, CR, LF, VT, FF, U+0085 NEL, U+2028 and U+2029. They are
+// enumerated and NOT counted here: the sentence used to open with a written count
+// of seven while listing eight of them, because CRLF is a SEQUENCE and every other entry is
+// a single rune, so the two ways of counting this set disagree by one and a written
+// numeral picks the wrong one silently. The count is derived instead, in
+// tools/toolerror_break_set_test.go:TestHeadingBreakReplacerIsExactlyTheBreakSet,
+// which reads these pairs back out of the source and checks them against the rune
+// set the heading tests drive.
+//
+// The last three matter most here, because strings.Split(s, "\n") cannot see them:
+// a guard that counted lines would report a name carrying U+2028 as perfectly
+// contained.
 var headingBreakReplacer = strings.NewReplacer(
 	"\r\n", "\ufffd",
 	"\r", "\ufffd",
@@ -1058,6 +1066,28 @@ func inlineCode(text string) string {
 		pad = " "
 	}
 	return delim + pad + text + pad + delim
+}
+
+// diagnosticCauses renders the reason list of a «> Диагностика:» blockquote so the
+// reasons cannot end the blockquote they are printed inside.
+//
+// A BLOCKQUOTE IS A LINE CONSTRUCT, exactly as a heading is: the `> ` marker binds
+// one line, and the first break in the payload leaves the quote and starts free
+// markdown in an answer a model reads as this server's own words. The reasons are
+// not ours. Two of the three callers join text built around a DUMP DIRECTORY NAME
+// (dump/subsystem_reader.go composes «подсистема <имя>: ...»), and the third joins
+// the warnings array of a 1С response verbatim.
+//
+// SO IT IS THE BREAK REPLACER AND NOT inlineCode. A heading needs a code span
+// because a heading's payload is a DATUM, a name the answer is about. This payload
+// is a list of SENTENCES, and wrapping prose in code marks would present a
+// diagnostic as an identifier. What has to be defeated here is only the line, which
+// is what headingBreakReplacer defeats and all it defeats.
+//
+// ONE SEAM for three call sites in three files, because three copies of a
+// containment rule is how two of them keep the defect the third one lost.
+func diagnosticCauses(reasons []string) string {
+	return headingBreakReplacer.Replace(strings.Join(reasons, "; "))
 }
 
 // paragraphs joins blocks with exactly one blank line between them, so no caller

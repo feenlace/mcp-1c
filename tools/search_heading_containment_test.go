@@ -291,9 +291,13 @@ var containedRunes = map[string]rune{
 	"replacement char itself": '\ufffd',
 }
 
-// breakRunes are the runes no container on a heading line can hold. They are the
-// seven spellings a markdown renderer may honour as a MANDATORY line break, and
-// a heading is a line: a break ends it whatever it is wrapped in.
+// breakRunes are the runes no container on a heading line can hold: the ones a
+// markdown renderer may honour as a MANDATORY line break, and a heading is a line,
+// so a break ends it whatever it is wrapped in.
+//
+// It is the RUNE set. The shipped replacer maps one spelling more, because CRLF is
+// a two-rune sequence; the two are checked against each other rather than each
+// carrying a numeral of its own.
 var breakRunes = map[string]rune{
 	"line feed":           '\n',
 	"carriage return":     '\r',
@@ -321,8 +325,15 @@ var breakRunes = map[string]rune{
 // the rendered name instead: the break is gone, a visible marker stands where it
 // was, and every other rune of the name is byte-identical.
 func TestSearchHeadingNeutralisesOnlyWhatNoContainerCanHold(t *testing.T) {
-	if len(breakRunes) != 7 {
-		t.Fatalf("the break set has %d members; it is the seven line-break spellings", len(breakRunes))
+	// PREMISE, DERIVED rather than written. This used to read `!= 7`, and 7 is one of
+	// the two numbers this set has: it holds seven RUNES and the shipped replacer
+	// maps eight SPELLINGS, because CRLF is a sequence. A written numeral picks one
+	// reading silently, so the premise is taken from the shipped replacer instead and
+	// the two counts are related in
+	// tools/toolerror_break_set_test.go:TestHeadingBreakReplacerIsExactlyTheBreakSet.
+	if n := len(replacerPairs(t)) - 1; len(breakRunes) != n {
+		t.Fatalf("the break set has %d members but the shipped replacer implies %d; one of "+
+			"them was changed without the other", len(breakRunes), n)
 	}
 
 	for what, r := range containedRunes {
