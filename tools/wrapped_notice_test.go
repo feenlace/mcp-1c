@@ -378,3 +378,102 @@ func TestDoubtNotice_AnUndecidableManifestReachesTheAnswer(t *testing.T) {
 		t.Errorf("the rejected name was echoed into the answer:\n%s", text)
 	}
 }
+
+// falseNamespaceClaims are the phrases the wrapped notice must not carry: each
+// asserts, as fact, that the extension namespace was lost. The counter behind the
+// notice does not measure that, and the tree below is one where it is false.
+var falseNamespaceClaims = []string{
+	"пространство имён расширения при этом теряется",
+	"модули расширения попадают туда же",
+	"теряется",
+}
+
+// TestWrappedNotice_SaysOnlyWhatItCounted is FIX 3: a notice that was numerically
+// right and causally wrong.
+//
+// THE TREE IS ORDINARY, not hostile. One --dump holding a recognised extension and
+// a base-configuration dump side by side, «ext» and «main». The two files under main
+// are wrapped, so the notice fires and «2 из 4» is exactly right; the two files
+// under ext keep their namespace and ext.FeenlaceMCPService.* is served IN THE SAME
+// ANSWER. The old clause «пространство имён расширения при этом теряется» was
+// therefore refuted by the very answer it was printed on.
+func TestWrappedNotice_SaysOnlyWhatItCounted(t *testing.T) {
+	root := t.TempDir()
+	body := func(n string) string {
+		return "Процедура " + n + "()\n    Сообщить(\"" + collapseTerm + "\");\nКонецПроцедуры\n"
+	}
+	mkBSL(t, root, "ext/Configuration.xml",
+		"\ufeff<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MetaDataObject><Configuration>"+
+			"<Properties><ObjectBelonging>Adopted</ObjectBelonging>"+
+			"<Name>FeenlaceMCPService</Name></Properties></Configuration></MetaDataObject>")
+	mkBSL(t, root, "ext/CommonModules/Расш1/Ext/Module.bsl", body("РасшПервый"))
+	mkBSL(t, root, "ext/CommonModules/Расш2/Ext/Module.bsl", body("РасшВторой"))
+	mkBSL(t, root, "main/CommonModules/Общий/Ext/Module.bsl", body("Основной"))
+	mkBSL(t, root, "main/Catalogs/Ном/Ext/ObjectModule.bsl", body("Второй"))
+
+	idx := collapseIndex(t, root, false)
+
+	// PREMISE ONE: the notice really does fire on this tree, or there is no sentence
+	// to be wrong about.
+	if wp := idx.WrappedPaths(); wp.Files == 0 {
+		t.Fatalf("premise broken: WrappedPaths = %+v, the notice does not fire here", wp)
+	}
+	// PREMISE TWO: the namespace really is intact, which is what makes the old clause
+	// false rather than merely unproven.
+	kept := 0
+	for _, n := range idx.ModuleNames() {
+		if strings.HasPrefix(n, "ext.FeenlaceMCPService.") {
+			kept++
+		}
+	}
+	if kept == 0 {
+		t.Fatalf("premise broken: no ext.FeenlaceMCPService.* key survived, so the clause "+
+			"under test would have been true here; names = %v", idx.ModuleNames())
+	}
+
+	text := callSearchCollapse(t, idx)
+	if !strings.Contains(text, wrappedMarker) {
+		t.Fatalf("the wrapped notice did not reach the answer:\n%s", text)
+	}
+	// AND THE NAMESPACE IS IN THE SAME ANSWER, measured on the rendered bytes rather
+	// than inferred from the index: that is what refutes the clause.
+	if !strings.Contains(text, "ext.FeenlaceMCPService.") {
+		t.Fatalf("the answer carries no extension key, so this tree cannot show the "+
+			"clause being false:\n%s", text)
+	}
+
+	notice := indexWrappedNotice(idx.WrappedPaths())
+	// POSITIVE CONTROL FIRST: the phrase list actually catches the sentence it was
+	// written against. Without this the loop below passes for an empty list.
+	const oldClause = "Имена таких модулей сервер восстанавливает, но пространство имён " +
+		"расширения при этом теряется: модули расширения попадают туда же, куда модули " +
+		"конфигурации."
+	caught := 0
+	for _, claim := range falseNamespaceClaims {
+		if strings.Contains(oldClause, claim) {
+			caught++
+		}
+	}
+	if caught != len(falseNamespaceClaims) {
+		t.Fatalf("control failed: the phrase list caught %d of its %d phrases in the "+
+			"sentence it was written against, so it is not the check it claims to be",
+			caught, len(falseNamespaceClaims))
+	}
+
+	for _, claim := range falseNamespaceClaims {
+		if strings.Contains(notice, claim) {
+			t.Errorf("the notice asserts %q, which this very answer refutes: %d extension "+
+				"keys are served beside it. The counter measures that anchorIndex moved "+
+				"and nothing else.\n%s", claim, kept, notice)
+		}
+	}
+
+	// AND IT STILL SAYS THE MECHANISM AND THE REMEDY, or «no false claim» would be
+	// satisfied by deleting the explanation altogether.
+	for _, want := range []string{"подкаталогах первого уровня", "Чего это стоило, счётчик не измеряет"} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("the notice no longer carries %q, so the clause was removed rather "+
+				"than corrected:\n%s", want, notice)
+		}
+	}
+}

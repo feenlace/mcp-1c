@@ -189,6 +189,28 @@ func echoableSample(names []string) []string {
 // The proportion is in it because it is what tells a reader which case they have:
 // a handful of odd files, or the whole dump.
 //
+// IT SAYS WHAT WAS COUNTED AND STOPS. The sentence used to go on «пространство имён
+// расширения при этом теряется: модули расширения попадают туда же, куда модули
+// конфигурации», and that clause is a CAUSE the counter never measured. It is false
+// on an ordinary tree: a --dump holding a base-configuration dump beside a
+// recognised extension, «ext» and «main» as siblings, counts the two files under
+// main as wrapped and serves ext.FeenlaceMCPService.ОбщийМодуль.Расш1.Модуль IN THE
+// SAME ANSWER. «2 из 4» was right and the reason printed next to it was not, which
+// is worse than saying nothing: a reader who checks the keys finds the namespace
+// there and concludes the whole notice is noise.
+//
+// The counter measures ONE thing, that anchorIndex moved, and there are several
+// trees that makes true. The namespace survives a wrap under the legacy
+// «Расширения/<Имя>/» layout, because extensionDirName is itself an anchor marker
+// (see dump/index.go:dumpRootMarker) and the path rule applies below the skip. It is
+// lost when a manifest sits deeper than the detection looks. Nothing in the number
+// says which tree this is, so the notice does not guess.
+//
+// What IS true of every one of them is the mechanism, and that is what replaces the
+// clause: detectExtensionLayout reads the manifest of the --dump directory itself
+// and of its immediate children, and of nothing below that, so a manifest deeper
+// than one level is never opened at all.
+//
 // Customer-facing RU: no тире.
 func indexWrappedNotice(st dump.WrappedPathState) string {
 	if st.Files <= 0 {
@@ -196,9 +218,11 @@ func indexWrappedNotice(st dump.WrappedPathState) string {
 	}
 	return fmt.Sprintf("> ВНИМАНИЕ: имена модулей выведены не от корня выгрузки. "+
 		"Файлов, у которых над корнем выгрузки оказались лишние каталоги: %d из %d. "+
-		"Имена таких модулей сервер восстанавливает, но пространство имён расширения "+
-		"при этом теряется: модули расширения попадают туда же, куда модули "+
-		"конфигурации. Укажите в `--dump` сам корень выгрузки и перезапустите сервер. %s\n",
+		"Имена таких модулей сервер вывел от найденного ниже корня выгрузки, а не от "+
+		"каталога, указанного в `--dump`. Чего это стоило, счётчик не измеряет. "+
+		"Манифест расширения сервер читает только в самом каталоге `--dump` и в его "+
+		"подкаталогах первого уровня, поэтому манифест, лежащий глубже, не прочитан "+
+		"вовсе. Укажите в `--dump` сам корень выгрузки и перезапустите сервер. %s\n",
 		st.Files, st.Total, reloadDumpIsNotThePathRemedy)
 }
 
