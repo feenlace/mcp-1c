@@ -163,12 +163,19 @@ const (
 	doubtManifestTruncated
 	doubtNameRejected
 	doubtScanTruncated
-	// doubtManifestMalformed is a COMPLETE manifest head carrying an XML comment or
-	// a CDATA section that never closes. It is not doubtManifestTruncated, which
-	// means the READ WINDOW ended mid-document: here the whole document was read and
-	// the document itself is broken, so the operator's next move is different and the
-	// counter that reports it has to be different too.
+	// doubtManifestMalformed is a COMPLETE manifest head carrying one of
+	// markupNoiseKinds that never closes: an XML comment, a CDATA section or a
+	// processing instruction. It is not doubtManifestTruncated, which means the READ
+	// WINDOW ended mid-document: here the whole document was read and the document
+	// itself is broken, so the operator's next move is different and the counter that
+	// reports it has to be different too.
 	doubtManifestMalformed
+	// doubtManifestUnscannable is a manifest head carrying a markup DECLARATION,
+	// which this byte scan cannot bound. See unscannableOpen for what those are and
+	// why their extent is not a fixed byte sequence. Distinct from Malformed on
+	// purpose: such a document is not broken at all, it is simply outside what a scan
+	// can read, and the two call for different things from an operator.
+	doubtManifestUnscannable
 )
 
 // layoutDoubt is one recorded "I do not know".
@@ -441,13 +448,33 @@ func classifyManifest(head []byte, complete bool) (manifestVerdict, string, layo
 	// «ext.УправлениеТорговлей.Справочник.Ном.МодульОбъекта», a commented-out
 	// <Properties> minted an extension out of a document that declares none, and a
 	// commented block placed BEFORE the real one renamed a genuine extension,
-	// because bytes.Index takes the first hit. CDATA is a fourth way in.
+	// because bytes.Index takes the first hit. CDATA is a fourth way in, a processing
+	// instruction a fifth, and a markup declaration a sixth.
 	head, whole := stripMarkupNoise(head)
 	if !whole {
 		if complete {
 			return manifestUndecided, "", doubtManifestMalformed
 		}
 		return manifestUndecided, "", doubtManifestTruncated
+	}
+
+	// WHAT IS LEFT THAT THIS SCAN CANNOT BOUND. See unscannableOpen: once the kinds
+	// with exact extents are stripped, a remaining "<!" opens a markup declaration,
+	// and none of those ends at a fixed byte sequence. The answer is the third one.
+	//
+	// CHECKED BEFORE THE SEARCH FOR <Properties> AND NOT AFTER, because a declaration
+	// can only sit ahead of the element it would shadow, and answering from a
+	// shadowed hit is the whole harm. A document with no <Properties> at all is
+	// undecided here too rather than "not an extension": a construct this reader
+	// cannot bound is not evidence for either answer.
+	//
+	// It is NOT folded into doubtManifestMalformed. That one means the DOCUMENT is
+	// broken; a DOCTYPE is well-formed XML and it is this READER that cannot bound
+	// it, so the operator's next move differs and the counter reporting it differs
+	// too. Reusing Malformed would have made its own doc comment false, which is the
+	// defect class this file keeps being repaired for.
+	if bytes.Contains(head, []byte(unscannableOpen)) {
+		return manifestUndecided, "", doubtManifestUnscannable
 	}
 
 	i := bytes.Index(head, []byte(openProps))
@@ -545,11 +572,61 @@ func validExtensionName(s string) bool {
 	return true
 }
 
-// stripMarkupNoise replaces every XML comment and CDATA section in b with a single
-// SPACE, so a marker that is character data or a remark cannot be read as element
-// structure. ok is false when a comment or CDATA section was OPENED and never
-// closed: everything after that point is unknown, which is the third answer and not
-// "no marker found".
+// markupNoiseKinds are the node kinds whose CONTENT IS NOT MARKUP and whose extent
+// a byte scan can find EXACTLY, because each is delimited by a fixed pair that
+// cannot nest. That second half is the membership rule, not an observation about
+// the three that happen to be here: a construct whose end is not a fixed byte
+// sequence cannot be stripped by a scan at all, and unscannableOpen is what this
+// file does with those instead.
+//
+// THE LIST WAS WRONG BY ONE AND THE COMMENT DECLARED IT COMPLETE. It said comments
+// and CDATA were «the two node kinds whose CONTENT is not markup». A PROCESSING
+// INSTRUCTION is a third, it is ordinary well-formed XML, and 1C writes one into
+// every manifest on this machine (the XML declaration, which shares the syntax).
+// Measured on the real detector before this, with the four real manifests as the
+// control: a <?...?> inside <Properties> carrying
+// «<ObjectBelonging>Adopted</ObjectBelonging>» minted an extension out of a base
+// configuration, and one placed BEFORE the real <Properties> renamed a genuine
+// extension to «ЛОЖНОЕ» while the layout reported Extensions:1 Undecided:0. Full
+// confidence in a fabricated namespace is the exact harm the three-valued contract
+// at the top of this file exists to prevent, and the false sentence is what let it
+// through.
+var markupNoiseKinds = [...]struct{ open, closing string }{
+	{"<!--", "-->"},
+	{"<![CDATA[", "]]>"},
+	{"<?", "?>"},
+}
+
+// unscannableOpen is what is LEFT of the markup that is not element structure once
+// every kind above has been stripped.
+//
+// In a well-formed XML document a literal "<" may not appear in character data or
+// in an attribute value, so after the strip every remaining "<!" opens a markup
+// DECLARATION: the doctypedecl and, inside its internal subset, ENTITY, ELEMENT,
+// ATTLIST and NOTATION. None of them ends at a fixed byte sequence, because
+// "<!DOCTYPE x [ ... ]>" carries a bracketed subset whose own contents may hold
+// both "]" and ">" inside quoted literals, so this scan cannot bound them and must
+// not pretend to.
+//
+// MEASURED, AND IT IS A REAL WAY IN, NOT A TIDY-UP. Before this,
+// «<!DOCTYPE MetaDataObject [ <!ENTITY e "<Properties>...<Name>ЛОЖНОЕ</Name>..."> ]>»
+// placed ahead of a genuine <Properties> renamed the extension to ЛОЖНОЕ and
+// reported Extensions:1 Undecided:0, exactly as the processing instruction did.
+// A DOCTYPE is legal XML; nothing about it is malformed.
+//
+// MEASURED IN THE OTHER DIRECTION TOO, which is what makes refusing it cheap: of
+// the six real Configuration.xml files on this machine (the four extension dumps,
+// the base configuration of dumps/dump_2 read to the full 256 KiB window, and this
+// repository's own extension source) NOT ONE contains "<!" at all, in any form, and
+// every one contains exactly one "<?", the XML declaration at offset 0 or 3. So the
+// strip must accept "<?" and the refusal below costs nothing that exists.
+const unscannableOpen = "<!"
+
+// stripMarkupNoise replaces every comment, CDATA section and processing instruction
+// in b with a single SPACE, so a marker that is character data, a remark or an
+// instruction to some other tool cannot be read as element structure. ok is false
+// when one of them was OPENED and never closed: everything after that point is
+// unknown, which is the third answer and not "no marker found".
 //
 // A SPACE AND NOT NOTHING, and that is not tidiness. Removing a comment outright
 // JOINS the bytes on either side of it, so
@@ -560,31 +637,34 @@ func validExtensionName(s string) bool {
 //
 // It is still a byte scan, for the reason classifyManifest gives: the input is a
 // bounded head that may end mid-document, which a real XML parser rejects outright.
-// Comments and CDATA are the two node kinds whose CONTENT is not markup, and they
-// are both delimited by fixed byte sequences that cannot nest, so a scan is enough
-// to find their extent exactly.
+//
+// THE LOWEST INDEX WINS, over the whole table rather than by a hand-written
+// comparison between two candidates. A construct that opens inside another one is
+// its content and not a construct: «<!-- <?x?> -->» is one comment, and
+// «<?x <!-- ?>» is one instruction with a stray "<!--" inside it. Picking the
+// earliest opener each turn is what makes that come out right for every pair, and
+// picking it from a table is what stops the next kind added here from needing a
+// third branch nobody re-derives.
 func stripMarkupNoise(b []byte) ([]byte, bool) {
 	var out bytes.Buffer
 	out.Grow(len(b))
 	for {
-		ci := bytes.Index(b, []byte("<!--"))
-		di := bytes.Index(b, []byte("<![CDATA["))
-		var (
-			i             int
-			open, closing string
-		)
-		switch {
-		case ci < 0 && di < 0:
+		at := -1
+		var open, closing string
+		for _, k := range markupNoiseKinds {
+			i := bytes.Index(b, []byte(k.open))
+			if i < 0 || (at >= 0 && i >= at) {
+				continue
+			}
+			at, open, closing = i, k.open, k.closing
+		}
+		if at < 0 {
 			out.Write(b)
 			return out.Bytes(), true
-		case di < 0 || (ci >= 0 && ci < di):
-			i, open, closing = ci, "<!--", "-->"
-		default:
-			i, open, closing = di, "<![CDATA[", "]]>"
 		}
-		out.Write(b[:i])
+		out.Write(b[:at])
 		out.WriteByte(' ')
-		rest := b[i+len(open):]
+		rest := b[at+len(open):]
 		j := bytes.Index(rest, []byte(closing))
 		if j < 0 {
 			return out.Bytes(), false
@@ -640,7 +720,8 @@ type ExtensionLayoutSummary struct {
 	Unreadable    int // present, and the read failed
 	ReadTruncated int // <Properties> did not close inside the read window
 	NameRejected  int // declared a name that cannot be part of a key
-	Malformed     int // an XML comment or CDATA section that never closes
+	Malformed     int // a comment, CDATA section or instruction that never closes
+	Unscannable   int // a markup declaration whose extent this scan cannot bound
 	// ScanTruncated reports that the child scan stopped at maxExtensionScan, so
 	// extensions below it were never looked for.
 	ScanTruncated bool
@@ -648,7 +729,8 @@ type ExtensionLayoutSummary struct {
 
 // Undecided is how many directories the detection could not answer for.
 func (s ExtensionLayoutSummary) Undecided() int {
-	return s.NotRegular + s.Unreadable + s.ReadTruncated + s.NameRejected + s.Malformed
+	return s.NotRegular + s.Unreadable + s.ReadTruncated + s.NameRejected +
+		s.Malformed + s.Unscannable
 }
 
 // Quiet reports that there is nothing at all to say about this layout.
@@ -677,6 +759,8 @@ func (l extensionLayout) summary() ExtensionLayoutSummary {
 			s.NameRejected++
 		case doubtManifestMalformed:
 			s.Malformed++
+		case doubtManifestUnscannable:
+			s.Unscannable++
 		case doubtScanTruncated:
 			s.ScanTruncated = true
 		}

@@ -1145,3 +1145,192 @@ func TestRealFlatExtensionDumpsCarryTheirManifestName(t *testing.T) {
 		}
 	}
 }
+
+// TestAMarkerInAProcessingInstructionIsNotEvidence is the same defect as the
+// comment one, in the node kind the stripper's own doc comment declared did not
+// exist.
+//
+// It said comments and CDATA were «the two node kinds whose CONTENT is not
+// markup». A PROCESSING INSTRUCTION is a third, it is ordinary well-formed XML,
+// and 1C writes one into every manifest measured on this machine (the XML
+// declaration shares the syntax). Every row below was measured against the
+// detector before the fix, and the second is not a false positive in the harmless
+// direction: it RENAMES a genuine extension, because bytes.Index takes the first
+// hit and an instruction can be placed before the real element.
+func TestAMarkerInAProcessingInstructionIsNotEvidence(t *testing.T) {
+	const props = "<ObjectBelonging>Adopted</ObjectBelonging>"
+	wrap := func(inner string) string {
+		return "\ufeff<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+			"<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\n" +
+			"\t<Configuration uuid=\"aaaa\">\n" + inner + "\n\t</Configuration>\n</MetaDataObject>\n"
+	}
+
+	// MINTED OUT OF A BASE CONFIGURATION: the document declares no extension.
+	minting := wrap("\t\t<Properties>\n\t\t\t<?note " + props + " ?>\n" +
+		"\t\t\t<Name>УправлениеТорговлей</Name>\n\t\t</Properties>")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, extManifestClassic), []byte(minting), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); ok {
+		t.Errorf("a marker inside a processing instruction minted the extension %q out of "+
+			"a configuration that declares none", got)
+	}
+	if s := detectExtensionLayout(dir).summary(); !s.Quiet() {
+		t.Errorf("summary = %+v, want silence: the document is an ordinary configuration", s)
+	}
+
+	// AND IT MUST NOT RENAME A GENUINE ONE. The document below declares exactly one
+	// extension and the served answer has to be its name, not the instruction's.
+	shadow := wrap("\t\t<?ins <Properties>" + props + "<Name>ЛОЖНОЕ</Name></Properties> ?>\n" +
+		"\t\t<Properties>\n\t\t\t" + props + "\n\t\t\t<Name>Доработки</Name>\n\t\t</Properties>")
+	dir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, extManifestClassic), []byte(shadow), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(dir); !ok || got != "Доработки" {
+		t.Errorf("extensionNameOf = (%q, %v), want (\"Доработки\", true): a name taken from a "+
+			"processing instruction was served for a real extension", got, ok)
+	}
+	if s := detectExtensionLayout(dir).summary(); !s.SelfNamed || s.Undecided() != 0 {
+		t.Errorf("summary = %+v, want one recognised extension and no doubt", s)
+	}
+
+	// POSITIVE CONTROLS. «Refuses a marker in an instruction» is satisfied by a
+	// detector that stopped recognising extensions, and by one that stopped reading
+	// documents with a <? in them at all. Every real manifest on this machine carries
+	// the XML declaration, so both controls below have to work.
+	for what, body := range map[string]string{
+		"a genuine manifest, XML declaration and all": classicExtensionManifest("Настоящее", true),
+		"a genuine manifest with a harmless instruction": wrap(
+			"\t\t<?mso-application progid=\"Word.Document\"?>\n" +
+				"\t\t<Properties>\n\t\t\t" + props + "\n\t\t\t<Name>СИнструкцией</Name>\n\t\t</Properties>"),
+	} {
+		t.Run(what, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, extManifestClassic), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := extensionNameOf(dir); !ok {
+				t.Errorf("a genuine extension manifest was refused")
+			}
+		})
+	}
+}
+
+// TestAMarkupDeclarationIsUndecidedRatherThanScanned is the FOURTH way in, and the
+// one that is not stripped at all.
+//
+// «<!DOCTYPE MetaDataObject [ <!ENTITY e "<Properties>...<Name>ЛОЖНОЕ</Name>..."> ]>»
+// is well-formed XML. Nothing in it is broken and nothing in it is a comment, so
+// the strip leaves it standing and bytes.Index reads the entity's quoted literal as
+// element structure. Measured before this: the served key became ext.ЛОЖНОЕ.* while
+// the layout reported Extensions:1 Undecided:0, full confidence in a name nobody
+// wrote.
+//
+// IT IS REFUSED RATHER THAN STRIPPED because its extent is not a fixed byte
+// sequence: the bracketed internal subset may hold both "]" and ">" inside quoted
+// literals, so a scan cannot find where it ends, and a strip that guessed would be
+// the invention this file exists to refuse. Refusing costs nothing that exists: not
+// one of the six real Configuration.xml files on this machine contains "<!" at all.
+func TestAMarkupDeclarationIsUndecidedRatherThanScanned(t *testing.T) {
+	const props = "<ObjectBelonging>Adopted</ObjectBelonging>"
+	const real = "<MetaDataObject>\n\t<Configuration>\n\t\t<Properties>\n\t\t\t" + props +
+		"\n\t\t\t<Name>Доработки</Name>\n\t\t</Properties>\n\t</Configuration>\n</MetaDataObject>\n"
+	const doctype = "<!DOCTYPE MetaDataObject [\n<!ENTITY e \"<Properties>" + props +
+		"<Name>ЛОЖНОЕ</Name></Properties>\">\n]>\n"
+
+	// POSITIVE CONTROL FIRST: without the declaration this exact document IS a
+	// genuine extension, so the refusal below is the declaration doing something and
+	// not the fixture being unreadable for some other reason.
+	clean := t.TempDir()
+	if err := os.WriteFile(filepath.Join(clean, extManifestClassic),
+		[]byte("\ufeff<?xml version=\"1.0\"?>\n"+real), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := extensionNameOf(clean); !ok || got != "Доработки" {
+		t.Fatalf("control failed: the same document without the declaration answered "+
+			"(%q, %v), want (\"Доработки\", true)", got, ok)
+	}
+
+	for what, body := range map[string]string{
+		"a declaration shadowing a real extension": "\ufeff<?xml version=\"1.0\"?>\n" + doctype + real,
+		"a declaration and no <Properties> at all": "\ufeff<?xml version=\"1.0\"?>\n" + doctype +
+			"<MetaDataObject><Configuration/></MetaDataObject>\n",
+	} {
+		t.Run(what, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, extManifestClassic), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := extensionNameOf(dir); ok {
+				t.Errorf("a markup declaration produced the extension %q", got)
+			}
+			s := detectExtensionLayout(dir).summary()
+			if s.Unscannable != 1 {
+				t.Errorf("summary = %+v, want Unscannable:1", s)
+			}
+			if s.Malformed != 0 {
+				t.Errorf("summary = %+v: a well-formed document was reported as a broken "+
+					"one, and those are different problems with different remedies", s)
+			}
+			if s.Undecided() != 1 {
+				t.Errorf("Undecided() = %d, want 1: a reason no counter adds up is a doubt "+
+					"both delivery channels stay silent about", s.Undecided())
+			}
+		})
+	}
+}
+
+// TestEveryStrippedKindIsStrippedAndSaysSoWhenItNeverCloses walks the TABLE rather
+// than a list of kinds written out again here.
+//
+// The defect this whole area keeps producing is a list that declares itself
+// complete and is not, so the assertions below are generated from the one list the
+// stripper actually consults. A kind added to markupNoiseKinds without working is
+// red here without anybody remembering to add a row.
+func TestEveryStrippedKindIsStrippedAndSaysSoWhenItNeverCloses(t *testing.T) {
+	const props = "<ObjectBelonging>Adopted</ObjectBelonging>"
+
+	// PREMISE: the table is populated. Emptied, every loop below runs zero times and
+	// a test that checks nothing is indistinguishable from one that passes.
+	if len(markupNoiseKinds) < 3 {
+		t.Fatalf("markupNoiseKinds holds %d kinds; the comment, CDATA and instruction "+
+			"kinds are all measured vectors and none may leave without its own reason",
+			len(markupNoiseKinds))
+	}
+
+	for _, k := range markupNoiseKinds {
+		t.Run(k.open, func(t *testing.T) {
+			if k.open == "" || k.closing == "" {
+				t.Fatalf("kind %q/%q is not a delimited pair", k.open, k.closing)
+			}
+			naked := "\ufeff<MetaDataObject><Configuration><Properties>" + props +
+				"<Name>Настоящее</Name></Properties></Configuration></MetaDataObject>"
+			hidden := "\ufeff<MetaDataObject><Configuration><Properties>" +
+				k.open + " " + props + " " + k.closing +
+				"<Name>Настоящее</Name></Properties></Configuration></MetaDataObject>"
+
+			// POSITIVE CONTROL: the marker really is evidence when it is NOT inside this
+			// kind, so «not an extension» below is the strip working rather than the
+			// fixture being inert.
+			if v, name, _ := classifyManifest([]byte(naked), true); v != manifestExtension || name != "Настоящее" {
+				t.Fatalf("control failed: the naked marker answered (%v, %q), want an "+
+					"extension named Настоящее", v, name)
+			}
+			if v, _, _ := classifyManifest([]byte(hidden), true); v == manifestExtension {
+				t.Errorf("a marker inside %s...%s was read as element structure", k.open, k.closing)
+			}
+
+			// OPENED AND NEVER CLOSED is the third answer and says which kind of trouble
+			// it is: the document was read whole and the document itself is broken.
+			unterminated := "\ufeff<MetaDataObject><Configuration><Properties>" +
+				k.open + " " + props + "<Name>Призрак</Name></Properties></Configuration></MetaDataObject>"
+			v, _, reason := classifyManifest([]byte(unterminated), true)
+			if v != manifestUndecided || reason != doubtManifestMalformed {
+				t.Errorf("an unterminated %s answered (%v, reason %d), want undecided with "+
+					"doubtManifestMalformed", k.open, v, reason)
+			}
+		})
+	}
+}

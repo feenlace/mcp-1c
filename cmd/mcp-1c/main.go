@@ -696,8 +696,12 @@ func extensionLayoutDoubtMessage(layout dump.ExtensionLayoutSummary) string {
 			strconv.Itoa(n) + "."
 	}
 	if n := layout.Malformed; n > 0 {
-		msg += " В Configuration.xml не закрыт комментарий или блок CDATA, каталогов: " +
-			strconv.Itoa(n) + "."
+		msg += " В Configuration.xml не закрыт комментарий, блок CDATA или инструкция " +
+			"обработки, каталогов: " + strconv.Itoa(n) + "."
+	}
+	if n := layout.Unscannable; n > 0 {
+		msg += " В Configuration.xml есть объявление DOCTYPE или другое объявление " +
+			"разметки, границы которого сервер не определяет, каталогов: " + strconv.Itoa(n) + "."
 	}
 	if layout.ScanTruncated {
 		msg += " Просмотрены не все подкаталоги, поэтому расширения могли остаться незамеченными."
