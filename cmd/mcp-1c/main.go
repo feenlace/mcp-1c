@@ -579,7 +579,9 @@ func dumpPathFault(dumpDir string) error {
 // harm and prescribes a loss is worse than no message, so this one says which of
 // the children the server recognised and what it will do with them, and warns
 // about a shared keyspace only when the children are NOT extensions and really do
-// share one.
+// share one, which takes AT LEAST TWO of them. One root below the path shared a
+// keyspace with nothing and was told it overwrote itself; that branch is now its
+// own and is documented at the case that carries it.
 //
 // IT NAMES NOTHING. Directory names are read off disk and a real customer tree
 // contains «Доработки — копия», so a name spliced into this sentence puts a тире in
@@ -638,6 +640,28 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 	}
 
 	switch {
+	case len(insp.NestedRoots) == 1:
+		// ONE ROOT BELOW THE PATH, AND THERE IS NOTHING FOR ITS MODULES TO OVERWRITE.
+		// This case used to fall to the default branch and assert that «их модули
+		// попадают в одно пространство ключей и затирают друг друга», which needs a
+		// second root to be true of anything. Measured on such a tree, in the test
+		// beside this one: the anchor scan moves the anchor onto the kind directory
+		// inside the root, the keys come out as they would from the root itself, and
+		// the collapse the tool-output notice carries is 0 files over every module
+		// indexed. The notice on the other channel is careful for exactly that
+		// reason, because it prints a number it measured; this one printed a claim.
+		//
+		// So this branch reports the PATH, which is what was observed, and says
+		// nothing about loss in either direction: an inspection that read one ReadDir
+		// has not measured what the index will do, and «ничего не потеряется» would
+		// be the same kind of sentence as the one being removed, only reassuring.
+		if layout.Extensions == 1 {
+			msg += "Он опознан как выгрузка расширения, и сервер проиндексирует его под " +
+				"собственным именем, так что содержимое не потеряется. Указывать его в " +
+				"--dump нужно только если вам нужен именно он."
+		} else {
+			msg += "Он не опознан как выгрузка расширения. Укажите в --dump сам этот корень."
+		}
 	case layout.Extensions >= len(insp.NestedRoots):
 		// Every root below the path is a recognised extension. Their modules get
 		// their own namespace, so nothing collides and nothing is lost; saying so is

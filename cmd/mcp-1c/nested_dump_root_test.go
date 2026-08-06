@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/feenlace/mcp-1c/dump"
 )
@@ -597,4 +598,134 @@ func TestTheDoubtMessageHasASentencePerCounter(t *testing.T) {
 		seen[got] = f
 	}
 	t.Logf("counters Undecided() adds up: %v", fields)
+}
+
+// buildRoots writes a tree of dump roots under one parent and returns the parent.
+// Each root gets the SAME three object paths, so two roots side by side really do
+// derive the same keys and a collapse is not hypothetical.
+func buildRoots(t *testing.T, names ...string) string {
+	t.Helper()
+	parent := t.TempDir()
+	for _, root := range names {
+		for _, rel := range []string{
+			"Catalogs/Номенклатура/Ext/ObjectModule.bsl",
+			"Documents/Заказ/Ext/ObjectModule.bsl",
+			"CommonModules/ОбщегоНазначения/Ext/Module.bsl",
+		} {
+			p := filepath.Join(parent, root, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("Процедура Тест()\nКонецПроцедуры\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(parent, root, "ConfigDumpInfo.xml"),
+			[]byte("<x/>"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return parent
+}
+
+// measureCollapse indexes dir for real and returns the files lost to an overwrite
+// and the module count, so a sentence about an overwrite can be checked against the
+// overwrite the same tree actually produces.
+func measureCollapse(t *testing.T, dir string) (lost, modules int) {
+	t.Helper()
+	idx, err := dump.NewIndex(dir, t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("NewIndex(%s): %v", dir, err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	deadline := time.Now().Add(60 * time.Second)
+	for !idx.Ready() {
+		if time.Now().After(deadline) {
+			t.Fatal("the index never became ready, so nothing below was measured")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return idx.CollapsedKeys().Files, idx.ModuleCount()
+}
+
+// TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure is the stderr
+// half of the rule the tool-output notice already follows.
+//
+// THE DEFECT. With ONE root below the path and that root not an extension, the
+// switch fell to its default branch and asserted that «их модули попадают в одно
+// пространство ключей и затирают друг друга». There is nothing for a single root's
+// modules to overwrite: the anchor scan moves the anchor onto the kind directory
+// inside it and the keys come out exactly as they would from the root itself. The
+// tool-output notice on the same run is careful and says nothing, because it
+// carries a MEASURED collapse count and that count is zero.
+//
+// So the sentence is checked against the measurement of the SAME tree, in both
+// directions: one root measures zero and must not claim an overwrite, two roots
+// measure a real loss and must still say so. Checking only the first direction
+// would also pass on a message that never mentions overwriting at all.
+func TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure(t *testing.T) {
+	t.Run("one root, nothing to overwrite", func(t *testing.T) {
+		parent := buildRoots(t, "main")
+		insp := dump.InspectDumpRoot(parent)
+		layout := dump.InspectExtensionLayout(parent)
+
+		// PREMISE. Without these the assertions below are about some other tree.
+		if insp.IsRoot {
+			t.Fatalf("the parent inspected as a root itself, so the branch under test is unreachable")
+		}
+		if len(insp.NestedRoots) != 1 {
+			t.Fatalf("NestedRoots = %q, want exactly one", insp.NestedRoots)
+		}
+		if layout.Extensions != 0 {
+			t.Fatalf("layout recognised %d extensions, so this is not the default branch",
+				layout.Extensions)
+		}
+
+		lost, modules := measureCollapse(t, parent)
+		if lost != 0 {
+			t.Fatalf("one root lost %d files to an overwrite, so the sentence would be true "+
+				"and this test is measuring the wrong tree", lost)
+		}
+		if modules != 3 {
+			t.Fatalf("indexed %d modules, want 3: the tree is not what this test describes", modules)
+		}
+
+		msg := nestedDumpRootMessage(insp, layout)
+		if msg == "" {
+			t.Fatal("a path one level above a root said nothing at all")
+		}
+		if strings.Contains(msg, "затира") {
+			t.Errorf("the message asserts an overwrite that the same tree measures as %d "+
+				"files lost over %d modules:\n%s", lost, modules, msg)
+		}
+		// It still has to report the real fault, or the fix would be deletion.
+		if !strings.Contains(msg, "не на корень выгрузки") {
+			t.Errorf("the message stopped naming the fault it exists for:\n%s", msg)
+		}
+	})
+
+	t.Run("two roots really do overwrite", func(t *testing.T) {
+		parent := buildRoots(t, "main", "second")
+		insp := dump.InspectDumpRoot(parent)
+		layout := dump.InspectExtensionLayout(parent)
+		if len(insp.NestedRoots) != 2 {
+			t.Fatalf("NestedRoots = %q, want two", insp.NestedRoots)
+		}
+		if layout.Extensions != 0 {
+			t.Fatalf("layout recognised %d extensions", layout.Extensions)
+		}
+
+		lost, modules := measureCollapse(t, parent)
+		if lost == 0 {
+			t.Fatalf("two roots carrying the same object names lost nothing, so the "+
+				"«затирают друг друга» sentence would be the false one here (modules=%d)",
+				modules)
+		}
+
+		msg := nestedDumpRootMessage(insp, layout)
+		if !strings.Contains(msg, "затирают друг друга") {
+			t.Errorf("the message stays silent about an overwrite the same tree measures "+
+				"as %d files lost:\n%s", lost, msg)
+		}
+	})
 }
