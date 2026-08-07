@@ -499,9 +499,18 @@ var anchoredKeyDigestCorpus = []string{
 // argued where it belongs, at dumpIndexSchemaVersion in generation.go.
 const bslUnwrappedCorpusDigest = "7e0d5d125153d6af3e6601479212439c7034a87e17225df9edef8ea829809fac"
 
+// THE DIGEST DID NOT MOVE ACROSS THE 4 -> 5 BUMP, and that is the finding rather
+// than a formality. v5 adds an indexed "namespace" field to bslDocument; it does
+// not touch bslPathToModuleName, so every one of the corpus paths keys exactly as
+// it did under v4 and the digest below is the unchanged v4 value, re-verified
+// rather than re-typed. The bump is owed to the indexed document shape, which is a
+// separate clause of the BUMP PROTOCOL from the document-ID derivation this digest
+// pins. Re-pinning the version while the digest holds is what distinguishes the
+// two, and a digest that HAD moved here would have meant the namespace work
+// changed keys, which it must not.
 const (
 	bslKeyCorpusDigest              = "0803e4ed74354c08f4606b0fbf4599ac82078508bcf97cb66a7fd63941246351"
-	pinnedSchemaVersionForKeyDigest = 4
+	pinnedSchemaVersionForKeyDigest = 5
 )
 
 func digestOf(paths []string) (string, string) {

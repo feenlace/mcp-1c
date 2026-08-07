@@ -150,12 +150,7 @@ func buildShardOffline(path string, names []string, getContent func(name string)
 
 	for _, name := range names {
 		parts := parseModuleName(name)
-		doc := bslDocument{
-			Name:     parts.name,
-			Category: parts.category,
-			Module:   parts.module,
-			Content:  getContent(name),
-		}
+		doc := bslDocumentFor(parts, getContent(name))
 		if err := builder.Index(name, doc); err != nil {
 			builder.Close()
 			return nil, fmt.Errorf("shard %d builder index %q: %w", shardID, name, err)
@@ -196,12 +191,7 @@ func buildShardInMemory(names []string, getContent func(name string) string, sha
 	batch := blevIdx.NewBatch()
 	for i, name := range names {
 		parts := parseModuleName(name)
-		doc := bslDocument{
-			Name:     parts.name,
-			Category: parts.category,
-			Module:   parts.module,
-			Content:  getContent(name),
-		}
+		doc := bslDocumentFor(parts, getContent(name))
 		batch.Index(name, doc)
 		progress.Add(1)
 

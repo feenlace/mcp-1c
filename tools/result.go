@@ -30,11 +30,12 @@ type queryLimitInput struct {
 
 // searchCodeInput is the input for the search_code tool.
 type searchCodeInput struct {
-	Query    string `json:"query"`
-	Limit    int    `json:"limit"`
-	Category string `json:"category"`
-	Module   string `json:"module"`
-	Mode     string `json:"mode"`
+	Query     string `json:"query"`
+	Limit     int    `json:"limit"`
+	Namespace string `json:"namespace"`
+	Category  string `json:"category"`
+	Module    string `json:"module"`
+	Mode      string `json:"mode"`
 }
 
 // clampLimit normalises a user-supplied limit to [defaultVal, maxVal].

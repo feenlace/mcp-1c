@@ -178,25 +178,25 @@ func TestAnExtensionModuleIsFoundByItsRealCategoryEndToEnd(t *testing.T) {
 	if names := idx.ModuleNames(); !slices.Contains(names, want) {
 		t.Fatalf("the extension module is not in the index: %v", names)
 	}
-	got, err := idx.filterModules("Справочник", "")
+	got, err := idx.filterModules("", "Справочник", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Contains(got, want) {
-		t.Errorf("filterModules(\"Справочник\", \"\") = %v, want it to contain %q: a caller "+
+		t.Errorf("filterModules(\"\", \"Справочник\", \"\") = %v, want it to contain %q: a caller "+
 			"filtering by the documented vocabulary got nothing back for a whole extension", got, want)
 	}
 	// Negative control: the filter still discriminates.
-	if other, err := idx.filterModules("Документ", ""); err != nil {
+	if other, err := idx.filterModules("", "Документ", ""); err != nil {
 		t.Fatal(err)
 	} else if len(other) != 0 {
-		t.Errorf("filterModules(\"Документ\", \"\") = %v, want none", other)
+		t.Errorf("filterModules(\"\", \"Документ\", \"\") = %v, want none", other)
 	}
 	// And the module type still selects across the namespace.
-	if byType, err := idx.filterModules("", "МодульОбъекта"); err != nil {
+	if byType, err := idx.filterModules("", "", "МодульОбъекта"); err != nil {
 		t.Fatal(err)
 	} else if !slices.Contains(byType, want) {
-		t.Errorf("filterModules(\"\", \"МодульОбъекта\") = %v, want it to contain %q", byType, want)
+		t.Errorf("filterModules(\"\", \"\", \"МодульОбъекта\") = %v, want it to contain %q", byType, want)
 	}
 }
 

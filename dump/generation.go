@@ -158,7 +158,21 @@ const (
 	// rather than taking one of its own. Nothing has ever shipped with v4, so there
 	// is no cache anywhere that was built under it and that a second bump could
 	// protect.
-	dumpIndexSchemaVersion = 4
+	//
+	// v5: bslDocument gained an indexed "namespace" field and buildBSLMapping gained
+	// the keyword mapping for it, so a search can select the modules that belong to a
+	// configuration extension.
+	//
+	// It takes its own bump because v4 HAS shipped: it is the schema of the released
+	// v1.14.0. A generation built by that binary holds shards in which no document
+	// carries a namespace at all. Served by this binary without a bump, the gensig
+	// would match, the old generation would be adopted as current, and a namespace
+	// filter would run against shards that cannot answer it — returning an empty
+	// result, which reads as «this configuration has no extensions» rather than as
+	// «this cache predates the field». A silently wrong answer is exactly what this
+	// protocol exists to prevent, and it is worse here than a missing one because the
+	// caller has no way to tell the two apart.
+	dumpIndexSchemaVersion = 5
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and

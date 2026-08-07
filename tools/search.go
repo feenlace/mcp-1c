@@ -15,6 +15,12 @@ const (
 	maxSearchLimit     = 500
 )
 
+// extNamespaceValue is the only value search_code's namespace filter accepts. It
+// is the namespace TOKEN every extension key carries, not the name of any one
+// extension, and it is declared in the schema enum and enforced by the handler
+// from this one constant so the two cannot drift apart.
+const extNamespaceValue = "ext"
+
 // SearchCodeTool returns the MCP tool definition for search_code.
 func SearchCodeTool() *mcp.Tool {
 	return &mcp.Tool{
@@ -24,7 +30,8 @@ func SearchCodeTool() *mcp.Tool {
 		Description: "Полнотекстовый поиск по коду всех модулей конфигурации 1С. " +
 			"Поддерживает три режима: smart (полнотекстовый с ранжированием BM25, " +
 			"по умолчанию), regex (регулярные выражения), exact (точная подстрока). " +
-			"Фильтрация по типу метаданных (category) и типу модуля (module). " +
+			"Фильтрация по типу метаданных (category), типу модуля (module) и " +
+			"пространству имён (namespace: 'ext' отбирает только модули расширений). " +
 			"BSL-синонимы: поиск по английским именам находит русские и наоборот " +
 			"(StrFind -> СтрНайти, Procedure -> Процедура). " +
 			"Работает по локальной выгрузке конфигурации (DumpConfigToFiles). " +
@@ -41,9 +48,14 @@ func SearchCodeTool() *mcp.Tool {
 					"type": "integer",
 					"description": "Максимальное количество результатов (по умолчанию 50, максимум 500)"
 				},
+				"namespace": {
+					"type": "string",
+					"enum": ["ext"],
+					"description": "Фильтр по пространству имён ключа. Единственное значение 'ext' отбирает только модули, принадлежащие расширениям конфигурации. Без этого параметра поиск идёт и по конфигурации, и по расширениям. Не задаёт конкретное расширение по имени. Комбинируется с category и module."
+				},
 				"category": {
 					"type": "string",
-					"description": "Фильтр по типу метаданных: Документ, Справочник, ОбщийМодуль, Обработка, Отчет, РегистрСведений, РегистрНакопления и т.д. Значение чувствительно к регистру (например, 'Документ', не 'документ')."
+					"description": "Фильтр по типу метаданных: Документ, Справочник, ОбщийМодуль, Обработка, Отчет, РегистрСведений, РегистрНакопления и т.д. Значение чувствительно к регистру (например, 'Документ', не 'документ'). Действует и в конфигурации, и в расширениях."
 				},
 				"module": {
 					"type": "string",
@@ -109,12 +121,23 @@ func NewSearchCodeHandler(index *dump.Index) mcp.ToolHandler {
 			return nil, fmt.Errorf("unknown mode: %q (allowed: smart, regex, exact)", input.Mode)
 		}
 
+		// A namespace outside the declared enum is REFUSED rather than filtered
+		// with. The filter selects by exact term, so an unrecognised value selects
+		// nothing and would come back as «Ничего не найдено» — a sentence about the
+		// configuration, answering a question that was never asked. Refusing says
+		// which value was not understood, which is the difference between an empty
+		// configuration and a misspelled filter.
+		if input.Namespace != "" && input.Namespace != extNamespaceValue {
+			return nil, fmt.Errorf("unknown namespace: %q (allowed: %s)", input.Namespace, extNamespaceValue)
+		}
+
 		matches, stats, err := index.SearchWithStats(dump.SearchParams{
-			Query:    input.Query,
-			Category: input.Category,
-			Module:   input.Module,
-			Mode:     mode,
-			Limit:    limit,
+			Query:     input.Query,
+			Namespace: input.Namespace,
+			Category:  input.Category,
+			Module:    input.Module,
+			Mode:      mode,
+			Limit:     limit,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("search: %w", err)

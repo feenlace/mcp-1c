@@ -63,18 +63,20 @@ const (
 	// decision added, one in NewObjectStructureHandlerWithSource and one in
 	// NewAnalyzeSubsystemsHandlerWithSource, plus the two sites the unhonoured
 	// request repair added: the decode check NewMetadataHandler was missing
-	// altogether, and the level check NewEventLogHandler owed its own schema.
-	wantSites = 35
+	// altogether, and the level check NewEventLogHandler owed its own schema,
+	// plus one for the namespace enum search_code declares and now enforces.
+	wantSites = 36
 
 	// wantProtocolSites: 8 decode failures plus the 2 recovered-panic marks. The
 	// eighth decode failure is metadata's, which used to be discarded.
 	wantProtocolSites = 10
 
-	// wantOperationalSites: wantSites - wantProtocolSites. The added one is
-	// get_event_log refusing a level outside its declared enum; it sits on the
+	// wantOperationalSites: wantSites - wantProtocolSites. Two were added for the
+	// same reason: get_event_log refusing a level outside its declared enum and
+	// search_code refusing a namespace outside its declared enum. Both sit on the
 	// operational side for the reason ProtocolError's doc gives, that a VALUE the
 	// caller chose is a mistake the caller can only fix from text it can read.
-	wantOperationalSites = 25
+	wantOperationalSites = 26
 
 	// wantToolHandlerFuncs is every top-level func in the package returning
 	// mcp.ToolHandler, INCLUDING the two wrappers that are not constructors. It is
@@ -108,7 +110,7 @@ var wantPerConstructor = map[string]siteClasses{
 	"NewObjectStructureHandlerWithSource":   {protocol: 2, operational: 3},
 	"NewQueryHandler":                       {protocol: 1, operational: 3},
 	"NewReloadDumpHandler":                  {protocol: 0, operational: 1},
-	"NewSearchCodeHandler":                  {protocol: 1, operational: 3},
+	"NewSearchCodeHandler":                  {protocol: 1, operational: 4},
 	"NewValidateQueryHandler":               {protocol: 1, operational: 2},
 }
 

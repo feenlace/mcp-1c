@@ -265,6 +265,12 @@ func operationalSites() []operationalSite {
 			heading: headingSearch, wants: []string{`unknown mode: "bogus"`},
 		},
 		{
+			name: "search unknown namespace", site: `search.go "unknown namespace"`,
+			build:   func(t *testing.T) mcp.ToolHandler { return NewSearchCodeHandler(placeholderIndex(t)) },
+			args:    `{"query":"x","namespace":"bogus"}`,
+			heading: headingSearch, wants: []string{`unknown namespace: "bogus"`},
+		},
+		{
 			name: "search engine", site: `search.go "search: %w"`,
 			build:   func(t *testing.T) mcp.ToolHandler { return NewSearchCodeHandler(placeholderIndex(t)) },
 			args:    `{"query":"Функция","mode":"regex"}`,

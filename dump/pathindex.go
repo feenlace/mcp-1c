@@ -7,20 +7,22 @@ import (
 // PathEntry represents a single BSL module with its decomposed path components.
 type PathEntry struct {
 	DocID      string // e.g. "Документ.РеализацияТоваров.МодульОбъекта"
+	Namespace  string // "ext" for a module belonging to an extension, else ""
 	Category   string // e.g. "Документ"
 	ObjectName string // e.g. "РеализацияТоваров"
 	ModuleType string // e.g. "МодульОбъекта"
 }
 
 // PathIndex provides fast in-memory lookups over decomposed BSL module paths.
-// It indexes modules by category, object name, and module type for instant filtering
-// without filesystem walks or Bleve queries.
+// It indexes modules by namespace, category, object name, and module type for
+// instant filtering without filesystem walks or Bleve queries.
 type PathIndex struct {
-	entries    []PathEntry
-	byCategory map[string][]int // category -> indices into entries
-	byModule   map[string][]int // moduleType -> indices into entries
-	byObject   map[string][]int // objectName -> indices into entries
-	docIDSet   map[string]int   // docID -> index in entries (for fast membership checks)
+	entries     []PathEntry
+	byNamespace map[string][]int // namespace -> indices into entries
+	byCategory  map[string][]int // category -> indices into entries
+	byModule    map[string][]int // moduleType -> indices into entries
+	byObject    map[string][]int // objectName -> indices into entries
+	docIDSet    map[string]int   // docID -> index in entries (for fast membership checks)
 }
 
 // NewPathIndex builds a PathIndex from a slice of docIDs (human-readable module names).
@@ -28,31 +30,20 @@ type PathIndex struct {
 // for form modules like "Category.Object.Форма.FormName.ModuleType").
 func NewPathIndex(names []string) *PathIndex {
 	pi := &PathIndex{
-		entries:    make([]PathEntry, 0, len(names)),
-		byCategory: make(map[string][]int, 32),
-		byModule:   make(map[string][]int, 16),
-		byObject:   make(map[string][]int, len(names)/3),
-		docIDSet:   make(map[string]int, len(names)),
+		entries:     make([]PathEntry, 0, len(names)),
+		byNamespace: make(map[string][]int, 2),
+		byCategory:  make(map[string][]int, 32),
+		byModule:    make(map[string][]int, 16),
+		byObject:    make(map[string][]int, len(names)/3),
+		docIDSet:    make(map[string]int, len(names)),
 	}
 
 	for _, name := range names {
 		var entry PathEntry
 		entry.DocID = name
-		entry.Category, entry.ObjectName, entry.ModuleType = splitModuleKey(name)
+		entry.Namespace, entry.Category, entry.ObjectName, entry.ModuleType = splitModuleKey(name)
 
-		idx := len(pi.entries)
-		pi.entries = append(pi.entries, entry)
-		pi.docIDSet[name] = idx
-
-		if entry.Category != "" {
-			pi.byCategory[entry.Category] = append(pi.byCategory[entry.Category], idx)
-		}
-		if entry.ModuleType != "" {
-			pi.byModule[entry.ModuleType] = append(pi.byModule[entry.ModuleType], idx)
-		}
-		if entry.ObjectName != "" {
-			pi.byObject[entry.ObjectName] = append(pi.byObject[entry.ObjectName], idx)
-		}
+		pi.addEntryInternal(entry)
 	}
 
 	return pi
@@ -134,14 +125,26 @@ func (pi *PathIndex) Filter(category, objectName, moduleType string) []PathEntry
 	return result
 }
 
-// FilterDocIDs returns just the docIDs matching the given filters.
-// This is more efficient than Filter when only IDs are needed.
+// FilterDocIDs returns just the docIDs matching the given category/module filters,
+// across BOTH namespaces. It is the namespace-agnostic form of FilterDocIDsIn.
 func (pi *PathIndex) FilterDocIDs(category, moduleType string) []string {
+	return pi.FilterDocIDsIn("", category, moduleType)
+}
+
+// FilterDocIDsIn returns just the docIDs matching the given filters.
+// This is more efficient than Filter when only IDs are needed.
+//
+// An empty namespace means BOTH namespaces, not «the base configuration». A
+// module's namespace is a slot it either fills or does not, and there is no way to
+// ask for «only the modules with no namespace» here — that question has never been
+// asked and inventing an answer for it would put a third meaning on the empty
+// string, which already means «no filter» for the other two.
+func (pi *PathIndex) FilterDocIDsIn(namespace, category, moduleType string) []string {
 	if pi == nil || len(pi.entries) == 0 {
 		return nil
 	}
 
-	if category == "" && moduleType == "" {
+	if namespace == "" && category == "" && moduleType == "" {
 		result := make([]string, 0, len(pi.entries))
 		for i := range pi.entries {
 			if pi.entries[i].DocID != "" {
@@ -154,13 +157,29 @@ func (pi *PathIndex) FilterDocIDs(category, moduleType string) []string {
 	var candidates []int
 	initialized := false
 
-	if category != "" {
-		idxs, ok := pi.byCategory[category]
+	if namespace != "" {
+		idxs, ok := pi.byNamespace[namespace]
 		if !ok {
 			return nil
 		}
 		candidates = idxs
 		initialized = true
+	}
+
+	if category != "" {
+		idxs, ok := pi.byCategory[category]
+		if !ok {
+			return nil
+		}
+		if !initialized {
+			candidates = idxs
+			initialized = true
+		} else {
+			candidates = intersect(candidates, idxs)
+			if len(candidates) == 0 {
+				return nil
+			}
+		}
 	}
 
 	if moduleType != "" {
@@ -280,7 +299,7 @@ func (pi *PathIndex) AddEntry(docID string) {
 
 	var entry PathEntry
 	entry.DocID = docID
-	entry.Category, entry.ObjectName, entry.ModuleType = splitModuleKey(docID)
+	entry.Namespace, entry.Category, entry.ObjectName, entry.ModuleType = splitModuleKey(docID)
 
 	pi.addEntryInternal(entry)
 }
@@ -296,13 +315,20 @@ func (pi *PathIndex) AddEntryWithMeta(docID, category, moduleType string) {
 		return
 	}
 
-	// The category and the module type are the caller's; the OBJECT NAME is still
-	// derived, and it is derived by the same splitter as everywhere else. A fourth
-	// private copy of that rule is how the first three came to disagree.
-	_, objectName, _ := splitModuleKey(docID)
+	// The category and the module type are the caller's; the OBJECT NAME and the
+	// NAMESPACE are still derived, and they are derived by the same splitter as
+	// everywhere else. A fourth private copy of that rule is how the first three
+	// came to disagree.
+	//
+	// The namespace is derived rather than taken from the caller on purpose: it is a
+	// property of the KEY, readable from the key alone, and a caller that supplied a
+	// namespace contradicting its own docID would make the same module answer the
+	// namespace filter differently depending on which entry point built it.
+	namespace, _, objectName, _ := splitModuleKey(docID)
 
 	pi.addEntryInternal(PathEntry{
 		DocID:      docID,
+		Namespace:  namespace,
 		Category:   category,
 		ObjectName: objectName,
 		ModuleType: moduleType,
@@ -314,6 +340,9 @@ func (pi *PathIndex) addEntryInternal(entry PathEntry) {
 	pi.entries = append(pi.entries, entry)
 	pi.docIDSet[entry.DocID] = idx
 
+	if entry.Namespace != "" {
+		pi.byNamespace[entry.Namespace] = append(pi.byNamespace[entry.Namespace], idx)
+	}
 	if entry.Category != "" {
 		pi.byCategory[entry.Category] = append(pi.byCategory[entry.Category], idx)
 	}
@@ -344,6 +373,12 @@ func (pi *PathIndex) RemoveEntry(docID string) {
 	pi.entries[idx] = PathEntry{}
 
 	// Remove from index maps.
+	if entry.Namespace != "" {
+		pi.byNamespace[entry.Namespace] = removeInt(pi.byNamespace[entry.Namespace], idx)
+		if len(pi.byNamespace[entry.Namespace]) == 0 {
+			delete(pi.byNamespace, entry.Namespace)
+		}
+	}
 	if entry.Category != "" {
 		pi.byCategory[entry.Category] = removeInt(pi.byCategory[entry.Category], idx)
 		if len(pi.byCategory[entry.Category]) == 0 {

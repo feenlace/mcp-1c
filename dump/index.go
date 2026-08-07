@@ -795,24 +795,79 @@ func SearchUnitFor(mode SearchMode) SearchUnit {
 }
 
 // SearchParams holds all parameters for a search query.
+//
+// Namespace and Category are DIFFERENT questions and both are answerable. A key
+// carries a metadata type ("Справочник") and, separately, whether it belongs to a
+// configuration extension. Filtering by category reaches into both namespaces,
+// filtering by namespace reaches across every category, and setting both
+// intersects them. See splitModuleKey.
 type SearchParams struct {
-	Query    string
-	Category string     // filter by metadata type, empty = all
-	Module   string     // filter by module type, empty = all
-	Mode     SearchMode // default: SearchModeSmart
-	Limit    int        // default: 50, max: 500
+	Query string
+	// Namespace filters by the key's namespace: "ext" selects exactly the modules
+	// that belong to a configuration extension. Empty = both namespaces. It does
+	// NOT name one particular extension; the value is the namespace token.
+	Namespace string
+	Category  string     // filter by metadata type, empty = all
+	Module    string     // filter by module type, empty = all
+	Mode      SearchMode // default: SearchModeSmart
+	Limit     int        // default: 50, max: 500
 }
 
 // bslDocument is the struct indexed by Bleve. Field names must match mapping keys.
 // Implements mapping.Classifier so Bleve routes it to the "module" document mapping.
+//
+// Namespace is its own field rather than a second value of Category, and that is
+// forced by the engine as much as by the vocabulary. A bleve KEYWORD field bound to
+// a Go string emits exactly ONE term: MEASURED against bleve v2.5.7, a document
+// indexed with Category "ОбщийМодуль" answers a TermQuery for "ОбщийМодуль" and
+// does not answer one for "ext", and joining the two into "ОбщийМодуль ext" answers
+// neither of them and only the joined string. Filing both in the category field
+// would therefore mean making Category a []string — a change to the indexed
+// document shape, costing the same schema bump as a new field, in exchange for a
+// category slot that no longer means what search_code documents it to mean
+// («Фильтр по типу метаданных») and that cannot express "common modules that live
+// in extensions" at all.
 type bslDocument struct {
-	Name     string `json:"name"`
-	Category string `json:"category"`
-	Module   string `json:"module"`
-	Content  string `json:"content"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Category  string `json:"category"`
+	Module    string `json:"module"`
+	Content   string `json:"content"`
 }
 
 func (bslDocument) Type() string { return "module" }
+
+// bslDocumentFor builds the indexed document for a key whose slots have already
+// been split.
+//
+// It is the ONE place the mapping from key slots to indexed fields is written.
+// Seven functions wrote this literal out by hand: index.go:buildIndexBuilder,
+// index.go:buildIndexBatch, index.go:IndexDoc, index.go:loadFromManifestAndDiff,
+// index.go:applyIncrementalUpdate, shard.go:buildShardOffline and
+// shard.go:buildShardInMemory. A field added to bslDocument that any one of them
+// forgot would make the same module answer the same filter differently depending
+// on which build path happened to index it. That is the identical failure mode
+// splitModuleKey was consolidated to end, on the write side instead of the read
+// side.
+//
+// The count is SEVEN CALL SITES and the command that resolves it is anchored to
+// the start of a code line, so this comment naming the function cannot inflate its
+// own figure. The unanchored form DID: it counted itself and reported eight.
+//
+//	/usr/bin/grep -rnE "^[[:space:]]*doc := bslDocumentFor\(" --include='*.go' .
+//
+// IndexDocWithMeta is deliberately not among them and builds its own literal: its
+// category and module are the CALLER's rather than derived from the key, so it has
+// no moduleNameParts to pass.
+func bslDocumentFor(parts moduleNameParts, content string) bslDocument {
+	return bslDocument{
+		Name:      parts.name,
+		Namespace: parts.namespace,
+		Category:  parts.category,
+		Module:    parts.module,
+		Content:   content,
+	}
+}
 
 // Index provides full-text search over BSL modules using Bleve.
 type Index struct {
@@ -1675,12 +1730,7 @@ func buildIndexBuilder(indexPath string, names []string, contentByName map[strin
 	for _, name := range names {
 		parts := parseModuleName(name)
 
-		doc := bslDocument{
-			Name:     parts.name,
-			Category: parts.category,
-			Module:   parts.module,
-			Content:  contentByName[name],
-		}
+		doc := bslDocumentFor(parts, contentByName[name])
 
 		if err := builder.Index(name, doc); err != nil {
 			builder.Close()
@@ -1728,12 +1778,7 @@ func buildIndexBatch(indexPath string, names []string, contentByName map[string]
 	for i, name := range names {
 		parts := parseModuleName(name)
 
-		doc := bslDocument{
-			Name:     parts.name,
-			Category: parts.category,
-			Module:   parts.module,
-			Content:  contentByName[name],
-		}
+		doc := bslDocumentFor(parts, contentByName[name])
 
 		batch.Index(name, doc)
 
@@ -1930,9 +1975,10 @@ func (idx *Index) contentForScan(name string) (string, bool) {
 
 // moduleNameParts holds the parsed components of a human-readable module name.
 type moduleNameParts struct {
-	category string // e.g. "Справочник"
-	name     string // e.g. "Номенклатура"
-	module   string // e.g. "МодульОбъекта"
+	namespace string // "ext" for a module belonging to an extension, else ""
+	category  string // e.g. "Справочник"
+	name      string // e.g. "Номенклатура"
+	module    string // e.g. "МодульОбъекта"
 }
 
 // extKeyNamespace is the first segment of every key that belongs to a
@@ -1940,13 +1986,28 @@ type moduleNameParts struct {
 // The deriver has produced that shape since the Расширения layout existed.
 const extKeyNamespace = "ext"
 
-// splitModuleKey is the ONE place a docID is taken apart into the three slots a
+// splitModuleKey is the ONE place a docID is taken apart into the four slots a
 // caller can filter on.
 //
 // WHY IT IS ONE PLACE. This switch used to be written out three times, in
 // parseModuleName, in NewPathIndex and in PathIndex.AddEntry, and three copies
 // drift: the same filter would answer differently depending on which of them
 // built the entry. Everything that splits a key now goes through here.
+//
+// THE NAMESPACE IS RETURNED, NOT ONLY CONSUMED. Deriving the real category of an
+// extension module is what lets a caller filtering by «Справочник» reach an
+// extension at all, and that is the whole reason the namespace is stripped here.
+// But stripping it and reporting nothing in its place made «every module that
+// belongs to an extension» a set no caller could name: it had been addressable
+// only for as long as the literal "ext" was sitting in the CATEGORY slot, where it
+// did not belong and where it displaced the two segments that carry the meaning.
+// The namespace is its own slot in the grammar, so it is its own return value: the
+// category still selects across both namespaces, the namespace selects across
+// every category, and a caller can intersect them.
+//
+// The value is the namespace TOKEN ("ext"), not the extension's name. Selecting
+// one named extension is a different question from selecting the namespace, and
+// only the second one is offered here.
 //
 // THE NAMESPACE IS PART OF THE GRAMMAR, not something to be skipped over blindly.
 // Taken naively, "ext.МоёРасш.Справочник.Ном.МодульОбъекта" put the literal "ext"
@@ -1970,20 +2031,21 @@ const extKeyNamespace = "ext"
 // pins over the whole key corpus. The one exception that test states, a .bsl
 // lying directly in the dump root, is not a shape 1C emits and keeps the
 // behaviour it already had.
-func splitModuleKey(docID string) (category, objectName, moduleType string) {
+func splitModuleKey(docID string) (namespace, category, objectName, moduleType string) {
 	parts := strings.Split(docID, ".")
 	if len(parts) >= 5 && parts[0] == extKeyNamespace {
 		if _, ok := categoryNames[parts[2]]; ok {
+			namespace = extKeyNamespace
 			parts = parts[2:]
 		}
 	}
 	switch {
 	case len(parts) >= 3:
-		return parts[0], parts[1], parts[len(parts)-1]
+		return namespace, parts[0], parts[1], parts[len(parts)-1]
 	case len(parts) == 2:
-		return parts[0], parts[1], ""
+		return namespace, parts[0], parts[1], ""
 	default:
-		return "", docID, ""
+		return namespace, "", docID, ""
 	}
 }
 
@@ -1991,8 +2053,8 @@ func splitModuleKey(docID string) (category, objectName, moduleType string) {
 // For form paths like "Документ.Док.Форма.ФормаДок.МодульФормы", the module type
 // is the last dot-separated segment ("МодульФормы"), not the third segment.
 func parseModuleName(fullName string) moduleNameParts {
-	category, name, module := splitModuleKey(fullName)
-	return moduleNameParts{category: category, name: name, module: module}
+	namespace, category, name, module := splitModuleKey(fullName)
+	return moduleNameParts{namespace: namespace, category: category, name: name, module: module}
 }
 
 // IndexDoc adds or replaces a document in the index at runtime.
@@ -2021,12 +2083,7 @@ func (idx *Index) IndexDoc(id string, content string) error {
 	}
 
 	parts := parseModuleName(id)
-	doc := bslDocument{
-		Name:     parts.name,
-		Category: parts.category,
-		Module:   parts.module,
-		Content:  content,
-	}
+	doc := bslDocumentFor(parts, content)
 
 	si := shardForID(id, len(shards))
 	if err := shards[si].Index(id, doc); err != nil {
@@ -2084,19 +2141,27 @@ func (idx *Index) ensureOverlay() (bleve.Index, error) {
 }
 
 // IndexDocWithMeta adds or replaces a document in the index with explicit metadata.
-// Unlike IndexDoc, it does NOT call parseModuleName — category and module are set directly.
-// The document is routed to a shard by FNV-1a hash of the id.
+// Unlike IndexDoc, the CATEGORY and MODULE are the caller's and are not derived
+// from the id. The document is routed to a shard by FNV-1a hash of the id.
 // Requires Ready() == true.
+//
+// The NAMESPACE is derived from the id even here, exactly as PathIndex.AddEntryWithMeta
+// derives it. It is a property of the key, readable from the key alone, and the
+// bleve document and the path index must agree about it or the namespace filter
+// would select a runtime-ingested extension module in one search mode and not in
+// the other.
 func (idx *Index) IndexDocWithMeta(id, content, category, module string) error {
 	if !idx.ready.Load() {
 		return fmt.Errorf("index not ready: cannot IndexDocWithMeta while building")
 	}
 
+	namespace, _, _, _ := splitModuleKey(id)
 	doc := bslDocument{
-		Name:     id,
-		Category: category,
-		Module:   module,
-		Content:  content,
+		Name:      id,
+		Namespace: namespace,
+		Category:  category,
+		Module:    module,
+		Content:   content,
 	}
 
 	readOnly, shards := idx.writeTarget() // snapshot under mu; see IndexDoc
@@ -2266,9 +2331,15 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 
 	var q query.Query = mq
 
-	// Apply category/module filters as conjunction.
-	if params.Category != "" || params.Module != "" {
+	// Apply namespace/category/module filters as conjunction. Each filter is its
+	// own field, so they intersect rather than compete for one slot.
+	if params.Namespace != "" || params.Category != "" || params.Module != "" {
 		queries := []query.Query{mq}
+		if params.Namespace != "" {
+			tq := bleve.NewTermQuery(params.Namespace)
+			tq.SetField("namespace")
+			queries = append(queries, tq)
+		}
 		if params.Category != "" {
 			tq := bleve.NewTermQuery(params.Category)
 			tq.SetField("category")
@@ -2438,7 +2509,7 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 // skipped candidates would invent one and send the caller re-dumping over an
 // answer that is already complete.
 func (idx *Index) searchLineByLine(params SearchParams, match func(line, q string) bool, q string, preLower bool) ([]Match, SearchStats, error) {
-	candidates, err := idx.filterModules(params.Category, params.Module)
+	candidates, err := idx.filterModules(params.Namespace, params.Category, params.Module)
 	if err != nil {
 		return nil, SearchStats{}, err
 	}
@@ -2558,11 +2629,12 @@ func distinctNames(names []string) []string {
 	return out
 }
 
-// filterModules returns the subset of module names matching category/module filters.
+// filterModules returns the subset of module names matching the namespace,
+// category and module filters.
 // If no filters are set, returns a copy of all names. Uses PathIndex for fast in-memory filtering.
 // The returned slice is always a fresh copy safe for concurrent use.
-func (idx *Index) filterModules(category, moduleType string) ([]string, error) {
-	if category == "" && moduleType == "" {
+func (idx *Index) filterModules(namespace, category, moduleType string) ([]string, error) {
+	if namespace == "" && category == "" && moduleType == "" {
 		idx.mu.RLock()
 		result := slices.Clone(idx.names)
 		idx.mu.RUnlock()
@@ -2576,7 +2648,7 @@ func (idx *Index) filterModules(category, moduleType string) ([]string, error) {
 	// is writing.
 	idx.mu.RLock()
 	if pi := idx.pathIndex; pi != nil {
-		result := pi.FilterDocIDs(category, moduleType)
+		result := pi.FilterDocIDsIn(namespace, category, moduleType)
 		idx.mu.RUnlock()
 		return result, nil
 	}
@@ -2591,6 +2663,9 @@ func (idx *Index) filterModules(category, moduleType string) ([]string, error) {
 	var names []string
 	for _, name := range allNames {
 		parts := parseModuleName(name)
+		if namespace != "" && parts.namespace != namespace {
+			continue
+		}
 		if category != "" && parts.category != category {
 			continue
 		}
@@ -2715,12 +2790,7 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 		content := stripBOM(string(data))
 
 		parts := parseModuleName(docID)
-		doc := bslDocument{
-			Name:     parts.name,
-			Category: parts.category,
-			Module:   parts.module,
-			Content:  content,
-		}
+		doc := bslDocumentFor(parts, content)
 
 		si := shardForID(docID, len(idx.shards))
 		if err := idx.shards[si].Index(docID, doc); err != nil {
@@ -3052,12 +3122,7 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 		content := stripBOM(string(data))
 
 		parts := parseModuleName(docID)
-		doc := bslDocument{
-			Name:     parts.name,
-			Category: parts.category,
-			Module:   parts.module,
-			Content:  content,
-		}
+		doc := bslDocumentFor(parts, content)
 
 		si := shardForID(docID, len(idx.shards))
 		if err := idx.shards[si].Index(docID, doc); err != nil {

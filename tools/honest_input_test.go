@@ -87,6 +87,18 @@ func enumDrivers() []enumDriver {
 				return callTool(t, NewSearchCodeHandler(oneModuleIndex(t)), args)
 			},
 		},
+		{
+			// The control «ext» is answered even though this index holds no
+			// extension at all: selecting nothing is a legitimate answer to a
+			// legitimate filter, and the enum is about which values the tool
+			// UNDERSTANDS, not about which ones the dump happens to contain.
+			tool: "search_code", property: "namespace",
+			outside: "расширение", inside: "ext",
+			call: func(t *testing.T, args string) (string, bool, error) {
+				t.Helper()
+				return callTool(t, NewSearchCodeHandler(oneModuleIndex(t)), args)
+			},
+		},
 	}
 }
 

@@ -152,8 +152,14 @@ func buildSynonymMap() map[string]string {
 }
 
 // buildBSLMapping creates the Bleve index mapping for BSL module documents.
-// Fields: name (keyword), category (keyword), module (keyword), content (full-text with bsl analyzer).
+// Fields: name (keyword), namespace (keyword), category (keyword), module (keyword),
+// content (full-text with bsl analyzer).
 // Default mapping is disabled; only "module" document type is indexed.
+//
+// A field added or removed here changes the LOGICAL index schema, so it must move
+// dumpIndexSchemaVersion with it — otherwise a warm generation built without the
+// field is adopted as current and every filter over that field silently selects
+// nothing. See the BUMP PROTOCOL in generation.go.
 func buildBSLMapping() *mapping.IndexMappingImpl {
 	im := mapping.NewIndexMapping()
 
@@ -173,6 +179,9 @@ func buildBSLMapping() *mapping.IndexMappingImpl {
 	nameField := mapping.NewKeywordFieldMapping()
 	nameField.Store = false
 	nameField.DocValues = false
+	namespaceField := mapping.NewKeywordFieldMapping()
+	namespaceField.Store = false
+	namespaceField.DocValues = false
 	categoryField := mapping.NewKeywordFieldMapping()
 	categoryField.Store = false
 	categoryField.DocValues = false
@@ -191,6 +200,7 @@ func buildBSLMapping() *mapping.IndexMappingImpl {
 	// Document mapping for BSL modules.
 	docMapping := mapping.NewDocumentMapping()
 	docMapping.AddFieldMappingsAt("name", nameField)
+	docMapping.AddFieldMappingsAt("namespace", namespaceField)
 	docMapping.AddFieldMappingsAt("category", categoryField)
 	docMapping.AddFieldMappingsAt("module", moduleField)
 	docMapping.AddFieldMappingsAt("content", contentField)
