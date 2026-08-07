@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/search"
 	"github.com/blevesearch/bleve/v2/search/query"
 )
 
@@ -2354,6 +2355,31 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 	}
 
 	req := bleve.NewSearchRequestOptions(q, params.Limit, 0, false)
+
+	// THE TIE-BREAK IS ASKED FOR, not left to the engine's internal numbering.
+	//
+	// Without a Sort, bleve orders equal scores by internal document number. Those
+	// numbers are assigned in the order documents reach the segment builder, and
+	// bleve's Builder.executeBatchLOCKED ranges index.Batch.IndexOps — a MAP —
+	// directly. Go randomises map iteration, so the numbering is a fresh permutation
+	// on every build, and a corpus with tied scores answered the same question
+	// differently in every process. MEASURED on a 12-module corpus with byte-identical
+	// content, limit 5, comparing the FULL rendered answer byte for byte across 12
+	// separate processes each doing a fresh build: 12 distinct answers out of 12.
+	// The shortfall note hid it, because each answer was internally consistent and
+	// only disagreed with the others.
+	//
+	// SortDocID is the second key because the document ID is the module key, which is
+	// derived from the path and is therefore stable across builds and total over the
+	// corpus: no two documents share one, so the order is fully determined. It costs
+	// no stored field and no extra read — SortDocID.Value returns the DocumentMatch's
+	// own ID, RequiresFields is empty and RequiresScoring is false — so the sort is
+	// paid out of data the collector already holds.
+	req.Sort = search.SortOrder{
+		&search.SortScore{Desc: true},
+		&search.SortDocID{Desc: false},
+	}
+
 	result, err := idx.alias.Search(req)
 	if err != nil {
 		// AN INDEX WITH NOTHING IN IT IS NOT A FAILED SEARCH. bleve refuses to search
