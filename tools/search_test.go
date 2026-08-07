@@ -52,7 +52,7 @@ func TestSearchCodeTool(t *testing.T) {
 	if !ok {
 		t.Fatal("expected properties in schema")
 	}
-	for _, field := range []string{"query", "limit", "category", "module", "mode"} {
+	for _, field := range []string{"query", "limit", "namespace", "category", "module", "mode"} {
 		if _, ok := props[field]; !ok {
 			t.Errorf("missing property %q in schema", field)
 		}
@@ -83,12 +83,10 @@ func TestFormatSearchResult(t *testing.T) {
 		"модулей с совпадениями: 2",
 		"Справочник.Контрагенты.МодульОбъекта",
 		"строка 42",
-		"score: 0.847",
 		"```bsl",
 		"ПередЗаписью",
 		"Документ.РеализацияТоваров.МодульОбъекта",
 		"строка 15",
-		"score: 0.512",
 		"ПолучитьКонтрагента",
 	} {
 		if !strings.Contains(text, want) {
@@ -97,33 +95,42 @@ func TestFormatSearchResult(t *testing.T) {
 	}
 }
 
+// TestFormatSearchResult_ExactMode.
+//
+// THE CONTROL THIS TEST USED TO CARRY IS GONE, and it was removed rather than
+// weakened. It asserted that exact mode prints no «score:» and then proved the
+// assertion non-vacuous by showing the SAME match printing one in smart mode. No
+// mode prints a score any more — the label was removed because it made the row
+// shape depend on which retrieval path filled Match.Score — so the old control
+// asserts something false and could only have been made to pass by deleting it and
+// leaving the first half standing on nothing.
+//
+// What replaces it is a control that still fires: the renderer produced a row, so
+// the silence is the label being absent and not the answer being empty. The
+// stronger statement, that the row is now byte-identical across all three modes,
+// is TestTheRowShapeDoesNotDependOnTheMode in search_row_shape_test.go.
 func TestFormatSearchResult_ExactMode(t *testing.T) {
 	matches := []dump.Match{
 		{
 			Module:  "Модуль.Тест",
 			Line:    1,
 			Context: "Тест",
-			// A SCORE THE RENDERER HAS TO REFUSE BECAUSE OF THE MODE. The gate is
-			// `mode == SearchModeSmart && m.Score > 0`, so with Score left at its zero
-			// value the second conjunct silences the label on its own and the mode half
-			// is never reached: the assertion below then holds on a build whose gate
-			// reads `||`, and the thing it names is not the thing it measures.
+			// A NON-ZERO score, deliberately. With Score left at its zero value a
+			// renderer that still gated on `m.Score > 0` would fall silent for that
+			// reason alone and this test would pass without touching the mode.
 			Score: 0.847,
 		},
 	}
 
 	text := FormatSearchResult(matches, 1, "Тест", dump.SearchModeExact, nil)
 
-	// Exact mode should NOT contain "score:".
-	if strings.Contains(text, "score:") {
-		t.Errorf("exact mode should not display score, got:\n%s", text)
+	if strings.Contains(text, "score") {
+		t.Errorf("exact mode still mentions a score, got:\n%s", text)
 	}
 
-	// CONTROL: the SAME match in smart mode does print it, so the silence above is
-	// the mode deciding and not a formatter that never prints a score at all.
-	if smart := FormatSearchResult(matches, 1, "Тест", dump.SearchModeSmart, nil); !strings.Contains(smart, "score: 0.847") {
-		t.Errorf("smart mode did not print the score, so the exact-mode silence above "+
-			"proves nothing about the mode:\n%s", smart)
+	// CONTROL: a row really was rendered.
+	if !strings.Contains(text, "### ") || !strings.Contains(text, "Модуль.Тест") {
+		t.Fatalf("control failed: no row was rendered, so the absence above measures nothing:\n%s", text)
 	}
 }
 

@@ -319,9 +319,27 @@ func FormatSearchResultWithStats(matches []dump.Match, stats dump.SearchStats, q
 			lineLabel += fmt.Sprintf(", строк с совпадениями в модуле: %d", m.LinesMatched)
 		}
 
-		if mode == dump.SearchModeSmart && m.Score > 0 {
-			lineLabel += fmt.Sprintf(", score: %.3f", m.Score)
-		}
+		// NO BM25 SCORE IS PRINTED, and the reason is the row SHAPE rather than the
+		// number's usefulness.
+		//
+		// It used to be appended under `mode == smart && m.Score > 0`. Score is
+		// filled in by the engine window and by nothing else, so a row that reached
+		// this loop by any other route carried 0 and rendered a different shape from
+		// the row above it: same tool, same answer, same mode, two layouts. A
+		// renderer whose row shape follows the retrieval path publishes an
+		// implementation detail as though it were a fact about the code, and it was
+		// the last thing keeping one question answerable several ways after the
+		// result set and its order had both been made stable.
+		//
+		// MADE UNCONDITIONAL THE OTHER WAY IT WOULD LIE. Printing «score: 0.000» for
+		// a row the engine never scored states a measurement that was not taken, and
+		// makes an unscored row indistinguishable from a genuinely worst-ranked one.
+		// Gating on the whole set's provenance instead would only move the same
+		// conditionality from the row up to the answer.
+		//
+		// What is lost is a raw BM25 value: unnormalised, incomparable between two
+		// queries, and on no scale a reader can act on. The ranking it expressed is
+		// still in the answer, as the ORDER of the rows, which is now deterministic.
 		b.WriteString(searchHitHeading(prefix, displayName, lineLabel))
 
 		if m.Line == 0 {
@@ -424,8 +442,9 @@ func searchResultHeading(query, counts string) string {
 // prose this project wrote, and inside a code context a dash is data. Stripping
 // it would be corruption dressed as compliance. The house rule about тире
 // governs the sentences around the name, and those are still ours: this line's
-// own words are «строка», «строк с совпадениями в модуле» and «score», all of
-// them outside the span.
+// own words are «строка», «строка не определена» and «строк с совпадениями в
+// модуле», all of them outside the span. («score» was a fourth until the label
+// stopped carrying one; see FormatSearchResultWithStats for why it went.)
 //
 // THE PREFIX IS THE CALLER'S DECORATOR (nil displayFn in this module, so it is
 // always empty here; an importer uses it for markers like «[Расш] »). It stays
@@ -435,9 +454,10 @@ func searchResultHeading(query, counts string) string {
 //
 // ONE SEAM, deliberately. This used to be two Fprintf calls with two copies of
 // the format string, differing only in a trailing score, and two copies is how
-// one of them keeps the old behaviour after the other is fixed. The score moved
-// into the label, so the rendered bytes are unchanged and there is a single
-// place a name can enter a heading.
+// one of them keeps the old behaviour after the other is fixed. Folding the score
+// into the label left ONE place a name can enter a heading, and that is why the
+// score could later be dropped by editing a single caller: the seam outlived the
+// thing it was opened for.
 func searchHitHeading(prefix, displayName, label string) string {
 	return fmt.Sprintf("### %s%s (%s)\n",
 		headingBreakReplacer.Replace(prefix), inlineCode(displayName), label)
