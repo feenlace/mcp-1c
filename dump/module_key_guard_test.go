@@ -508,9 +508,18 @@ const bslUnwrappedCorpusDigest = "7e0d5d125153d6af3e6601479212439c7034a87e17225d
 // pins. Re-pinning the version while the digest holds is what distinguishes the
 // two, and a digest that HAD moved here would have meant the namespace work
 // changed keys, which it must not.
+//
+// IT DID NOT MOVE ACROSS 5 -> 6 EITHER, for the same reason and with the same
+// force. v6 changes the RULE that decides which namespace a key is in, from the
+// five-segment/known-category condition to the "ext." prefix, and it changes
+// nothing about how a path becomes a key: bslPathToModuleName is untouched. So the
+// digest below is again the unchanged value, re-verified rather than re-typed, and
+// the bump is owed to the persisted namespace FIELD moving under keys that
+// themselves stand still. Had this digest moved, the namespace change would have
+// been reaching into the key derivation, which is not what it is allowed to do.
 const (
 	bslKeyCorpusDigest              = "0803e4ed74354c08f4606b0fbf4599ac82078508bcf97cb66a7fd63941246351"
-	pinnedSchemaVersionForKeyDigest = 5
+	pinnedSchemaVersionForKeyDigest = 6
 )
 
 func digestOf(paths []string) (string, string) {

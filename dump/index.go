@@ -2085,6 +2085,17 @@ type moduleNameParts struct {
 // The deriver has produced that shape since the Расширения layout existed.
 const extKeyNamespace = "ext"
 
+// extKeyPrefix is the string test for membership of the extension namespace, and
+// it is deliberately the WHOLE test. A consumer downstream of this package already
+// decides «is this an extension» with exactly this prefix, on every module id it
+// handles, and it is the same test that draws the [Расш] marker. Two predicates for
+// one question inside one process is how a listing, a marker and a filter came to
+// disagree about the same module; there is one predicate, and this is it.
+//
+// The trailing dot is load-bearing. Without it the bare token "ext" would be in the
+// namespace here and out of it downstream, which is the divergence in miniature.
+const extKeyPrefix = extKeyNamespace + "."
+
 // splitModuleKey is the ONE place a docID is taken apart into the four slots a
 // caller can filter on.
 //
@@ -2115,26 +2126,49 @@ const extKeyNamespace = "ext"
 // «Справочник», which is the vocabulary tools/search.go documents, got nothing
 // back for any extension in any dump.
 //
-// WHAT DECIDES that a key carries a namespace is NOT the leading "ext". A dump
-// root can hold a directory literally named «ext», an unknown top-level directory
-// becomes the category slot verbatim, and "ext/Ном/Forms/Ф/Ext/Form/Module.bsl"
-// derives the five-segment "ext.Ном.Форма.Ф.МодульФормы" with no extension
-// anywhere in it. The discriminator is the segment AFTER the extension name: it
-// has to be a category this package emits (categoryNames, derived from
-// dumpDirNames). «Форма» is a form infix and is not one, so that key is left
-// alone; «Справочник» is one, so the namespace is real.
+// MEMBERSHIP AND CATEGORY DERIVATION ARE TWO RULES, AND THEY USED TO BE ONE.
 //
-// Five segments is the minimum because two are consumed and three are needed to
-// fill every slot, and no real key falls under it: every path a dump can produce
-// derives at least three segments, which is what TestNoTwoSegmentKeysInCorpus
-// pins over the whole key corpus. The one exception that test states, a .bsl
-// lying directly in the dump root, is not a shape 1C emits and keeps the
-// behaviour it already had.
+// Membership of the namespace is the "ext." prefix, extKeyPrefix, and nothing else.
+// Deriving the REAL category needs more: five segments with a category this package
+// emits (categoryNames, derived from dumpDirNames) sitting after the extension
+// name. The condition below decides the SECOND question only. A key it rejects
+// keeps whatever category the plain split gives it and stays in the namespace.
+//
+// THE TWO WERE WELDED TOGETHER AND THAT COST A WHOLE PRODUCER. Keys reach this
+// package from two of them. The dump deriver mints five segments,
+// "ext.<Расш>.<Категория>.<Объект>.<ТипМодуля>". A live .cfe ingest mints its id
+// from the extension's name and the module's container path inside the .cfe, and
+// the documented container path leaves FOUR — "ext.Расш.MCP_HTTPService.<uuid>".
+// While one condition answered both questions, every such module was outside the
+// namespace: MEASURED, a namespace filter returned three of four extension modules
+// on a fixture holding both producers, in smart, exact and regex alike, while the
+// consumer's own prefix predicate accepted all four. Silently dropping live
+// extension modules from an extensions-only search is not a narrower answer, it is
+// a wrong one, and nothing in the answer said so.
+//
+// THE PRICE, STATED RATHER THAN HIDDEN. A dump root can hold a directory literally
+// named «ext» — the customer whose tree started all of this had one — and
+// "ext/Ном/Forms/Ф/Ext/Form/Module.bsl" derives "ext.Ном.Форма.Ф.МодульФормы" with
+// no extension anywhere in it. That key is now in the namespace. It is the same
+// answer the consumer's predicate has always given for it, on the marker, in the
+// inventory and in the listing, so this makes those surfaces agree rather than
+// making a new mistake; and because the category condition is untouched, «Форма» is
+// still not a category, the split is still not shifted, and a caller filtering by
+// «Справочник» is unaffected either way.
+//
+// Five segments is the minimum for the CATEGORY because two are consumed and three
+// are needed to fill every slot, and no real key falls under it: every path a dump
+// can produce derives at least three segments, which is what
+// TestNoTwoSegmentKeysInCorpus pins over the whole key corpus. The one exception
+// that test states, a .bsl lying directly in the dump root, is not a shape 1C emits
+// and keeps the behaviour it already had.
 func splitModuleKey(docID string) (namespace, category, objectName, moduleType string) {
 	parts := strings.Split(docID, ".")
+	if strings.HasPrefix(docID, extKeyPrefix) {
+		namespace = extKeyNamespace
+	}
 	if len(parts) >= 5 && parts[0] == extKeyNamespace {
 		if _, ok := categoryNames[parts[2]]; ok {
-			namespace = extKeyNamespace
 			parts = parts[2:]
 		}
 	}

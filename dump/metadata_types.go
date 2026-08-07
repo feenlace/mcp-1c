@@ -38,18 +38,26 @@ var objectTypeToDumpDir map[string]string
 // of a key: every Russian display name in dumpDirNames, plus the configuration's
 // own configModulePrefix.
 //
-// It exists because "ext" alone cannot tell a namespaced key from an ordinary one.
-// A dump root may hold a directory literally named «ext» (the customer whose tree
-// started all of this had one), an unknown top-level directory becomes the category
-// slot verbatim, and such a key really can reach five segments. What settles it is
-// the segment AFTER the extension name: only a category this package emits can
-// stand there. See splitModuleKey.
+// It exists because "ext.<Имя>." cannot be stripped off a key on faith. A dump root
+// may hold a directory literally named «ext» (the customer whose tree started all
+// of this had one), an unknown top-level directory becomes the category slot
+// verbatim, and such a key really can reach five segments. What settles whether the
+// two leading segments may be consumed is the segment AFTER them: only a category
+// this package emits can stand there. See splitModuleKey.
+//
+// IT NO LONGER DECIDES THE NAMESPACE, only the category. Membership of the
+// extension namespace is the "ext." prefix (extKeyPrefix), which is the same test
+// every consumer of a module id already applies. While this set decided both, a
+// producer whose ids are four segments long — the live .cfe ingest — was outside
+// the namespace entirely, and its modules were dropped from every extensions-only
+// search without a word. The two questions are asked separately now.
 //
 // DERIVED, never typed. A kind added to metadataTypes joins this set on the same
-// line it joins dumpDirNames, so a new kind cannot silently stop being recognised
-// after an "ext." prefix. It is populated at the END of init below, after every
-// entry has been added, which is why it is not built anywhere else in the package:
-// init order across files would decide whether it was complete.
+// line it joins dumpDirNames, so a new kind cannot silently stop having its
+// category derived after an "ext." prefix. It is populated at the END of init
+// below, after every entry has been added, which is why it is not built anywhere
+// else in the package: init order across files would decide whether it was
+// complete.
 var categoryNames map[string]struct{}
 
 // dumpDirNames maps plural English dump directory name to Russian display

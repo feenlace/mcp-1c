@@ -172,7 +172,30 @@ const (
 	// «this cache predates the field». A silently wrong answer is exactly what this
 	// protocol exists to prevent, and it is worse here than a missing one because the
 	// caller has no way to tell the two apart.
-	dumpIndexSchemaVersion = 5
+	//
+	// v6: the RULE that fills that namespace field changed. Membership is now the
+	// "ext." prefix alone (extKeyPrefix); the five-segment/known-category condition
+	// that used to decide it as well now decides only the category. No key changes —
+	// bslKeyCorpusDigest is unmoved across this bump, which is the guard's own way of
+	// saying the derivation is the same — but the VALUE indexed in the namespace
+	// field moves from "" to "ext" for keys the old condition rejected.
+	//
+	// It takes a bump because that value is PERSISTED and its counterpart is not.
+	// MEASURED on the deriver at the tip: of six dump paths under a root holding a
+	// directory literally named «ext», FOUR mint keys whose namespace moves —
+	// "ext.Ном.Форма.Ф.МодульФормы" (five segments, «Форма» is not a category) and
+	// the three-segment "ext.Ном.МодульОбъекта", "ext.A.МодульОбъекта" (that A is
+	// LATIN, it is what the path held), "ext.Расш.МодульОбъекта". Every one of the
+	// four was read back off the deriver rather than composed here, because the
+	// first attempt at this list DID compose one and spelled that A in Cyrillic —
+	// a key the deriver never produces. A generation persists that field in its bleve
+	// shards, while PathIndex is rebuilt in-process from the manifest's names on
+	// every start (NewPathIndex, generation.go and index.go). Served without a bump,
+	// the same module would then be OUT of the namespace for smart, which reads the
+	// stale shard, and IN it for regex and exact, which read the freshly derived
+	// PathIndex — one process answering one question two ways, which is worse than
+	// either answer alone. The bump forces the rebuild that makes them agree.
+	dumpIndexSchemaVersion = 6
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and
