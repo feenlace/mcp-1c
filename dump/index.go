@@ -775,6 +775,39 @@ type SearchStats struct {
 	// cannot disagree in the first place.
 	Unreadable int
 
+	// Unscanned is how many CANDIDATE modules this scan could not open, so their
+	// lines were never examined. Regex and exact only; searchSmart leaves it 0,
+	// because it has no candidate scan and its own shortfall is Unreadable.
+	//
+	// IT IS NOT A SECOND SPELLING OF Unreadable AND THE DIFFERENCE IS THE WHOLE
+	// REASON IT IS A SEPARATE FIELD. Unreadable is a gap between a count and a
+	// body: hits this answer selected and then dropped. The line scan has no such
+	// gap — a candidate it cannot open contributes neither matches nor count, so
+	// the two halves of its answer agree with each other — and that is what the
+	// doc on Unreadable and searchLineByLine both state. What they do not state is
+	// that the answer is smaller than the CORPUS the caller asked about, and that
+	// is this number.
+	//
+	// IT IS A BOUND AND NEVER A LOSS. Whether an unopened file holds a match is not
+	// knowable from an unopened file. A renderer may say «these N modules were not
+	// examined»; it may not say «their matching lines are missing from the total»,
+	// which asserts a match that was never observed. MEASURED on the consumer that
+	// shipped the second wording: a query matching nothing anywhere printed a
+	// header of 0 beside a sentence claiming that header understated the truth, and
+	// sent the reader to re-dump the whole configuration.
+	//
+	// TWO STATES REACH IT and they cost three orders of magnitude apart: a DELETED
+	// file is refused at the dump-root containment check for ~44 µs, and a file that
+	// is PRESENT and cannot be opened pays readRetryDelay once for ~50 ms and is
+	// then in the per-generation negative set. Both were not examined, so both are
+	// counted; see unreadable_negative_cache_test.go for the figures.
+	//
+	// IT COSTS NOTHING TO PRODUCE. contentForScan already returns the refusal on
+	// the path that discards it, and the counter rides the same per-candidate
+	// result the match count rides. No extra syscall, no second pass, and the
+	// ordered merge keeps it deterministic under the parallel chunking.
+	Unscanned int
+
 	// Unit says WHAT Total counted. It is not decoration and it is not derivable
 	// by the caller without repeating a mapping that would then be free to drift:
 	// the three modes count two different things and used to hand all three back
@@ -2664,8 +2697,13 @@ func (idx *Index) searchSmart(params SearchParams) ([]Match, SearchStats, error)
 // rather than an omission: a module whose content cannot be read contributes
 // neither matches nor count, because both are produced from the same content in
 // the same pass. There is no shortfall between the two to report. Counting the
-// skipped candidates would invent one and send the caller re-dumping over an
-// answer that is already complete.
+// skipped candidates INTO THAT FIELD would invent one and send the caller
+// re-dumping over an answer that is already complete.
+//
+// The skipped candidates are counted into SearchStats.Unscanned instead, which is
+// a different statement and the one that is true: the count and the body agree
+// with each other, and both are about a corpus this scan could not see all of.
+// See the doc on that field for why the two must not be merged.
 func (idx *Index) searchLineByLine(params SearchParams, match func(line, q string) bool, q string, preLower bool) ([]Match, SearchStats, error) {
 	candidates, err := idx.filterModules(params.Namespace, params.Category, params.Module)
 	if err != nil {
@@ -2675,6 +2713,7 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 
 	var matches []Match
 	total := 0
+	unscanned := 0
 
 	// Scan candidates in bounded parallel chunks. Each candidate's content is
 	// streamed from disk (or taken from cache if present) and discarded after
@@ -2685,6 +2724,11 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 	type candResult struct {
 		matches []Match
 		count   int
+		// unscanned is 1 when contentForScan refused this candidate. It rides the
+		// per-candidate result rather than an atomic counter so it is summed in the
+		// same ordered merge as count, which is what keeps it identical to a
+		// sequential scan.
+		unscanned int
 	}
 
 	workers := runtime.NumCPU()
@@ -2709,6 +2753,11 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 
 				content, ok := idx.contentForScan(name)
 				if !ok {
+					// NOT EXAMINED, and until this line the fact died here. The
+					// candidate is gone from disk or cannot be opened; it contributes
+					// no matches and no count, and the answer that comes back is
+					// internally consistent and quietly smaller than the corpus.
+					results[i] = candResult{unscanned: 1}
 					return
 				}
 				lines := strings.Split(content, "\n")
@@ -2739,6 +2788,7 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 
 		for _, r := range results {
 			total += r.count
+			unscanned += r.unscanned
 			for _, m := range r.matches {
 				if len(matches) < params.Limit {
 					matches = append(matches, m)
@@ -2747,7 +2797,7 @@ func (idx *Index) searchLineByLine(params SearchParams, match func(line, q strin
 		}
 	}
 
-	return matches, SearchStats{Total: total, Unit: SearchUnitLines}, nil
+	return matches, SearchStats{Total: total, Unscanned: unscanned, Unit: SearchUnitLines}, nil
 }
 
 // distinctNames drops repeats from a candidate list, keeping first-seen order.
