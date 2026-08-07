@@ -147,6 +147,25 @@ func (idx *Index) Reload() (ReloadReport, error) {
 		return ReloadReport{Elapsed: time.Since(start)}, ErrReloadNotReady
 	}
 
+	// FORGET WHICH FILES COULD NOT BE OPENED, before anything decides whether there
+	// is work to do.
+	//
+	// A reload is the user saying «read the dump again», and an unopenable module is
+	// exactly what they are saying it about: antivirus released the handle,
+	// cloud-sync finished, the permission was fixed. None of those touches the
+	// file's modification time or its size, GenSig hashes exactly those two per
+	// .bsl, so the signature is UNCHANGED and this call returns at the "nothing on
+	// disk moved" check below without building or swapping anything. Clearing the
+	// set only in swapGeneration would therefore leave it intact across the one
+	// command that is supposed to clear it, and the recovered file would stay
+	// refused for the life of the process.
+	//
+	// It is cleared unconditionally, including on the paths that go on to fail. The
+	// set is an optimisation and nothing reads it for correctness, so dropping it
+	// can only cost one retry pause per key; keeping it can hide a file that is
+	// back. Failing open is the right direction here.
+	idx.forgetUnreadable()
+
 	idx.mu.RLock()
 	sigBefore := idx.gensig
 	cacheDir := idx.cacheDir
@@ -397,6 +416,10 @@ func (idx *Index) swapGeneration(
 			delete(idx.contentByName, id)
 		}
 	}
+	// The unreadable set describes files under the generation being retired, so it
+	// goes with it. Reload clears it as well, and that is not redundant: see
+	// Index.unreadable, and the clear at the top of Reload.
+	idx.unreadable = nil
 	idx.contentMu.Unlock()
 
 	return oldShards, oldReg
