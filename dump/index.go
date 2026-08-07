@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
@@ -83,6 +84,13 @@ func warnModuleReadErr(path string, err error) {
 // unavailable (so callers exclude it) and a rate-limited warning is logged — the
 // file does not silently disappear from results without a trace.
 func readModuleContent(path string) (string, bool) {
+	content, err := readModuleContentErr(path)
+	return content, err == nil
+}
+
+// readModuleContentErr is readModuleContent with the failure kept, so a caller
+// that draws a CONCLUSION from the failure can see what the failure was.
+func readModuleContentErr(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		time.Sleep(readRetryDelay)
@@ -90,13 +98,56 @@ func readModuleContent(path string) (string, bool) {
 	}
 	if err != nil {
 		warnModuleReadErr(path, err)
-		return "", false
+		return "", err
 	}
-	return stripBOM(string(data)), true
+	return stripBOM(string(data)), nil
+}
+
+// readFailureSaysSomethingAboutTheFile reports whether a failed module read is
+// evidence ABOUT THAT FILE, which is the only kind of failure the negative set may
+// record.
+//
+// EMFILE AND ENFILE ARE FACTS ABOUT THE PROCESS AND THE MACHINE. "too many open
+// files" means this process (EMFILE) or the whole system (ENFILE) has no file
+// descriptor left; the path in the error is simply whichever open happened to be
+// the one that ran out. Recording it in a per-key set turns a momentary resource
+// state into a permanent verdict on an arbitrary file, and the scan that produces
+// it opens candidates in parallel chunks, so a single burst can condemn a whole
+// chunk of the index at once. Every mode then refuses those modules until a
+// reload, over a condition that cleared the instant the descriptors came back.
+//
+// EVERYTHING ELSE IS KEPT. A permission that was taken away, a sharing violation
+// from antivirus, an I/O error: those are properties of the file or of its
+// storage, they do not clear because some other work finished, and refusing them
+// for the rest of the generation is what the set was measured and built for. A
+// hold that outlasts the single retry therefore still costs one reload_dump; that
+// is a stale conclusion rather than an unfounded one, the remedy is the one the
+// product already offers, and a consumer's answer now names the modules it could
+// not open (SearchStats.Unscanned) instead of losing them in silence.
+//
+// AN EXPIRY WAS CONSIDERED AND NOT ADDED. It would clear the stale case too, but
+// it buys that with a clock and a tuning constant on a path whose whole job is to
+// avoid one 50 ms pause, and it would not fix the case above: a descriptor burst
+// would still condemn a chunk of the index, just for a shorter while. The wrong
+// entry is better not written than written and later forgotten.
+func readFailureSaysSomethingAboutTheFile(err error) bool {
+	return !errors.Is(err, syscall.EMFILE) && !errors.Is(err, syscall.ENFILE)
 }
 
 // refusedAsUnreadable reports whether this key is already known to name a file
 // that is there and cannot be opened. See Index.unreadable.
+//
+// A HIT HERE RETURNS BEFORE readModuleContentErr, SO IT DOES NOT LOG, and that is
+// accepted rather than overlooked. warnModuleReadErr fires inside the read, so a
+// module that stays locked is warned about ONCE per generation and then silently
+// for the rest of it. Three things make that the right trade rather than a lost
+// signal: the warning is globally rate limited to one line per readErrLogInterval
+// anyway, so repetition was never going to be visible; the fact now travels in the
+// ANSWER instead of only in the log, because every literal search counts the
+// candidates it could not open into SearchStats.Unscanned and a consumer names
+// them; and the failures that are worth seeing REPEATED are the transient ones,
+// which readFailureSaysSomethingAboutTheFile keeps out of this set, so they reach
+// the read and the log on every call.
 func (idx *Index) refusedAsUnreadable(id string) bool {
 	idx.contentMu.RLock()
 	_, refused := idx.unreadable[id]
@@ -967,6 +1018,12 @@ type Index struct {
 	// 44.33 µs for a DELETED one, and 50.66 ms for one that is present and cannot
 	// be opened. Only the third arm pays the pause.
 	//
+	// AND ONLY A FAILURE ABOUT THE FILE IS RECORDED. The set was written from ANY
+	// read failure, including EMFILE and ENFILE, which say that the process or the
+	// machine is out of descriptors and say nothing at all about the path in the
+	// error. See readFailureSaysSomethingAboutTheFile for what that cost and why an
+	// expiry was rejected in favour of not writing the entry.
+	//
 	// A MISSING FILE IS DELIBERATELY NOT RECORDED. GetContent resolves the path
 	// through EvalSymlinks for the dump-root containment check, that resolution
 	// fails when the file is not there, and the call is refused before any read is
@@ -1170,12 +1227,15 @@ func (idx *Index) GetContent(id string) (string, bool) {
 	// read the same file in parallel; that is harmless (identical content) and is
 	// resolved by the double-check below.
 	stamp, stamped := statStamp(path)
-	content, ok := readModuleContent(path)
-	if !ok {
+	content, rerr := readModuleContentErr(path)
+	if rerr != nil {
 		// The file is present enough to have reached this line and could not be
 		// opened. Record it so the next caller is refused for microseconds instead
-		// of re-paying readRetryDelay.
-		idx.noteUnreadable(id)
+		// of re-paying readRetryDelay — but only when the failure was about the
+		// FILE. See readFailureSaysSomethingAboutTheFile.
+		if readFailureSaysSomethingAboutTheFile(rerr) {
+			idx.noteUnreadable(id)
+		}
 		return "", false
 	}
 	if !stamped {
@@ -2097,9 +2157,13 @@ func (idx *Index) contentForScan(name string) (string, bool) {
 		return "", false
 	}
 
-	content, ok := readModuleContent(path)
-	if !ok {
-		idx.noteUnreadable(name)
+	content, rerr := readModuleContentErr(path)
+	if rerr != nil {
+		// Same rule as GetContent: a failure that says nothing about the file is
+		// not evidence the file cannot be opened.
+		if readFailureSaysSomethingAboutTheFile(rerr) {
+			idx.noteUnreadable(name)
+		}
 		return "", false
 	}
 	return content, true
