@@ -151,13 +151,25 @@ func assertShortfallLineIsExactly(t *testing.T, answer, prefix, want string) {
 // denylist and is sound as one only because it is a second check beside a whole
 // line pinned above: this one cannot certify the note, it can only catch the
 // forbidden claim escaping into a neighbour.
+//
+// WHICH LINES ARE THE PRODUCT'S IS productProseLines' ANSWER, not a prefix test
+// written here. This helper used to keep the lines opening «> » and drop the
+// rest, on the ground that the customer's code is not a blockquote; the renderer
+// in this package puts every body line at column 0, so that ground does not hold
+// and the sweep reddened on .bsl. See productProseLines for the bound that does.
 func assertNoLineClaimsTheFileChangedOrWentAway(t *testing.T, answer string) {
 	t.Helper()
 	forbidden := []string{"изменились", "удалены", "удалён", "удален", "не удалось перечитать"}
-	for _, line := range strings.Split(answer, "\n") {
-		if !strings.HasPrefix(line, "> ") {
-			continue // product notes are blockquotes; the body is the customer's code
-		}
+	prose, unclosed := productProseLines(answer)
+	if unclosed != 0 {
+		t.Fatalf("control failed: the answer leaves a fence of %d backticks open, so the sweep "+
+			"below stopped at it and the rest of the answer was never read.\n%s", unclosed, answer)
+	}
+	if len(prose) == 0 {
+		t.Fatalf("control failed: the answer carries no product note at all, so a sweep of the "+
+			"notes proves nothing.\n%s", answer)
+	}
+	for _, line := range prose {
 		for _, f := range forbidden {
 			if strings.Contains(line, f) {
 				t.Errorf("a note claims the file changed or went away (%q), over a module this "+
