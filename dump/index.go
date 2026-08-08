@@ -115,6 +115,8 @@ func readModuleContentErr(path string) (string, error) {
 // it opens candidates in parallel chunks, so a single burst can condemn a whole
 // chunk of the index at once. Every mode then refuses those modules until a
 // reload, over a condition that cleared the instant the descriptors came back.
+// They are the loudest members of a wider class; see the last two paragraphs for
+// the rest of it and for why this is still a denylist.
 //
 // EVERYTHING ELSE IS KEPT. A permission that was taken away, a sharing violation
 // from antivirus, an I/O error: those are properties of the file or of its
@@ -127,11 +129,48 @@ func readModuleContentErr(path string) (string, error) {
 //
 // AN EXPIRY WAS CONSIDERED AND NOT ADDED. It would clear the stale case too, but
 // it buys that with a clock and a tuning constant on a path whose whole job is to
-// avoid one 50 ms pause, and it would not fix the case above: a descriptor burst
-// would still condemn a chunk of the index, just for a shorter while. The wrong
-// entry is better not written than written and later forgotten.
+// avoid one readRetryDelay pause, and it would not fix the case above: a descriptor
+// burst would still condemn a chunk of the index, just for a shorter while. The
+// wrong entry is better not written than written and later forgotten.
+//
+// THE TRANSIENT CLASS IS THE STANDARD LIBRARY'S, NOT A LIST KEPT HERE. Two errnos
+// was never the whole class: a kernel that cannot allocate (ENOMEM), an
+// interrupted read (EINTR), a mount that did not answer (ETIMEDOUT) and a handle
+// that went stale (ESTALE) are all states of the process, the machine or the
+// transport, and each was recorded as a durable verdict on a file nothing had
+// learned anything about. syscall.Errno.Temporary() already names that class and
+// is maintained per platform by the toolchain, so it is asked rather than copied;
+// a transient errno added upstream is then excluded without this file being
+// edited. Two gaps are named explicitly because Temporary() does not cover them:
+// ENFILE, which unix includes and WINDOWS DOES NOT (syscall/syscall_windows.go's
+// Temporary is EINTR || EMFILE || Timeout), and ENOMEM, which no platform
+// includes. ESTALE is excluded on its own footing: a remount clears it with
+// nothing about the file having changed.
+//
+// AND IT IS STILL A DENYLIST, which is a decision and not an omission. The
+// alternative was an allowlist of file-shaped errnos, defaulting to «do not
+// record», which is the safer default in the abstract: a wrong record removes the
+// module from every mode until reload_dump, a wrong non-record costs one
+// readRetryDelay. It was rejected on WINDOWS EVIDENCE. The commonest real hold on
+// this product's dumps is antivirus or cloud sync keeping the file open, and
+// Windows delivers that as ERROR_SHARING_VIOLATION, which the standard syscall
+// package does not export and which fs.ErrPermission does not match: that arm of
+// syscall/syscall_windows.go's Errno.Is lists ERROR_ACCESS_DENIED, EACCES and
+// EPERM and nothing else. A portable allowlist would therefore have stopped
+// recording precisely the case the set was built for, on the platform it matters
+// most on, and would have replaced a correct verdict with a readRetryDelay on
+// every call for every held file. An unrecognised failure keeps recording.
 func readFailureSaysSomethingAboutTheFile(err error) bool {
-	return !errors.Is(err, syscall.EMFILE) && !errors.Is(err, syscall.ENFILE)
+	var errno syscall.Errno
+	if errors.As(err, &errno) && errno.Temporary() {
+		return false
+	}
+	for _, transient := range []syscall.Errno{syscall.ENFILE, syscall.ENOMEM, syscall.ESTALE} {
+		if errors.Is(err, transient) {
+			return false
+		}
+	}
+	return true
 }
 
 // refusedAsUnreadable reports whether this key is already known to name a file

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 )
@@ -63,15 +64,69 @@ func TestOnlyAFailureAboutTheFileReachesTheNegativeSet(t *testing.T) {
 		{"EMFILE wrapped by os.ReadFile", wrap(syscall.EMFILE), false},
 		{"ENFILE, the machine is out of descriptors", syscall.ENFILE, false},
 		{"ENFILE wrapped by os.ReadFile", wrap(syscall.ENFILE), false},
+		// THE FOUR THE TWO-ERRNO DENYLIST RECORDED AS FACTS ABOUT THE FILE. Each is a
+		// state of the process, the kernel or the transport under the mount, and each
+		// clears without anything about the file changing, so a per-key verdict outlives
+		// the condition that produced it.
+		{"ENOMEM, the kernel could not allocate", wrap(syscall.ENOMEM), false},
+		{"EINTR, the read was interrupted", wrap(syscall.EINTR), false},
+		{"ETIMEDOUT, the mount under the file did not answer", wrap(syscall.ETIMEDOUT), false},
+		{"EAGAIN, the read would have blocked", wrap(syscall.EAGAIN), false},
+		{"ESTALE, the handle went stale and a remount clears it", wrap(syscall.ESTALE), false},
 		{"EACCES, the file's permissions", syscall.EACCES, true},
 		{"EACCES wrapped by os.ReadFile", wrap(syscall.EACCES), true},
 		{"EPERM", wrap(syscall.EPERM), true},
 		{"EIO, the storage under the file", wrap(syscall.EIO), true},
+		{"ENOENT, the file is not there", wrap(syscall.ENOENT), true},
+		{"ENOTDIR, a component of the path is not a directory", wrap(syscall.ENOTDIR), true},
+		// UNKNOWN STILL RECORDS, and that is the denylist's default kept on purpose:
+		// see readFailureSaysSomethingAboutTheFile for why this stayed a denylist
+		// rather than becoming an allowlist.
 		{"an error this package cannot classify", errors.New("что-то пошло не так"), true},
 	}
 	for _, c := range cases {
 		if got := readFailureSaysSomethingAboutTheFile(c.err); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestTheTransientClassIsTheStandardLibrarysAndNotACopyOfIt pins the DELEGATION
+// rather than the list, which is the whole reason the predicate stops enumerating.
+//
+// syscall.Errno.Temporary() is maintained per platform by the standard library and
+// already names the class this set must never record: EINTR, EMFILE, EAGAIN,
+// EWOULDBLOCK, ETIMEDOUT, and ENFILE on unix. A predicate that copied those names
+// into this package would answer a question the toolchain has already answered, and
+// would answer it out of date the first time upstream adds one.
+//
+// THE PROPERTY IS ONE-DIRECTIONAL. Temporary() being true must imply the set does
+// not record it. The converse is not asserted and must not be: ENFILE on windows
+// and ENOMEM everywhere are excluded here while Temporary() says nothing about
+// them, which is exactly why the predicate has arms of its own as well.
+func TestTheTransientClassIsTheStandardLibrarysAndNotACopyOfIt(t *testing.T) {
+	probes := []syscall.Errno{
+		syscall.EINTR, syscall.EMFILE, syscall.ENFILE, syscall.EAGAIN,
+		syscall.ETIMEDOUT, syscall.ENOMEM, syscall.ESTALE,
+		syscall.EACCES, syscall.EPERM, syscall.EIO, syscall.ENOENT,
+	}
+	// CONTROL: at least one probe IS Temporary() on this platform, or the implication
+	// below is vacuously true and measures nothing.
+	temporaries := 0
+	for _, e := range probes {
+		if e.Temporary() {
+			temporaries++
+		}
+	}
+	if temporaries == 0 {
+		t.Fatalf("control failed: none of the %d probes is Temporary() on %s, so the "+
+			"implication below is vacuous", len(probes), runtime.GOOS)
+	}
+	for _, e := range probes {
+		if e.Temporary() && readFailureSaysSomethingAboutTheFile(&os.PathError{Op: "open", Err: e}) {
+			t.Errorf("%v is Temporary() and the negative set records it as a fact about the "+
+				"file, so a condition the standard library calls transient becomes a verdict "+
+				"that lasts until reload_dump", e)
 		}
 	}
 }

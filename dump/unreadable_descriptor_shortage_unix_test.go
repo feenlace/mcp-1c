@@ -157,13 +157,15 @@ func TestADescriptorShortageDoesNotCondemnTheModule(t *testing.T) {
 //
 // THE TWO SITES ARE NOT ONE SITE. noteUnreadable is reached from contentForScan,
 // which the regex/exact scan runs over every candidate, and from GetContent, which
-// serves read_module, the smart leg's body and every other content read in the
-// product. Each carries its own `if readFailureSaysSomethingAboutTheFile(rerr)`.
-// Deleting the one in GetContent left the whole dump package green: the predicate
-// test above still passed because the predicate was untouched, and the scan test
-// still passed because it never enters GetContent. The entry that deletion writes
-// is not local to the call either — the set is keyed by module id and shared, so a
-// burst inside a read_module condemns the id for the SCAN as well, until reload.
+// is the exported content read: inside this module its only production caller is
+// searchSmart, which builds the smart leg's body from it, and it is what importers
+// of this module read module source through. Each carries its own
+// `if readFailureSaysSomethingAboutTheFile(rerr)`. Deleting the one in GetContent
+// left the whole dump package green: the predicate test above still passed because
+// the predicate was untouched, and the scan test still passed because it never
+// enters GetContent. The entry that deletion writes is not local to the call
+// either, since the set is keyed by module id and shared, so a burst inside a
+// GetContent condemns the id for the SCAN as well, until reload.
 //
 // THE FIXTURE IS THE SAME SHORTAGE, driven through GetContent instead. The cached
 // copy has to be sent back to disk first, and here that takes an explicit read
