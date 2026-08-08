@@ -70,8 +70,9 @@ func migOpen(t *testing.T, dumpDir, cacheDir string, reindex bool) *Index {
 // corrupt file, an incompatible manifest version. The shards are then opened and
 // the names are re-derived by the CURRENT binary, so the answer becomes v4 module
 // names over v3 shard docIDs. Every hit Bleve returns is then a docID GetContent
-// cannot resolve, which the search reports as «файлы изменились или удалены» and
-// sends the user to re-run the dump. The state is a stale cache, and it is
+// cannot resolve, which the search counts into SearchStats.Unreadable and reports
+// through tools/search.go:searchShortfallNote as content it could not obtain,
+// sending the user to re-run the dump. The state is a stale cache, and it is
 // reported as a changed dump.
 //
 // Absence keeps its old meaning. A cache with shards and no manifest at all is

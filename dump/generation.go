@@ -1688,9 +1688,10 @@ func flatCacheAdoptable(cpath, dir string) (bool, string) {
 // version. The shards were then opened and the names re-derived by the CURRENT
 // binary, so the served state became this binary's module names over the other
 // binary's shard docIDs. Every hit the index returns from such a shard is a docID
-// GetContent cannot resolve, which the search reports as «файлы изменились или
-// удалены» and answers with the remedy for a changed dump. The condition is a stale
-// cache and it was diagnosed as a moved one.
+// GetContent cannot resolve, which the search counts into SearchStats.Unreadable
+// and reports through tools/search.go:searchShortfallNote as content it could not
+// obtain, with the remedy for a changed dump. The condition is a stale cache and
+// it was diagnosed as a moved one.
 //
 // That path had never been exercised on a large scale, because until v4 no schema
 // bump had happened since the stamp was introduced. The v3 -> v4 bump makes the

@@ -472,6 +472,39 @@ func searchHitHeading(prefix, displayName, label string) string {
 // noun is what stats.Total counted, in the genitive plural, and it is the SAME
 // word the header used: a reader who is told «модулей» above and «совпадений»
 // below has been given two labels for one number and learnt nothing from either.
+//
+// IT NAMES NO CAUSE FOR THE DROPPED HITS, and it used to name two. The clause read
+// «эти модули не удалось перечитать, файлы изменились или удалены уже после того,
+// как построен индекс», and dump.SearchStats.Unreadable does not carry a cause at
+// all: its one producer is searchSmart, which receives `false` from
+// dump.Index.GetContent and nothing else. GetContent has five ways of answering
+// false; the first, an index that is not ready, cannot be one of them because
+// SearchWithStats refuses before it reaches a mode. That leaves FOUR, and the
+// sentence was false of most of them:
+//
+//	!hasPath              no file is recorded behind the key
+//	!pathWithinRoot       the real path does not resolve, OR resolves outside the
+//	                      dump root. A DELETED file lands here and so does a file
+//	                      that is present and readable and reached through a
+//	                      symlink leaving the root, which is the planted-dump
+//	                      containment refusal working exactly as designed
+//	refusedAsUnreadable   the per-generation negative set holds the key whatever
+//	                      the file is doing now, until a reload drops the set
+//	a read error          including EMFILE / ENFILE, which
+//	                      readFailureSaysSomethingAboutTheFile documents as facts
+//	                      about the process and the machine and not about the file
+//
+// «Удалены» is true of one arm of the second. «Изменились» is true of NONE of
+// them: a file whose (mtime, size) stamp has moved is not refused, it is re-read
+// and served, so a merely changed file cannot produce this note. What shipped told
+// a customer their file had been deleted while this product was declining to
+// follow a link out of the dump root, and sent them to rebuild the whole dump over
+// it. The wording now states the one thing the search observed, which is that the
+// content did not arrive.
+//
+// THE REMEDY STAYS, because it is the one action that clears the state on all four:
+// a fresh dump has no stale path, no escaping link and no missing file, and
+// reload_dump drops the negative set with the generation.
 func searchShortfallNote(stats dump.SearchStats, shown int, noun string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "> Показано %d из %d %s.", shown, stats.Total, noun)
@@ -483,10 +516,9 @@ func searchShortfallNote(stats dump.SearchStats, shown int, noun string) string 
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, " Ещё %d отобрано, но не показано: эти модули не удалось перечитать, "+
-		"файлы изменились или удалены уже после того, как построен индекс. Число в заголовке взято "+
-		"из индекса и их всё ещё учитывает. Выполните выгрузку конфигурации заново "+
-		"и вызовите reload_dump.", stats.Unreadable)
+	fmt.Fprintf(&b, " Ещё %d отобрано, но не показано: получить содержимое этих модулей "+
+		"не удалось. Число в заголовке взято из индекса и их всё ещё учитывает. "+
+		"Выполните выгрузку конфигурации заново и вызовите reload_dump.", stats.Unreadable)
 
 	if stats.Total > shown+stats.Unreadable {
 		b.WriteString(" Остальные совпадения в limit не поместились: уточните поиск или увеличьте limit.")
