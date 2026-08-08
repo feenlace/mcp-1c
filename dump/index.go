@@ -896,6 +896,18 @@ type SearchStats struct {
 	// the path that discards it, and the counter rides the same per-candidate
 	// result the match count rides. No extra syscall, no second pass, and the
 	// ordered merge keeps it deterministic under the parallel chunking.
+	//
+	// IT IS NEVER NON-ZERO ON THE SAME ANSWER AS Unreadable, AND THAT IS A CONTRACT
+	// OF THIS TYPE RATHER THAN A COINCIDENCE OF ITS TWO PRODUCERS. Only searchSmart
+	// writes Unreadable and only searchLineByLine writes this, so a consumer may
+	// choose its wording from whichever is non-zero without arbitrating between
+	// them. Consumers outside this module do exactly that, and they are the ones a
+	// change here would break rather than this package: «совпадения потеряны» is
+	// sound on a gap between a count and a body and is FALSE about candidates
+	// nothing opened. A change that lets both fire is a change to this contract and
+	// must be made deliberately, with every consumer's wording revisited.
+	// TestNoAnswerCarriesBothShortfallCounters drives all three modes over a dump
+	// from which both shortfalls are reachable and fails if any mode reports both.
 	Unscanned int
 
 	// Unit says WHAT Total counted. It is not decoration and it is not derivable
