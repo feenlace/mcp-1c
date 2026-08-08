@@ -141,11 +141,16 @@ func readModuleContentErr(path string) (string, error) {
 // learned anything about. syscall.Errno.Temporary() already names that class and
 // is maintained per platform by the toolchain, so it is asked rather than copied;
 // a transient errno added upstream is then excluded without this file being
-// edited. Two gaps are named explicitly because Temporary() does not cover them:
-// ENFILE, which unix includes and WINDOWS DOES NOT (syscall/syscall_windows.go's
-// Temporary is EINTR || EMFILE || Timeout), and ENOMEM, which no platform
-// includes. ESTALE is excluded on its own footing: a remount clears it with
-// nothing about the file having changed.
+// edited. The gaps Temporary() does not cover are named explicitly, and they are
+// namedTransientErrnos in full: ENFILE, which unix includes and WINDOWS DOES NOT
+// (syscall/syscall_windows.go's Temporary is EINTR || EMFILE || Timeout); ENOMEM,
+// which no platform includes; and ESTALE, which no platform includes either.
+//
+// THIS PARAGRAPH USED TO COUNT TWO OF THEM and set ESTALE apart as «excluded on
+// its own footing», which read as a different kind of entry. ESTALE does have a
+// second reason - a remount clears it with nothing about the file having changed
+// - but it is uncovered by Temporary() exactly as ENOMEM is, so it is named for
+// the same reason as the other two and the list is the count.
 //
 // AND IT IS STILL A DENYLIST, which is a decision and not an omission. The
 // alternative was an allowlist of file-shaped errnos, defaulting to «do not
@@ -165,12 +170,41 @@ func readFailureSaysSomethingAboutTheFile(err error) bool {
 	if errors.As(err, &errno) && errno.Temporary() {
 		return false
 	}
-	for _, transient := range []syscall.Errno{syscall.ENFILE, syscall.ENOMEM, syscall.ESTALE} {
+	return !isNamedTransient(err)
+}
+
+// namedTransientErrnos are the errnos this file names for itself, because
+// syscall.Errno.Temporary() does not answer for them on every platform.
+var namedTransientErrnos = []syscall.Errno{syscall.ENFILE, syscall.ENOMEM, syscall.ESTALE}
+
+// isNamedTransient is the arm of readFailureSaysSomethingAboutTheFile that does
+// NOT consult Temporary(), split out so it can be tested where its effect is
+// invisible.
+//
+// ENFILE IS DECIDED HERE ONLY ON WINDOWS, and that used to make it undefended.
+// Unix Temporary() already returns true for ENFILE, so on every machine this
+// project's tests run on, the first arm of the predicate answers first and
+// deleting ENFILE from namedTransientErrnos changed no result: the dump suite
+// stayed green and GOOS=windows go vet exited 0, because vet does not run tests.
+// CI does not close that gap: .github/workflows/release.yml holds the only job in
+// this repository that runs tests, `runs-on: ubuntu-latest` with
+// `go test ./... -v -race`, and windows appears in that file only as a value of
+// the BUILD job's goos matrix. `windows-latest` appears in no revision of
+// .github/ in this repository's history, so NO TEST HERE RUNS ON WINDOWS.
+//
+// What can be tested anywhere is this function, because it is the same code on
+// every platform: only Temporary() differs. It is called directly by
+// dump/unreadable_read_failure_kind_test.go:TestTheNamedArmAnswersWithoutAskingTemporary,
+// so the entry Windows depends on is pinned by a run on the machine the tests do
+// happen on. That is the whole of the protection claimed for it; the Windows path
+// itself remains untested.
+func isNamedTransient(err error) bool {
+	for _, transient := range namedTransientErrnos {
 		if errors.Is(err, transient) {
-			return false
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // refusedAsUnreadable reports whether this key is already known to name a file

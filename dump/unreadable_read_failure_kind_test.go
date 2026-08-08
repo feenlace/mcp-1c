@@ -130,3 +130,55 @@ func TestTheTransientClassIsTheStandardLibrarysAndNotACopyOfIt(t *testing.T) {
 		}
 	}
 }
+
+// TestTheNamedArmAnswersWithoutAskingTemporary pins the entries the predicate
+// keeps for itself, on the arm that decides them.
+//
+// WHY THE ARM AND NOT THE PREDICATE. readFailureSaysSomethingAboutTheFile asks
+// Temporary() first, and unix Temporary() already returns true for ENFILE. So on
+// every machine this project's tests run on, the ENFILE entry in
+// namedTransientErrnos changes NO result of the full predicate: it was measured,
+// and deleting it left the whole dump suite green. It is not dead code though -
+// windows Temporary() is EINTR || EMFILE || Timeout, so on Windows that entry is
+// the only thing keeping a machine-wide descriptor shortage out of a per-key
+// verdict that lasts until reload_dump. isNamedTransient is the same code on both
+// platforms, so calling it directly tests the Windows decision from here.
+//
+// This does not test Windows. No test in this project runs on Windows; the one
+// test job in .github/workflows/release.yml is ubuntu-latest and windows appears
+// only in the build matrix. It tests the arm Windows relies on.
+func TestTheNamedArmAnswersWithoutAskingTemporary(t *testing.T) {
+	wrap := func(e error) error { return &os.PathError{Op: "open", Path: "Module.bsl", Err: e} }
+
+	// CONTROL: this is the state that makes the test necessary. On a platform whose
+	// Temporary() already covers ENFILE, the full predicate cannot see the entry, so
+	// a test written against the predicate would pass with the entry deleted.
+	if syscall.ENFILE.Temporary() {
+		if readFailureSaysSomethingAboutTheFile(wrap(syscall.ENFILE)) {
+			t.Fatalf("control failed: ENFILE is Temporary() on %s and the predicate still "+
+				"records it, so neither arm is behaving as this test assumes", runtime.GOOS)
+		}
+	}
+
+	for _, e := range []syscall.Errno{syscall.ENFILE, syscall.ENOMEM, syscall.ESTALE} {
+		if !isNamedTransient(wrap(e)) {
+			t.Errorf("%v is not matched by the named arm. On Windows that arm is the only "+
+				"thing standing between this errno and a per-key verdict that lasts until "+
+				"reload_dump, and no run on this platform would notice through the full "+
+				"predicate.", e)
+		}
+	}
+
+	// NEGATIVE CONTROL: the arm is not simply answering true. Without this a list
+	// emptied to nothing, or a loop that returned true unconditionally, would pass
+	// every assertion above.
+	for _, e := range []syscall.Errno{syscall.EACCES, syscall.EIO, syscall.ENOENT} {
+		if isNamedTransient(wrap(e)) {
+			t.Errorf("%v is matched by the named arm, so the arm no longer distinguishes a "+
+				"fact about the file from a state of the machine", e)
+		}
+	}
+	if isNamedTransient(errors.New("что-то пошло не так")) {
+		t.Errorf("an error carrying no errno is matched by the named arm")
+	}
+}
