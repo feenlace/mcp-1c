@@ -1,11 +1,15 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -15,6 +19,7 @@ import (
 	"github.com/feenlace/mcp-1c/bsl"
 	"github.com/feenlace/mcp-1c/internal/instructions"
 	"github.com/feenlace/mcp-1c/onec"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // instructions_contract_test.go holds the half of the instruction-text guard that
@@ -44,13 +49,11 @@ import (
 var instrRefusalHeadingPattern = regexp.MustCompile(
 	`не (выполнен|выполнена|выполнено|выполнены|получен|получена|получено|получены|прочитан|прочитана|прочитано|прочитаны)$`)
 
-// instrHeadingConsts reads the heading constants out of the package SOURCE rather
-// than repeating them, so an eleventh tool shipping a heading like «Ошибка
-// анализа» is caught by a guard nobody had to remember to update.
-//
-// It takes dir as a parameter for the same reason censusTools does: so the walk
-// can be aimed somewhere empty and shown to report nothing rather than agreement.
-func instrHeadingConsts(dir string) (map[string]string, error) {
+// instrStringConsts reads EVERY string constant out of the package source, keyed
+// by name. Not only the ones named heading*: the census below resolves a heading
+// passed as an identifier, and an identifier that happens to be called something
+// else still reaches the model as a first line.
+func instrStringConsts(dir string) (map[string]string, error) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")
@@ -72,7 +75,7 @@ func instrHeadingConsts(dir string) (map[string]string, error) {
 						continue
 					}
 					for i, name := range vs.Names {
-						if !strings.HasPrefix(name.Name, "heading") || i >= len(vs.Values) {
+						if i >= len(vs.Values) {
 							continue
 						}
 						lit, ok := vs.Values[i].(*ast.BasicLit)
@@ -92,17 +95,111 @@ func instrHeadingConsts(dir string) (map[string]string, error) {
 	return out, nil
 }
 
+// refusalSite is one call to WithToolErrors, with the heading it really passes.
+type refusalSite struct {
+	where   string // file:line, so a failure names the call and not a constant
+	spelled string // how the argument was written: a literal, or the const's name
+	heading string
+}
+
+// instrRefusalHeadings reads the heading census FROM THE CALL SITES, not from the
+// constant names.
+//
+// WHY IT CHANGED. The census used to collect constants whose NAME began with
+// «heading», which made two shapes invisible: a heading passed as a bare string
+// literal, and a heading held in a const whose name starts with anything else.
+// Both reach renderFailure and both become the first line the instruction text
+// teaches the model to read as a refusal, and the premise that ten constants were
+// found stayed satisfied by the ten survivors. Both shapes are measured: turning
+// one WithToolErrors argument into the literal «Ошибка анализа», and into a const
+// declared under a name the prefix filter misses, each left the shipped census
+// green and each reddens this one.
+//
+// It takes dir as a parameter for the same reason censusTools does: so the walk
+// can be aimed somewhere empty and shown to report nothing rather than agreement.
+func instrRefusalHeadings(dir string) ([]refusalSite, []string, error) {
+	consts, err := instrStringConsts(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var sites []refusalSite
+	var unresolved []string
+	for _, pkg := range pkgs {
+		for _, file := range pkg.Files {
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				fn, ok := call.Fun.(*ast.Ident)
+				if !ok || fn.Name != "WithToolErrors" || len(call.Args) == 0 {
+					return true
+				}
+				where := fset.Position(call.Pos()).String()
+				switch arg := call.Args[0].(type) {
+				case *ast.BasicLit:
+					if arg.Kind != token.STRING {
+						unresolved = append(unresolved, fmt.Sprintf("%s: heading argument is a %s literal", where, arg.Kind))
+						return true
+					}
+					v, err := strconv.Unquote(arg.Value)
+					if err != nil {
+						unresolved = append(unresolved, fmt.Sprintf("%s: heading literal does not unquote: %v", where, err))
+						return true
+					}
+					sites = append(sites, refusalSite{where: where, spelled: arg.Value, heading: v})
+				case *ast.Ident:
+					v, ok := consts[arg.Name]
+					if !ok {
+						unresolved = append(unresolved, fmt.Sprintf("%s: heading %s is not a string constant of this package", where, arg.Name))
+						return true
+					}
+					sites = append(sites, refusalSite{where: where, spelled: arg.Name, heading: v})
+				default:
+					unresolved = append(unresolved, fmt.Sprintf("%s: heading argument is a %T, which this census cannot read", where, arg))
+				}
+				return true
+			})
+		}
+	}
+	sort.Slice(sites, func(i, j int) bool { return sites[i].where < sites[j].where })
+	return sites, unresolved, nil
+}
+
 // TestInstructionsRefusalVocabularyIsClosed is paragraph 2's guard.
 func TestInstructionsRefusalVocabularyIsClosed(t *testing.T) {
-	headings, err := instrHeadingConsts(".")
+	sites, unresolved, err := instrRefusalHeadings(".")
 	if err != nil {
 		t.Fatalf("parsing the package source: %v", err)
 	}
 
-	// PREMISE: the walk found the constants. Zero would agree with everything.
-	if len(headings) < 10 {
-		t.Fatalf("the heading census found %d constants; the package had ten refusal headings when "+
-			"this guard was written, so the walk is measuring the wrong thing", len(headings))
+	// A heading this census cannot read is itself a failure: an unread heading is
+	// an unchecked first line, and reporting agreement over the ones it could read
+	// is how the previous census stayed green.
+	for _, u := range unresolved {
+		t.Errorf("the refusal-heading census cannot resolve a call site, so its first line is unchecked: %s", u)
+	}
+
+	// PREMISE: the walk found the call sites. Zero would agree with everything.
+	if len(sites) < 10 {
+		t.Fatalf("the heading census found %d WithToolErrors call sites; the package had ten when this "+
+			"guard was written, so the walk is measuring the wrong thing", len(sites))
+	}
+
+	// Control: aimed somewhere with no Go source, the same walk must report nothing
+	// rather than the ten it found above.
+	if empty, _, err := instrRefusalHeadings(t.TempDir()); err != nil {
+		t.Fatalf("control failed: the census errored on an empty directory: %v", err)
+	} else if len(empty) != 0 {
+		t.Fatalf("control failed: the census found %d call sites in an empty directory", len(empty))
 	}
 
 	// Positive control on the pattern itself: it must reject the shape the text
@@ -112,25 +209,29 @@ func TestInstructionsRefusalVocabularyIsClosed(t *testing.T) {
 			"sentence does not describe, so it accepts anything")
 	}
 
-	names := make([]string, 0, len(headings))
-	for name := range headings {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		if !instrRefusalHeadingPattern.MatchString(headings[name]) {
-			t.Errorf("%s = %q does not end the way the instruction text tells the model a refusal reads; "+
-				"either the heading or the sentence has to change", name, headings[name])
+	for _, s := range sites {
+		if s.heading == "" {
+			t.Errorf("%s passes an empty heading, so the refusal has no first line at all", s.where)
+			continue
 		}
-	}
+		if !instrRefusalHeadingPattern.MatchString(s.heading) {
+			t.Errorf("%s passes %s = %q, which does not end the way the instruction text tells the model "+
+				"a refusal reads; either the heading or the sentence has to change", s.where, s.spelled, s.heading)
+		}
 
-	// AND THE HEADING IS LITERALLY THE FIRST LINE, which is the part of the
-	// sentence that says «первая строка». Rendered, not grepped.
-	rendered := renderFailure(headings["headingQuery"], fmt.Errorf("boom"))
-	firstLine := strings.SplitN(rendered, "\n", 2)[0]
-	if want := "## " + headings["headingQuery"]; firstLine != want {
-		t.Errorf("the first line of a rendered refusal is %q, want %q", firstLine, want)
+		// AND THE HEADING IS LITERALLY THE FIRST LINE, which is the part of the
+		// sentence that says «первая строка». Rendered, not grepped, and rendered for
+		// EVERY heading rather than for one looked up by constant name.
+		//
+		// The keyed form this replaced read headings["headingQuery"]. Renaming that
+		// constant made the lookup return "", so the assertion compared "## " to
+		// "## " and passed: an assertion that cannot fail, on the only claim in the
+		// tree tying «первая строка» to a rendered artefact.
+		rendered := renderFailure(s.heading, fmt.Errorf("boom"))
+		firstLine := strings.SplitN(rendered, "\n", 2)[0]
+		if want := "## " + s.heading; firstLine != want {
+			t.Errorf("%s: the first line of a rendered refusal is %q, want %q", s.where, firstLine, want)
+		}
 	}
 }
 
@@ -141,27 +242,55 @@ func TestInstructionsRefusalVocabularyIsClosed(t *testing.T) {
 // TestInstructionsQueryRendererKeepsEveryColumnAndCell is paragraph 4's guard:
 // «сервер печатает каждую колонку каждой строки целиком и ничего в ячейках не
 // сокращает».
+//
+// THE FIXTURE IS WIDE AND TALL ON PURPOSE. It used to be three columns by three
+// rows, which is under any cap a renderer would plausibly grow: inserting
+// «if len(res.Columns) > 20 { res.Columns = res.Columns[:20] }» or the same for
+// rows left this green while the sentence became false. 40 × 200 is above both
+// shapes, so the claim is guarded on the two axes a cap can live on and not only
+// on the length of one cell.
 func TestInstructionsQueryRendererKeepsEveryColumnAndCell(t *testing.T) {
+	const cols, rows = 40, 200
 	long := strings.Repeat("Ы", 5000)
-	res := &onec.QueryResult{
-		Columns: []string{"КолонкаA", "КолонкаB", "КолонкаC"},
-		Rows: [][]any{
-			{"r1c1", "r1c2", long},
-			{"r2c1", "r2c2", "r2c3"},
-			{"r3c1", "r3c2", "r3c3"},
-		},
-		Total: 3,
+
+	res := &onec.QueryResult{Total: rows}
+	for c := 0; c < cols; c++ {
+		res.Columns = append(res.Columns, fmt.Sprintf("Колонка%02d", c))
 	}
+	for r := 0; r < rows; r++ {
+		row := make([]any, 0, cols)
+		for c := 0; c < cols; c++ {
+			row = append(row, fmt.Sprintf("r%03dc%02d", r, c))
+		}
+		res.Rows = append(res.Rows, row)
+	}
+	// The one oversized cell keeps the original claim («ничего в ячейках не
+	// сокращает») on the axis the wide fixture does not test.
+	res.Rows[rows-1][cols-1] = long
+
+	// THE EXPECTATION IS SNAPSHOTTED BEFORE THE CALL. formatQueryResult takes a
+	// POINTER, so a renderer that caps by reslicing (`r.Columns = r.Columns[:20]`)
+	// shortens the very slice the assertions below would range over. Measured: with
+	// the loops reading res.Columns after the call, a 20-column cap left this test
+	// green while the header it rendered was half the table.
+	wantColumns := append([]string(nil), res.Columns...)
+	wantCells := make([][]string, len(res.Rows))
+	for i, row := range res.Rows {
+		wantCells[i] = make([]string, len(row))
+		for j, cell := range row {
+			wantCells[i][j] = cell.(string)
+		}
+	}
+
 	out := formatQueryResult(res)
 
-	for _, col := range res.Columns {
+	for _, col := range wantColumns {
 		if !strings.Contains(out, col) {
 			t.Errorf("the rendered table drops the column %q", col)
 		}
 	}
-	for i, row := range res.Rows {
-		for j, cell := range row {
-			s := cell.(string)
+	for i, row := range wantCells {
+		for j, s := range row {
 			if !strings.Contains(out, s) {
 				t.Errorf("row %d column %d is missing from the rendered table (%d runes)", i, j, len([]rune(s)))
 			}
@@ -329,9 +458,17 @@ func TestInstructionsBSLNumbersAreDerived(t *testing.T) {
 	if !strings.Contains(instructions.Text, wantStr) {
 		t.Errorf("the text does not say %q; the corpus now answers «Стр» with %d entries", wantStr, str)
 	}
+	// DELIMITED, not a bare Contains. «все 180» is a prefix of «все 1800», so the
+	// bare containment this replaced was satisfied by a text claiming ten times the
+	// corpus, and by «все 18000» too. An extra trailing digit is exactly the typo a
+	// hand edit produces, and the sentence exists to make the model size a call.
 	wantAll := fmt.Sprintf("все %d", all)
-	if !strings.Contains(instructions.Text, wantAll) {
-		t.Errorf("the text does not say %q; the corpus now holds %d entries", wantAll, all)
+	allDelimited := regexp.MustCompile(`все ` + strconv.Itoa(all) + `(\D|$)`)
+	if !allDelimited.MatchString(instructions.Text) {
+		t.Errorf("the text does not say %q as a whole number; the corpus now holds %d entries", wantAll, all)
+	}
+	if strings.Contains(instructions.Text, wantAll+"0") {
+		t.Errorf("the text says %q, which shares a prefix with the true corpus size %d", wantAll+"0", all)
 	}
 
 	// CONTROL: the checks above are sensitive to the number and not merely to the
@@ -354,5 +491,280 @@ func TestInstructionsBSLNumbersAreDerived(t *testing.T) {
 	if !sizeInDesc.MatchString(desc) {
 		t.Errorf("bsl_syntax_help's description does not carry the corpus size %d, so it and the "+
 			"instruction text disagree about the same corpus:\n%s", all, desc)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// get_metadata_tree filtering (paragraph 3, the «список объектов» half).
+// ---------------------------------------------------------------------------
+
+// TestInstructionsFilteredCategoryDropsOnlyAttachedFiles drives the HANDLER,
+// which is the only place this defect is visible.
+//
+// The sentence used to read «а с ним вся категория целиком» and it was false at
+// the tip that shipped it: NewMetadataHandler calls filterNoise(tree) BEFORE the
+// «if input.Filter != ""» branch, so a *ПрисоединенныеФайлы object is gone before
+// the renderer the other guard trusts is ever reached, and the summary prints a
+// positive count that is short. The renderer-level guard could not see it:
+// TestInstructionsMetadataSummaryIsOneLinePerCategory calls formatMetadataTree
+// directly with a tree nothing filtered.
+//
+// «ПрисоединенныеФайлы» catalogs are ordinary БСП objects and this product's own
+// mock is required to emit one: cmd/mock-1c/main_test.go:TestHandleSubsystems
+// fails with «expected a noise object in allObjects» if it stops. So the shape
+// the sentence has to be true about is not hypothetical.
+func TestInstructionsFilteredCategoryDropsOnlyAttachedFiles(t *testing.T) {
+	// PREMISE: the filter really removes something, so the sentence has a subject.
+	if len(noiseSuffixes) == 0 {
+		t.Fatal("premise failed: noiseSuffixes is empty, so nothing is removed and the sentence " +
+			"describes a filter that does not exist")
+	}
+
+	// THE TEXT NAMES EVERY SUFFIX THE FILTER USES. Normalised on ё, because the list
+	// carries both spellings of one word and the text can only print one of them.
+	normalise := func(s string) string { return strings.ReplaceAll(strings.ToLower(s), "ё", "е") }
+	textNorm := normalise(instructions.Text)
+	for _, suffix := range noiseSuffixes {
+		if !strings.Contains(textNorm, normalise(suffix)) {
+			t.Errorf("the handler removes names ending in %q and the instruction text does not name it; "+
+				"a model told the answer holds the category's objects reads the absence as «no such object»",
+				suffix)
+		}
+	}
+	// Control: a suffix the filter does not use must be reported absent, so the loop
+	// above is reading the text and not agreeing with anything.
+	if strings.Contains(textNorm, normalise("ВложенныеФайлыЖурнала")) {
+		t.Fatal("control failed: the text contains a suffix nothing removes, so the containment test " +
+			"is not discriminating")
+	}
+
+	const category = "Справочники"
+	keep := []string{"Номенклатура", "Контрагенты"}
+	drop := "ЗаказПокупателя" + noiseSuffixes[0]
+
+	payload, err := json.Marshal(map[string][]string{category: append(append([]string{}, keep...), drop)})
+	if err != nil {
+		t.Fatalf("building the fixture: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metadata" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	handler := NewMetadataHandler(onec.NewClient(srv.URL, "", ""))
+
+	filtered, isErr, err := callTool(t, handler, `{"filter":"`+category+`"}`)
+	if err != nil || isErr {
+		t.Fatalf("the filtered call failed (isError=%v): %v\n%s", isErr, err, filtered)
+	}
+	for _, name := range keep {
+		if !strings.Contains(filtered, name) {
+			t.Errorf("the filtered answer dropped %q, which is an ordinary object of the category:\n%s",
+				name, filtered)
+		}
+	}
+	if strings.Contains(filtered, drop) {
+		t.Errorf("the filtered answer carries %q, so the handler no longer removes names ending in %q "+
+			"and the instruction text now says something the server does not do:\n%s",
+			drop, noiseSuffixes[0], filtered)
+	}
+
+	// AND THE SUMMARY COUNTS WHAT THE FILTERED CALL RETURNS. A count of three beside
+	// a list of two is the shape that makes a model report a missing object as a
+	// missing object rather than as a filtered one.
+	summary, isErr, err := callTool(t, handler, `{}`)
+	if err != nil || isErr {
+		t.Fatalf("the summary call failed (isError=%v): %v\n%s", isErr, err, summary)
+	}
+	row := ""
+	for _, line := range strings.Split(summary, "\n") {
+		if strings.Contains(line, `filter="`+category+`"`) {
+			row = line
+			break
+		}
+	}
+	if row == "" {
+		t.Fatalf("the summary has no row for %s, so the count below cannot be read:\n%s", category, summary)
+	}
+	if want := fmt.Sprintf("(%d)", len(keep)); !strings.Contains(row, want) {
+		t.Errorf("the summary row is %q, which does not carry the count %s the filtered answer returns",
+			row, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The limit parameter (paragraph 3, first sentence).
+// ---------------------------------------------------------------------------
+
+// instrLimitProperty returns a tool's declared «limit» property.
+func instrLimitProperty(t *testing.T, tool *mcp.Tool) (typ, description string) {
+	t.Helper()
+	raw, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatalf("marshalling the schema of %q: %v", tool.Name, err)
+	}
+	var shape struct {
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		t.Fatalf("decoding the schema of %q: %v", tool.Name, err)
+	}
+	p, ok := shape.Properties["limit"]
+	if !ok {
+		t.Fatalf("%q declares no property named limit, and the instruction text tells the model to "+
+			"pass one", tool.Name)
+	}
+	return p.Type, p.Description
+}
+
+// TestInstructionsLimitIsDeclaredAsACount is the anchor for «задаёт он число
+// результатов, а не размер ответа».
+//
+// WHY THE SENTENCE CHANGED. It used to read «и считает он результаты, а не
+// байты», which is a claim about WHO COUNTS AND HOW. For search_code that is Go;
+// for execute_query and get_event_log the counting is Лимит in
+// extension/src/HTTPServices/MCPService/Ext/Module.bsl, which is installed and
+// versioned separately from this binary and whose version check is a floor that
+// gates nothing. Three sentences were cut from this text for depending on BSL and
+// that clause was not, so the exclusion rule had an exception nobody wrote down.
+// The recast claim is about what the parameter DECLARES, and that is three input
+// schemas and three constants in this binary.
+//
+// It also pins the six numbers the schemas quote to the six constants that decide
+// behaviour. The instruction text made limit a first-class steer, which promotes
+// those descriptions from decoration to the model's only source for the ceiling,
+// and nothing in the module read any of the six.
+func TestInstructionsLimitIsDeclaredAsACount(t *testing.T) {
+	cases := []struct {
+		tool               *mcp.Tool
+		defaultVal, maxVal int
+	}{
+		{QueryTool(), defaultQueryLimit, maxQueryLimit},
+		{EventLogTool(), defaultEventLogLimit, maxEventLogLimit},
+		{SearchCodeTool(), defaultSearchLimit, maxSearchLimit},
+	}
+
+	// PREMISE: the sentence still names exactly these three tools. If it were
+	// rewritten to name a fourth, this table would be measuring the wrong set and
+	// would say so rather than agreeing.
+	const anchor = "Параметр limit есть только у "
+	start := strings.Index(instructions.Text, anchor)
+	if start < 0 {
+		t.Fatalf("the sentence beginning %q is gone from the text", anchor)
+	}
+	sentence := instructions.Text[start:]
+	if end := strings.Index(sentence, "."); end >= 0 {
+		sentence = sentence[:end]
+	}
+	if !strings.Contains(instructions.Text, "задаёт он число результатов, а не размер ответа") {
+		t.Errorf("the clause this guard anchors is gone; the sentence now reads %q.\n"+
+			"If it was rewritten, check first that the new claim is decidable in Go: what the far side "+
+			"counts limit in is decided in Module.bsl, which is versioned separately from this binary.",
+			sentence)
+	}
+
+	numbers := regexp.MustCompile(`\d+`)
+	for _, c := range cases {
+		if !strings.Contains(sentence, c.tool.Name) {
+			t.Errorf("the limit sentence no longer names %q, which declares a limit", c.tool.Name)
+		}
+
+		typ, desc := instrLimitProperty(t, c.tool)
+
+		// A COUNT, not a size. The declared JSON type is the machine half of the
+		// claim: a byte budget would be declared and described in bytes.
+		if typ != "integer" {
+			t.Errorf("%s declares limit as %q; the text tells the model it is a number of results",
+				c.tool.Name, typ)
+		}
+		if !strings.Contains(desc, "Максимальное количество") {
+			t.Errorf("%s describes limit as %q, which does not tell the model it bounds a COUNT",
+				c.tool.Name, desc)
+		}
+
+		// AND THE TWO NUMBERS IN THAT DESCRIPTION ARE THE TWO CONSTANTS. The model
+		// reads the ceiling out of this sentence and out of nowhere else, and nothing
+		// in this module used to read any of the six.
+		got := numbers.FindAllString(desc, -1)
+		if len(got) != 2 {
+			t.Errorf("%s's limit description carries %d numbers, want the default and the maximum: %q",
+				c.tool.Name, len(got), desc)
+			continue
+		}
+		want := []string{strconv.Itoa(c.defaultVal), strconv.Itoa(c.maxVal)}
+		if got[0] != want[0] || got[1] != want[1] {
+			t.Errorf("%s tells the model limit defaults to %s and caps at %s; the constants this binary "+
+				"clamps with are %s and %s", c.tool.Name, got[0], got[1], want[0], want[1])
+		}
+		// Control: the comparison is reading the numbers and not the wording around
+		// them, so an off-by-one must disagree.
+		if got[1] == strconv.Itoa(c.maxVal+1) {
+			t.Fatalf("control failed: %s's ceiling matched %d as well as %d", c.tool.Name, c.maxVal+1, c.maxVal)
+		}
+	}
+
+	// AND THE CLAMP IS A COUNT IN GO TOO. clampLimit is what every one of the three
+	// handlers applies before the value leaves this binary.
+	if got := clampLimit(maxQueryLimit*10, defaultQueryLimit, maxQueryLimit); got != maxQueryLimit {
+		t.Errorf("clampLimit does not cap at the maximum: got %d, want %d", got, maxQueryLimit)
+	}
+	if got := clampLimit(0, defaultQueryLimit, maxQueryLimit); got != defaultQueryLimit {
+		t.Errorf("clampLimit does not default: got %d, want %d", got, defaultQueryLimit)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// get_event_log's wire type (paragraph 5).
+// ---------------------------------------------------------------------------
+
+// TestInstructionsEventLogResultCannotCarryTruncation is the static half of
+// «Пометки об усечении в этом ответе нет».
+//
+// The renderer guard proves today's renderer prints no note. This one proves the
+// wire type cannot grow the field a note would be rendered from: onec.QueryResult
+// carries Truncated and tools/query.go renders «> Результат усечён…» off it, so
+// the shape exists in this codebase and the day it is copied onto EventLogResult
+// the sentence stops being true.
+func TestInstructionsEventLogResultCannotCarryTruncation(t *testing.T) {
+	fields := func(v any) map[string]bool {
+		out := map[string]bool{}
+		rt := reflect.TypeOf(v)
+		for i := 0; i < rt.NumField(); i++ {
+			out[rt.Field(i).Name] = true
+		}
+		return out
+	}
+
+	// Control: the same reflection over the type that DOES carry the flag must
+	// report it, so a walk that found nothing cannot report agreement.
+	if !fields(onec.QueryResult{})["Truncated"] {
+		t.Fatal("control failed: the reflection does not see onec.QueryResult.Truncated, so a clean " +
+			"report about EventLogResult means nothing")
+	}
+
+	got := fields(onec.EventLogResult{})
+	want := map[string]bool{"Events": true, "Total": true}
+	if len(got) != len(want) {
+		t.Errorf("onec.EventLogResult now holds %d fields, want %d: %v", len(got), len(want), got)
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("onec.EventLogResult no longer holds %s", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("onec.EventLogResult grew the field %s. If it can carry truncation, the sentence "+
+				"«Пометки об усечении в этом ответе нет» is now a promise about a renderer rather than "+
+				"about a wire type, and the text has to say so.", name)
+		}
 	}
 }

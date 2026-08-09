@@ -3,7 +3,15 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -246,6 +254,88 @@ func TestInstructionsLimitSentenceMatchesTheSchemas(t *testing.T) {
 	}
 }
 
+// TestInstructionsEventLogPeriodParametersExist pins the remedy paragraph 5 hands
+// the model.
+//
+// WHY THE REMEDY IS THERE AT ALL. The sentence it replaced told the model to
+// compare the number of shown records against «Всего» and conclude from the two
+// whether anything had been dropped. That inference is invalid:
+// ЖурналРегистрацииPOST in the bundled extension inserts a default ДатаНачала
+// BEFORE ВыгрузитьЖурналРегистрации and counts ВсегоЗаписей after it, so «Всего»
+// counts a window rather than the log. Asked «were there errors last month», a
+// model applying the check the server told it to apply sees 3 of 3 and reports
+// three errors about a period it never read. The comparison is gone; naming the
+// two parameters is what is left, and it is only a remedy while they exist.
+//
+// NOTHING HERE TYPES THE PARAMETER NAMES. They are lifted out of the sentence,
+// because the failure this guards against is the text naming a property the
+// schema does not declare, and a test that spelled them itself would agree with
+// the schema while the text disagreed with both.
+func TestInstructionsEventLogPeriodParametersExist(t *testing.T) {
+	const anchor = "задавай его параметрами "
+	start := strings.Index(instructions.Text, anchor)
+	if start < 0 {
+		t.Fatalf("the clause beginning %q is gone from the text; if the remedy was rewritten, re-aim "+
+			"this guard at the new wording rather than deleting it", anchor)
+	}
+
+	// The paragraph the clause lives in, so the tool it belongs to is read rather
+	// than assumed.
+	paraStart := strings.LastIndex(instructions.Text[:start], "\n\n")
+	if paraStart < 0 {
+		paraStart = 0
+	}
+	paraEnd := strings.Index(instructions.Text[start:], "\n\n")
+	if paraEnd < 0 {
+		paraEnd = len(instructions.Text) - start
+	}
+	paragraph := instructions.Text[paraStart : start+paraEnd]
+
+	clause := instructions.Text[start+len(anchor):]
+	if end := strings.Index(clause, "."); end >= 0 {
+		clause = clause[:end]
+	}
+	params := regexp.MustCompile(`[a-z][a-z0-9_]*`).FindAllString(clause, -1)
+
+	// PREMISE: the clause really named parameters. An empty list agrees with any
+	// schema at all.
+	if len(params) == 0 {
+		t.Fatalf("no parameter name was lifted out of %q", clause)
+	}
+
+	session, _ := instructionsSession(t)
+	listed := listToolsForInstructions(t, session)
+
+	var owner *mcp.Tool
+	for _, tool := range listed {
+		if strings.Contains(paragraph, tool.Name) {
+			if owner != nil {
+				t.Fatalf("the paragraph names both %q and %q, so which schema the parameters belong to "+
+					"is ambiguous", owner.Name, tool.Name)
+			}
+			owner = tool
+		}
+	}
+	if owner == nil {
+		t.Fatalf("the paragraph carrying %q names no live tool, so there is no schema to check the "+
+			"parameters against:\n%s", anchor, paragraph)
+	}
+
+	props := schemaProperties(t, owner)
+	for _, p := range params {
+		if _, ok := props[p]; !ok {
+			t.Errorf("the text tells the model to pass %q to %s, and that schema declares no such "+
+				"property; nothing rejects a call before the handler, so the argument would be dropped "+
+				"in silence", p, owner.Name)
+		}
+		// Control: the lookup is a real key read, so a hit above is the schema and
+		// not the map answering yes to everything.
+		if _, ok := props[p+"x"]; ok {
+			t.Fatalf("control failed: %s's schema claims to declare %q", owner.Name, p+"x")
+		}
+	}
+}
+
 // TestInstructionsDumpParagraphMatchesTheRegistry pins the last paragraph: the
 // pair it tells the model to look for is exactly the pair that appears with a dump
 // index and disappears without one.
@@ -339,4 +429,160 @@ func truncateForMessage(s string) string {
 		return s
 	}
 	return s[:limit] + "..."
+}
+
+// ---------------------------------------------------------------------------
+// The wiring.
+// ---------------------------------------------------------------------------
+
+// newServerSite is one mcp.NewServer call found in non-test source.
+type newServerSite struct {
+	where           string
+	hasInstructions bool
+}
+
+// instructionsWiring walks a tree of Go source and answers two questions with one
+// parse: which non-test files read instructions.Text, and does every production
+// construction of an MCP server pass it.
+//
+// It takes root as a parameter so the controls below can aim it at a fixture and
+// show it reporting what is there rather than agreeing with everything.
+func instructionsWiring(root string, includeTests bool) (refs []string, servers []newServerSite, err error) {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "vendor", ".git", "node_modules", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if !includeTests && strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			return fmt.Errorf("parsing %s: %w", path, perr)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.SelectorExpr:
+				if ident, ok := node.X.(*ast.Ident); ok && ident.Name == "instructions" && node.Sel.Name == "Text" {
+					refs = append(refs, fset.Position(node.Pos()).String())
+				}
+			case *ast.CallExpr:
+				sel, ok := node.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "NewServer" {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if !ok || pkg.Name != "mcp" {
+					return true
+				}
+				site := newServerSite{where: fset.Position(node.Pos()).String()}
+				if len(node.Args) >= 2 {
+					site.hasInstructions = compositeCarriesInstructions(node.Args[1])
+				}
+				servers = append(servers, site)
+			}
+			return true
+		})
+		return nil
+	})
+	sort.Strings(refs)
+	sort.Slice(servers, func(i, j int) bool { return servers[i].where < servers[j].where })
+	return refs, servers, err
+}
+
+// compositeCarriesInstructions reports whether an mcp.NewServer options argument
+// is a composite literal with an Instructions key.
+func compositeCarriesInstructions(arg ast.Expr) bool {
+	if unary, ok := arg.(*ast.UnaryExpr); ok {
+		arg = unary.X
+	}
+	lit, ok := arg.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Instructions" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestInstructionsAreWiredExactlyOnce is two failures in one walk.
+//
+// ONE READER. Conditioning any behaviour on the string makes two clients running
+// the same binary get different answers, invisibly, because MCP instructions are
+// advisory and a client MAY drop them: the SDK's own doc comment on
+// InitializeResult.Instructions calls the field a hint that MAY be added to the
+// system prompt, so a handler branching on it branches on the client.
+//
+// ONE CONSTRUCTOR, AND IT PASSES THE FIELD. A second entry point calling
+// mcp.NewServer without ServerOptions re-enters the pre-commit wire shape on one
+// path while the other stays correct and hides it.
+func TestInstructionsAreWiredExactlyOnce(t *testing.T) {
+	const root = ".."
+
+	refs, servers, err := instructionsWiring(root, false)
+	if err != nil {
+		t.Fatalf("walking the module: %v", err)
+	}
+
+	// PREMISE plus control: the walk reads Go at all. The same walk including tests
+	// must find strictly more references, or it is finding nothing and saying so.
+	withTests, _, err := instructionsWiring(root, true)
+	if err != nil {
+		t.Fatalf("control walk: %v", err)
+	}
+	if len(withTests) <= len(refs) {
+		t.Fatalf("control failed: the walk found %d references to instructions.Text in non-test source "+
+			"and %d including tests; the guards themselves read the constant, so this walk is not "+
+			"reading Go", len(refs), len(withTests))
+	}
+
+	if len(refs) != 1 {
+		t.Errorf("instructions.Text has %d non-test references, want exactly one (the wiring in "+
+			"server.New): %v\nA handler that reads the text conditions the server's behaviour on a "+
+			"value the client is free to ignore.", len(refs), refs)
+	}
+
+	if len(servers) == 0 {
+		t.Fatal("premise failed: the walk found no mcp.NewServer call in non-test source, so the " +
+			"assertion below is vacuous")
+	}
+	for _, s := range servers {
+		if !s.hasInstructions {
+			t.Errorf("%s constructs an MCP server without an Instructions field; that server answers "+
+				"initialize with no instructions at all", s.where)
+		}
+	}
+
+	// Control: the checker really can report a bare constructor. Planted rather than
+	// asserted, because "every site passes the field" is exactly what a walk that
+	// found nothing also reports.
+	fixture := t.TempDir()
+	planted := filepath.Join(fixture, "planted.go")
+	if err := os.WriteFile(planted, []byte("package planted\n\nfunc F() { mcp.NewServer(impl, nil) }\n"), 0o600); err != nil {
+		t.Fatalf("planting the control: %v", err)
+	}
+	_, plantedServers, err := instructionsWiring(fixture, false)
+	if err != nil {
+		t.Fatalf("control walk over the fixture: %v", err)
+	}
+	if len(plantedServers) != 1 || plantedServers[0].hasInstructions {
+		t.Fatalf("control failed: the walk reported %v for a planted mcp.NewServer(impl, nil)", plantedServers)
+	}
 }

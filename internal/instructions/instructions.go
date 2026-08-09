@@ -21,6 +21,20 @@
 // window, what the truncated flag means, or that a parameter string becomes a
 // Дата: all three are decided in Module.bsl, none of them in this binary.
 //
+// AND THE RULE APPLIES TO WHAT A SENTENCE DEPENDS ON, NOT ONLY TO WHAT IT SAYS.
+// The first version of this text cut the seven-day window and kept the sentence
+// that only made sense while the window was absent: «сравнивай число показанных
+// записей с «Всего» сам». Nothing in that sentence names BSL, and its whole
+// value rested on a BSL fact. ЖурналРегистрацииPOST inserts the default
+// ДатаНачала BEFORE ВыгрузитьЖурналРегистрации and takes ВсегоЗаписей after it,
+// so «Всего» counts a window rather than the log, and a model told to read the
+// two numbers as a completeness check reports a period it never read. The
+// comparison is gone; what is left says where the number comes from and stops.
+// The same reading removed one more dependency: «считает он результаты, а не
+// байты» said how the far side counts limit, which is Лимит in Module.bsl for
+// two of the three tools. It now says what the parameter DECLARES, which is
+// three input schemas in this binary.
+//
 // NO BARE PROHIBITIONS. An over-broad "do not call X" fires on every session and
 // suppresses calls the user needed, and nothing in this product can report a call
 // that was never made: there is no telemetry anywhere in the tree. Every steer
@@ -45,11 +59,11 @@ const Text = `Сервер mcp-1c читает конфигурацию и да�
 
 Ответ, первая строка которого говорит, что запрошенное не выполнено, не получено или не прочитано, это отказ инструмента, а не пустой результат. Он говорит о вызове, а не о содержимом конфигурации.
 
-Параметр limit есть только у execute_query, search_code и get_event_log, и считает он результаты, а не байты. У остальных инструментов ограничить размер ответа нечем, поэтому сужай вызов аргументами заранее. У get_metadata_tree для этого есть filter: без него приходит короткая сводка, по строке на категорию, а с ним вся категория целиком. Значение filter бери из сводки, где оно напечатано как filter="...".
+Параметр limit есть только у execute_query, search_code и get_event_log, и задаёт он число результатов, а не размер ответа. У остальных инструментов ограничить размер ответа нечем, поэтому сужай вызов аргументами заранее. У get_metadata_tree для этого есть filter: без него приходит короткая сводка, по строке на категорию, а с ним список объектов категории, из которого сервер убирает имена, оканчивающиеся на ПрисоединенныеФайлы. Значение filter бери из сводки, где оно напечатано как filter="...".
 
 В execute_query перечисляй нужные поля вместо ВЫБРАТЬ *: сервер печатает каждую колонку каждой строки целиком и ничего в ячейках не сокращает, так что ширину строки не ограничивает ничто.
 
-Когда записи есть, get_event_log печатает их, а в конце отдельную строку «Всего». Пометки об усечении в этом ответе нет, поэтому сравнивай число показанных записей с «Всего» сам.
+Когда записи есть, get_event_log печатает их, а в конце отдельную строку «Всего». Пометки об усечении в этом ответе нет. Число в этой строке приходит от 1С вместе с записями, и что оно посчитало, решает сторона 1С: совпадение его с числом показанных записей полноты журнала не означает. Нужен точный период, задавай его параметрами start_date и end_date.
 
 В bsl_syntax_help поиск идёт подстрокой по имени функции: «Стр» возвращает 28 полных статей вместо одной, а пустой query возвращает весь справочник, все 180. Знаешь имя целиком, передавай его целиком.
 
