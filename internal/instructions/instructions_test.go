@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -24,6 +25,29 @@ import (
 // outright on an emptied constant: it requires one distinctive clause per
 // sentence and requires the table to be exactly as long as the sentence count it
 // derives from the text.
+
+// firstDuplicate reports the first entry this slice holds twice.
+//
+// EVERY COUNT PIN IN THIS FILE IS A FLOOR ON len(), AND len() COUNTS ENTRIES RATHER
+// THAN DISTINCT ONES. So each of those floors can be met by a list that was narrowed
+// and then padded back to length with a copy of an entry it already holds, and the
+// arithmetic the floor reads stays correct while the list it guards got shorter.
+// Measured at the parent commit on the list where it matters most: dropping the first
+// entry of aiAuthorshipShapes and repeating the next one in its place left the whole
+// package green.
+//
+// A duplicate is dead weight in every one of these lists, so rejecting it costs
+// nothing and makes each floor count what its message already claims it counts.
+func firstDuplicate(items []string) (string, bool) {
+	seen := make(map[string]bool, len(items))
+	for _, item := range items {
+		if seen[item] {
+			return item, true
+		}
+		seen[item] = true
+	}
+	return "", false
+}
 
 // dashRunes is the WRITTEN dash set, kept for one job only: it is the subset the
 // derived scan below has to contain. The scan itself is derived from
@@ -250,6 +274,26 @@ func TestTextCarriesNoDash(t *testing.T) {
 		t.Fatalf("dashRunes holds %d entries and held 7 when this guard was written; the superset check "+
 			"below is only as wide as this list, and the derived table is only an upgrade while the "+
 			"list it replaced is still there to compare against", len(dashRunes))
+	}
+
+	// AND THE SEVEN ARE SEVEN DISTINCT RUNES, so the floor above cannot be met by
+	// padding. What a duplicate costs here is NARROWER than on the other lists in this
+	// file, and deliberately so: this list is not the ban. The ban is the derived table,
+	// and no edit to dashRunes can reach it. What a duplicate destroys is the EVIDENCE
+	// that the derived table covers every rune the written list held, which is the one
+	// job the comment above gives this list.
+	//
+	// REPORTED AND NOT FATAL, here and at every other duplicate check in this file. A
+	// duplicate does not make the assertions below VACUOUS the way an emptied list does,
+	// it only makes them narrower, so stopping the test on one would suppress the very
+	// scan the list exists to run and answer a hygiene defect with a missing verdict.
+	written := make([]string, 0, len(dashRunes))
+	for _, r := range dashRunes {
+		written = append(written, string(r))
+	}
+	if dup, found := firstDuplicate(written); found {
+		t.Errorf("dashRunes lists U+%04X twice; the floor above counts entries and not distinct runes, so "+
+			"the superset check compares fewer runes than the length claims", []rune(dup)[0])
 	}
 
 	// PREMISE: the derived set is a strict superset of the written one, which is
@@ -754,7 +798,7 @@ func TestTextAnchorOwnersNameRealTests(t *testing.T) {
 			"literal, so it is grepping rather than reading declarations")
 	}
 
-	resolved := 0
+	resolved := map[string]bool{}
 	for _, a := range textAnchors {
 		if strings.HasPrefix(a.owner, noRuntimeGuard) {
 			if strings.TrimSpace(strings.TrimPrefix(a.owner, noRuntimeGuard)) == "" {
@@ -776,7 +820,7 @@ func TestTextAnchorOwnersNameRealTests(t *testing.T) {
 			continue
 		}
 		for _, name := range names {
-			resolved++
+			resolved[pkg+"/"+name] = true
 			if !byPkg[pkg][name] {
 				t.Errorf("the anchor %q names %s/%s as its owner, and that package declares no such test.\n"+
 					"Either the guard was renamed, in which case re-aim the column at the new name, or it "+
@@ -786,14 +830,26 @@ func TestTextAnchorOwnersNameRealTests(t *testing.T) {
 		}
 	}
 
-	// PIN, shrink-only. Twelve owner references resolved when this guard was
-	// written. Retiring one to the noRuntimeGuard form is how a sentence quietly
-	// loses its guard while every assertion above stays green, and it is exactly
-	// the cheapest repair for a red from the loop above.
-	if resolved < 12 {
-		t.Errorf("the owner column resolved %d test names and resolved 12 when this guard was written.\n"+
+	// PIN, shrink-only, over DISTINCT tests. Retiring one owner to the noRuntimeGuard
+	// form is how a sentence quietly loses its guard while every assertion above stays
+	// green, and it is exactly the cheapest repair for a red from the loop above.
+	//
+	// ELEVEN AND NOT TWELVE, AND COUNTED DISTINCT. The owner column holds twelve
+	// references and they name eleven functions: the event-log truncation guard is
+	// claimed by two sentences, so an occurrence count double-counts it. That is also
+	// what made the occurrence count paddable. Deleting a guard, demoting its sentence
+	// to the noRuntimeGuard form and adding a name a SIBLING CELL ALREADY CARRIES put
+	// the total back to twelve and left the package green, while the second mention
+	// resolves to the same function and therefore protects nothing. Counted distinct,
+	// the padding adds nothing and the deletion is what the number reports.
+	if len(resolved) < 11 {
+		t.Errorf("the owner column resolves %d distinct tests and resolved 11 when this guard was "+
+			"written.\n"+
 			"An owner demoted to %q is a sentence that lost its guard, and that has to be a decision "+
-			"somebody writes down here rather than the way a red gets silenced.", resolved, noRuntimeGuard)
+			"somebody writes down here rather than the way a red gets silenced.\n"+
+			"Naming an already-claimed test in a second cell does not raise this number, because it is "+
+			"the same function and it guards the second sentence no better for being mentioned twice.",
+			len(resolved), noRuntimeGuard)
 	}
 }
 
@@ -1116,6 +1172,21 @@ func TestTextCarriesNoEditionVocabulary(t *testing.T) {
 			"is only as wide as this list, and this text ships to anyone", len(editionVocabulary))
 	}
 
+	// AND THE ELEVEN ARE ELEVEN DISTINCT TERMS, so the floor cannot be met by padding: a
+	// term deleted to silence a red and replaced by a copy of another term leaves the
+	// arithmetic intact and the ban one term narrower.
+	//
+	// THIS LIST IS NOT PINNED MEMBER BY MEMBER, and aiAuthorshipShapes below is. The
+	// asymmetry is not about the shape of the two lists, which is identical; it is about
+	// what a miss costs. An edition term that reaches the constant is a sentence in a
+	// string this file already reads end to end, and it is revocable by the next
+	// release. A leaked authorship trace in a public repository is not revocable at all,
+	// which is what buys the second spelling there and does not buy it here.
+	if dup, found := firstDuplicate(editionVocabulary); found {
+		t.Errorf("editionVocabulary lists %q twice; the floor above counts entries and not distinct "+
+			"terms, so the scan is narrower than the length claims", dup)
+	}
+
 	lower := strings.ToLower(Text)
 	for _, term := range editionVocabulary {
 		// Positive control, one per entry, in both cases.
@@ -1163,6 +1234,44 @@ var aiAuthorshipShapes = []string{
 	"🤖",
 }
 
+// requiredAuthorshipShapes are the entries of aiAuthorshipShapes that must never
+// leave it. They are spelled here a SECOND TIME, on purpose.
+//
+// A PIN DERIVED FROM A LIST CANNOT NOTICE A DELETION FROM THAT LIST. Whatever the pin
+// reads, the edit that deletes an entry moves the pin with it. So a pin has to be a
+// fact about the list held somewhere the list does not supply, and the floor below is
+// exactly that: one number, written down independently. It is also far too coarse.
+// Measured at the parent commit: dropping the first entry and repeating the next one
+// in its place kept the count at ten and left the whole package green, so the only
+// automated AI-authorship guard in this repository was narrowed by an edit that
+// touched nothing else and reddened nothing.
+//
+// The next fact up from the size is the MEMBERSHIP, and pinning membership means
+// writing the members down where the list cannot supply them. That is the whole
+// mechanism, and the duplication is its price rather than an accident.
+//
+// WHY THIS LIST AND NOT THE OTHERS IN THIS FILE. Community carries no AI-authorship
+// trace at all, the rule is absolute, and a trace pushed to a public repository is not
+// revocable by a later commit. Every other list here guards something a release can
+// undo. That asymmetry is what pays for the second spelling.
+//
+// GROWTH STAYS FREE. Nothing counts this list against that one and nothing here is a
+// ceiling: a shape added to aiAuthorshipShapes alone widens the scan and touches no
+// pin, which is the property that matters, because adding a needle is always safe.
+// Only REMOVAL now has to be written twice, and being written twice is the point.
+var requiredAuthorshipShapes = []string{
+	"co-authored-by:",
+	"generated with",
+	"generated by",
+	"generated using",
+	"as an ai",
+	"ai-generated",
+	"ai assistant",
+	"подготовлено с",
+	"сгенерировано",
+	"🤖",
+}
+
 // TestSourceFileCarriesNoAIAuthorshipTrace reads the FILE, not the constant.
 //
 // More than half of instructions.go is comment that no other test reads, and the
@@ -1193,6 +1302,43 @@ func TestSourceFileCarriesNoAIAuthorshipTrace(t *testing.T) {
 	if len(aiAuthorshipShapes) < 10 {
 		t.Fatalf("aiAuthorshipShapes holds %d entries and held 10 when this guard was written; the scan "+
 			"is only as wide as this list", len(aiAuthorshipShapes))
+	}
+
+	// AND THE TEN ARE TEN DISTINCT SHAPES, so the floor cannot be met by padding.
+	// REPORTED AND NOT FATAL, so that the membership loop below still runs and still
+	// names the shape that went missing: the duplicate is the symptom, the deletion is
+	// the defect, and stopping here would report only the symptom.
+	if dup, found := firstDuplicate(aiAuthorshipShapes); found {
+		t.Errorf("aiAuthorshipShapes lists %q twice; the floor above counts entries and not distinct "+
+			"shapes, so the scan is narrower than the length claims", dup)
+	}
+
+	// PREMISE: the requirement is populated and free of duplicates itself. Emptied, the
+	// membership loop below runs zero assertions and this guard falls back to the floor
+	// above, which is the one that was measured too coarse.
+	if len(requiredAuthorshipShapes) < 10 {
+		t.Fatalf("requiredAuthorshipShapes holds %d entries and held 10 when this guard was written; it "+
+			"is the half of this guard that notices a shape being REMOVED rather than the list merely "+
+			"being shortened", len(requiredAuthorshipShapes))
+	}
+	if dup, found := firstDuplicate(requiredAuthorshipShapes); found {
+		t.Errorf("requiredAuthorshipShapes lists %q twice, so it requires fewer shapes than it claims",
+			dup)
+	}
+
+	// THE SET IS PINNED, NOT ITS SIZE. This is the assertion a SUBSTITUTION fails.
+	// Removing a shape reddens here NAMING the shape, whatever was put in its place to
+	// keep the arithmetic, and that is the difference between this and the floor above.
+	for _, required := range requiredAuthorshipShapes {
+		if !slices.Contains(aiAuthorshipShapes, required) {
+			t.Errorf("aiAuthorshipShapes no longer holds the shape %q, and this is the only automated "+
+				"AI-authorship guard in this repository.\n"+
+				"Community carries no such trace, the rule is absolute, and a trace pushed to a public "+
+				"repository is not revocable, so this list may GROW freely and may not shrink.\n"+
+				"If the shape is genuinely obsolete rather than inconvenient, drop it from "+
+				"requiredAuthorshipShapes in the same commit and record there what now catches what it "+
+				"used to catch.", required)
+		}
 	}
 
 	lower := strings.ToLower(string(raw))
@@ -1270,22 +1416,55 @@ func TestTextCannotForgeAServerBlock(t *testing.T) {
 
 	// PREMISE: the control set is populated. Emptied, nothing here ever calls
 	// forgedBlockLine on text that carries a forgery, so a detector narrowed to
-	// find nothing reports clean and looks identical to a clean text.
+	// find nothing reports clean and looks identical to a clean text. Measured: with
+	// this list emptied the whole package stays green.
 	//
-	// AND THE ROWS ARE NOT INTERCHANGEABLE. Measured over the four: three carry a
-	// heading and are caught by the prefix arm alone, so exactly ONE of them, the
-	// disconnection notice, is the entire exercise clientFramingPhrases ever gets.
-	// Dropping that row would leave the phrase arm tested by nothing while three
-	// controls went on passing. Measured: with this list emptied the whole package
-	// stays green.
+	// THE ROWS ARE INTERCHANGEABLE NOW, AND THEY WERE NOT. Three of the four carry a
+	// heading and are caught by the prefix arm alone, so until the per-phrase loop below
+	// existed, exactly ONE row, the disconnection notice, was the entire exercise
+	// clientFramingPhrases ever got. A COUNT PIN CANNOT EXPRESS THAT: it says four rows
+	// are present, not that one particular row is the only thing reaching an arm.
+	// Measured at the parent commit, swapping that row for a fourth heading and then
+	// emptying clientFramingPhrases outright left the whole package green.
+	//
+	// The repair is not to pin the row. It is to stop the phrase arm depending on a
+	// property of the control set that nothing states, which is what the loop below
+	// does, and only then is a count over these rows an honest measure of them.
 	if len(forgeries) < 4 {
 		t.Fatalf("the forgery control set holds %d entries and held 4 when this guard was written; the "+
 			"detector is only shown to work on the shapes this list carries", len(forgeries))
+	}
+	if dup, found := firstDuplicate(forgeries); found {
+		t.Errorf("the forgery control set holds %q twice; the floor above counts entries and not "+
+			"distinct shapes, so it exercises fewer than the length claims", dup)
 	}
 
 	for _, forgery := range forgeries {
 		if i, line := forgedBlockLine(Text + forgery); i < 0 {
 			t.Fatalf("control failed: the scan does not see the forged block %q (line %q)", forgery, line)
+		}
+	}
+
+	// POSITIVE CONTROL, ONE PER FRAMING PHRASE, ON A LINE THE HEADING ARM CANNOT CLAIM.
+	// The probe carries no heading marker, so the phrase arm is the only arm that can
+	// match it, and the assertion is that forgedBlockLine returns THAT line rather than
+	// merely returning something: a match found elsewhere in the text would otherwise
+	// read as a phrase being exercised when it is not.
+	if len(clientFramingPhrases) < 4 {
+		t.Fatalf("clientFramingPhrases holds %d entries and held 4 when this guard was written; the "+
+			"phrase arm is only as wide as this list", len(clientFramingPhrases))
+	}
+	if dup, found := firstDuplicate(clientFramingPhrases); found {
+		t.Errorf("clientFramingPhrases holds %q twice; the floor above counts entries and not distinct "+
+			"phrases, so the phrase arm matches fewer than the length claims", dup)
+	}
+	for _, phrase := range clientFramingPhrases {
+		probe := "probe line " + phrase
+		if _, line := forgedBlockLine(Text + "\n" + probe); line != probe {
+			t.Errorf("control failed: the framing phrase %q is exercised by nothing.\n"+
+				"forgedBlockLine returned %q for a text carrying that phrase on a line of its own, and "+
+				"that line begins with no heading marker, so the phrase arm is the only arm that could "+
+				"have matched it.", phrase, line)
 		}
 	}
 
