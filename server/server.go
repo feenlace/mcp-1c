@@ -2,6 +2,7 @@ package server
 
 import (
 	"github.com/feenlace/mcp-1c/dump"
+	"github.com/feenlace/mcp-1c/internal/instructions"
 	"github.com/feenlace/mcp-1c/onec"
 	"github.com/feenlace/mcp-1c/prompts"
 	"github.com/feenlace/mcp-1c/tools"
@@ -16,7 +17,13 @@ func New(version string, onecClient *onec.Client, dumpIndex *dump.Index) *mcp.Se
 			Name:    "mcp-1c",
 			Version: version,
 		},
-		nil,
+		// Instructions is server-level prose the model reads once, in the
+		// initialize result. It is passed HERE and can be passed nowhere else:
+		// mcp/server.go:NewServer copies the options value and then drops the
+		// caller's pointer (`options = nil // prevent reuse`), the field lives on
+		// ServerOptions rather than on Server, and the only read of it is the
+		// InitializeResult built by mcp/server.go:ServerSession.initialize.
+		&mcp.ServerOptions{Instructions: instructions.Text},
 	)
 	// dumpDir is the offline configuration dump directory, when one is present.
 	// Several tools can answer from the dump instead of the live 1C extension; an
