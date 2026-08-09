@@ -25,10 +25,13 @@ package tools
 //     because the wrapper is applied only in NewSearchCodeHandler and
 //     NewReloadDumpHandler. Nothing here fails if a ninth tool is later given the
 //     index and not the wrapper.
-//   - reload_dump's ERROR path is pinned through the wrapper directly, not through
-//     a real failing Reload on a frozen cache: producing one needs a dump that
-//     changes under a frozen cache, and that state has no service at all, so there
-//     is no handler call left to decorate.
+//   - reload_dump's ERROR path is pinned HERE through the wrapper directly, with a
+//     stub, and not through a real failing Reload. It used to say a real one needed
+//     a dump that changes under a frozen cache, which is not so: dump.Index.Reload
+//     walks the dump directory for a signature BEFORE it touches the cache, so a
+//     dump directory that is gone fails there and the frozen cache is never
+//     reached. index_notice_refusal_test.go drives exactly that, because the
+//     ordering it measures only exists on a real rendered refusal.
 //   - The RECOVERY of a lost claim (the entry comes back and the notice stops) is
 //     pinned in dump/lost_claim_test.go, on the state, and not again here: this
 //     layer's whole job is to turn a state into a sentence, and it does not know
@@ -130,6 +133,16 @@ func noticeFreeze(t *testing.T, root string) {
 // the cache is made unwritable first, so the open has to take the claim-less route.
 func noticeIndex(t *testing.T, freeze bool) *dump.Index {
 	t.Helper()
+	idx, _ := noticeIndexAndDump(t, freeze)
+	return idx
+}
+
+// noticeIndexAndDump is the same index, with the dump directory handed back as
+// well. A caller that has to make an index-backed tool REFUSE needs it: reload_dump
+// takes no arguments at all, so the only way to make it fail is to take the dump
+// away, and nothing else exposes where it is.
+func noticeIndexAndDump(t *testing.T, freeze bool) (*dump.Index, string) {
+	t.Helper()
 	dumpDir := noticeDump(t)
 	cacheDir := t.TempDir()
 
@@ -158,7 +171,7 @@ func noticeIndex(t *testing.T, freeze bool) *dump.Index {
 	if !freeze && idx.UnprotectedReason() != "" {
 		t.Fatalf("the writable cache produced an unprotected index: %q", idx.UnprotectedReason())
 	}
-	return idx
+	return idx, dumpDir
 }
 
 // callSearch runs search_code through the real handler and returns its body.

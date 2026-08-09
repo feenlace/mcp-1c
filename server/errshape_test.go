@@ -584,30 +584,54 @@ func TestSearchCodeFailureIsAToolResultNotAProtocolError(t *testing.T) {
 	}
 	assertFrameIsError(t, frame)
 	text := frameText(t, frame)
-	if !strings.HasPrefix(text, "> ВНИМАНИЕ") {
-		t.Errorf("the index-protection notice is not the first thing in the failure:\n%s", text)
+	if !strings.HasPrefix(text, "## Поиск по выгрузке не выполнен") {
+		t.Errorf("the failure does not open with the search_code heading:\n%s", text)
 	}
-	if !strings.Contains(text, "## Поиск по выгрузке не выполнен") {
-		t.Errorf("the failure is not under the search_code heading:\n%s", text)
+	// AND THE NOTICE IS STILL IN IT. Both facts together are what says the failure
+	// went through both wrappers: the heading is WithToolErrors, the notice is
+	// withIndexProtectionNotice, and either one missing is a broken decoration.
+	if !strings.Contains(text, "индекс выгрузки отдаётся без защиты") {
+		t.Errorf("the index-protection notice is missing from the failure:\n%s", text)
 	}
 }
 
-// TestSearchCode_NoticeStaysFirstOnAFailedCall pins the decorator NESTING ORDER.
+// TestSearchCode_RefusalOpensWithItsHeading pins WHAT THE FIRST LINE OF A REFUSAL
+// IS, over a real session, and it is the reversal of what this test asserted
+// before.
 //
-// Both orders build and only one is correct. With the notice wrapper on the
-// OUTSIDE an operational failure reaches prependNotice as a RESULT and takes the
-// same path a success takes, so the notice lands first on both. With the wrapper
-// inside, the failure is still an error when the notice is applied, the notice
-// ends up BELOW the heading on failures while staying on top for successes, and
-// the two halves of one statement about one answer drift apart depending on how
-// the call went. That is exactly the defect the notice wrapper was written to
-// prevent.
+// WHAT IT USED TO SAY, and why that was wrong. It required the protection notice
+// to be the first line on a failed call as well as on a successful one, on the
+// ground that the notice and the answer are two halves of one statement and must
+// not sit in different places depending on how the call went. Consistency was the
+// whole of the argument, and it was weighed against the wrong alternative: the
+// only other shape considered was swapping the two wrappers, which sends the
+// notice into the Go error, where renderFailure interpolates it into the quoted
+// CAUSE of the failure and says the cache warning is the reason the search failed.
+// That shape really is worse, and rejecting it left «notice first» looking like the
+// only option.
 //
-// The negative control is in this same test: on a HEALTHY index the first line is
-// the heading and no notice appears, so a green result cannot mean "the notice is
-// always first because it is always there".
-func TestSearchCode_NoticeStaysFirstOnAFailedCall(t *testing.T) {
+// WHAT DECIDES IT NOW. The server tells the model once per session that «Ответ,
+// первая строка которого говорит, что запрошенное не выполнено, не получено или
+// не прочитано, это отказ инструмента, а не пустой результат»
+// (internal/instructions). A notice in front of the heading makes that sentence
+// false for the two index-backed tools, and only while the cache is degraded: a
+// model that obeys the instruction reads line one, does not find the refusal
+// shape, and reports an empty result for a call that refused. A misplaced notice
+// costs a reader one line of scanning; a refusal read as an empty result is a
+// wrong answer about the configuration, delivered with confidence.
+//
+// So the notice moved DOWN ONE LINE and did not move out: it sits directly under
+// the heading, above the class line, the cause and every remedy. tools
+// TestNoticedToolRefusalOpensWithItsHeading holds the same property for every tool
+// the wrapper is applied to, derived from the source; this is the half that runs
+// over a real SESSION on the real registry.
+//
+// The negative control is in this same test: on a HEALTHY index no notice appears
+// at all, so a green result cannot mean "the heading is first because the notice
+// is never there".
+func TestSearchCode_RefusalOpensWithItsHeading(t *testing.T) {
 	const noticeMarker = "индекс выгрузки отдаётся без защиты"
+	const heading = "## Поиск по выгрузке не выполнен"
 
 	t.Run("unprotected index", func(t *testing.T) {
 		session, log, cleanup := connectLoggedSession(t, unprotectedIndexServer(t, true), func() {})
@@ -617,16 +641,19 @@ func TestSearchCode_NoticeStaysFirstOnAFailedCall(t *testing.T) {
 			map[string]any{"query": "МаркерПоиска", "mode": "НетТакогоРежима"})
 		text := frameText(t, frame)
 		first, _, _ := strings.Cut(text, "\n")
-		if !strings.Contains(first, noticeMarker) {
-			t.Errorf("the first line is %q, want the protection notice", first)
+		if first != heading {
+			t.Errorf("the first line is %q, want the refusal heading %q", first, heading)
 		}
-		notice := strings.Index(text, noticeMarker)
-		heading := strings.Index(text, "## Поиск по выгрузке не выполнен")
-		if heading < 0 {
-			t.Fatalf("no heading in:\n%s", text)
+		// THE NOTICE SURVIVED THE MOVE. Losing it here would be the invisible
+		// unprotected serve back again, on the calls that went wrong.
+		at := strings.Index(text, noticeMarker)
+		if at < 0 {
+			t.Fatalf("the refusal carries no protection notice at all:\n%s", text)
 		}
-		if notice > heading {
-			t.Errorf("the notice sits BELOW the heading, which is the inverted nesting order:\n%s", text)
+		// AND IT IS STILL AT THE TOP, not pushed under the body where a client is
+		// free to cut it.
+		if cause := strings.Index(text, "❌"); cause >= 0 && at > cause {
+			t.Errorf("the notice sank below the failure body instead of sitting under the heading:\n%s", text)
 		}
 	})
 

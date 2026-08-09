@@ -318,16 +318,21 @@ func indexNotices(prot dump.UnprotectedState, collapse dump.CollapsedKeyState,
 // the page could not swallow it (writeObjectWarnings). A wrapper has no return path
 // to miss, including ones added later.
 //
-// ERRORS ARE DECORATED TOO, AND THE NOTICE GOES FIRST ON THEM AS WELL. A handler
-// error is turned into user-visible content by WithToolErrors, which converts it into
-// a CallToolResult with IsError; the SDK does NOT do this for a raw ToolHandler
-// (mcp/tool.go treats a returned error as a protocol error, and Server.callTool in
-// mcp/server.go returns it untouched). Because WithToolErrors runs INSIDE this
-// wrapper, an operational failure reaches prependNotice as a result and the notice
-// lands first by the same path a success takes, so the two halves of one statement
-// about one answer cannot drift. A marked protocol error still arrives here as an
-// error and is wrapped below, which keeps its code: the wire encoder resolves the
-// code with errors.As, so a %w wrap does not lose it.
+// ERRORS ARE DECORATED TOO, AND THAT IS WHY WithToolErrors RUNS INSIDE THIS
+// WRAPPER. A handler error is turned into user-visible content by WithToolErrors,
+// which converts it into a CallToolResult with IsError; the SDK does NOT do this
+// for a raw ToolHandler (mcp/tool.go treats a returned error as a protocol error,
+// and Server.callTool in mcp/server.go returns it untouched). Because that
+// conversion happens first, an operational failure arrives here as a RESULT rather
+// than as an error, and the notice is spliced into the answer the model reads
+// instead of into a JSON-RPC error message it never sees. A marked protocol error
+// still arrives as an error and is wrapped below, which keeps its code: the wire
+// encoder resolves the code with errors.As, so a %w wrap does not lose it.
+//
+// WHERE the notice lands inside that result is noticedBody's decision, and it is
+// not «always first»: a refusal keeps its heading on the first line, because the
+// instruction text teaches the model to classify an answer by that line. The
+// reasoning is written out there rather than repeated here.
 //
 // Remove that wrapper and this notice goes back into a JSON-RPC error message the
 // model never reads, at the end of a message a client is free to truncate. A failing
@@ -353,7 +358,8 @@ func withIndexProtectionNotice(index *dump.Index, h mcp.ToolHandler) mcp.ToolHan
 	}
 }
 
-// prependNotice puts notice at the very front of a tool result.
+// prependNotice puts notice at the front of a tool result, BELOW the refusal
+// heading when there is one.
 //
 // It SPLICES INTO THE FIRST TEXT BLOCK rather than adding a second content block,
 // because a client that renders only the first block would drop a separate one, and
@@ -375,9 +381,49 @@ func prependNotice(res *mcp.CallToolResult, notice string) *mcp.CallToolResult {
 		}
 		// A fresh value rather than a mutation: the caller's block may be shared with
 		// something that has already been handed out.
-		res.Content[i] = &mcp.TextContent{Text: notice + "\n" + tc.Text}
+		res.Content[i] = &mcp.TextContent{Text: noticedBody(tc.Text, notice, res.IsError)}
 		return res
 	}
 	res.Content = append([]mcp.Content{&mcp.TextContent{Text: notice}}, res.Content...)
 	return res
+}
+
+// noticedBody joins a notice to one answer, and it is the whole of what this file
+// decides about ORDER WITHIN a response.
+//
+// ON A SUCCESS THE NOTICE IS THE FIRST LINE, unchanged. There is no heading to
+// stand in front of, and the first thing a reader meets should be the reason the
+// answer below may be removed from under them.
+//
+// ON A REFUSAL THE HEADING KEEPS THE FIRST LINE AND THE NOTICE FOLLOWS IT. The
+// server tells the model, once per session and in so many words, that «Ответ,
+// первая строка которого говорит, что запрошенное не выполнено, не получено или
+// не прочитано, это отказ инструмента, а не пустой результат»
+// (internal/instructions). A notice pushed in front of the heading makes that
+// sentence FALSE for exactly the two tools this wrapper is on, and only while the
+// cache is degraded: a model that follows the instruction reads line one, does not
+// find the refusal shape, and reports an empty result for a call that refused. The
+// notice exists to stop a bad cache being invisible; announcing it by hiding a
+// refusal trades one invisible failure for a worse one.
+//
+// NOTHING IS LOST AND NOTHING MOVES TO THE BOTTOM. The notice stays in the same
+// text block, above the class line, the cause and every remedy, so it is still
+// ahead of anything a client is likely to cut. What it no longer does is displace
+// the one line the model is instructed to classify the answer by.
+//
+// WHY IsError IS THE TEST. It is set in exactly one place in this module,
+// tools.textError, reached only from WithToolErrors, whose renderFailure opens
+// with "## " and the tool's heading. So «the result is a refusal» and «the first
+// line is the heading» are the same fact here, and the second is pinned on the
+// rendered artefact by TestInstructionsRefusalVocabularyIsClosed. A body with no
+// second line still keeps its heading first and still carries the notice.
+func noticedBody(body, notice string, refusal bool) string {
+	if !refusal {
+		return notice + "\n" + body
+	}
+	heading, rest, ok := strings.Cut(body, "\n")
+	if !ok {
+		return heading + "\n\n" + notice
+	}
+	return heading + "\n\n" + notice + rest
 }
