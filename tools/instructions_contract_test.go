@@ -408,8 +408,16 @@ func TestInstructionsMetadataSummaryIsOneLinePerCategory(t *testing.T) {
 		t.Errorf("a category with no objects produced a summary row:\n%s", out)
 	}
 
-	// AND THE FILTERED CALL RETURNS THE WHOLE CATEGORY, which is the other half of
-	// the same sentence.
+	// AND THE FILTERED CALL RETURNS THE OBJECT LIST, which is the other half of the
+	// same sentence.
+	//
+	// NOT «вся категория целиком». That wording is retired and forbidden by
+	// retiredClaims in internal/instructions, because NewMetadataHandler runs
+	// filterNoise BEFORE the filter branch, so the answer is short by every name
+	// ending in a noise suffix. What the sentence obliges THIS renderer to do is
+	// drop nothing of what it is handed; the one removal the text accounts for
+	// happens in the handler, and TestInstructionsFilteredCategoryDropsOnlyAttachedFiles
+	// is what reads that.
 	cat := filled[0]
 	whole := make([]string, 40)
 	for i := range whole {
@@ -418,8 +426,10 @@ func TestInstructionsMetadataSummaryIsOneLinePerCategory(t *testing.T) {
 	filteredOut := formatMetadataTree(map[string][]string{cat.key: whole}, nil, cat.key)
 	for _, name := range whole {
 		if !strings.Contains(filteredOut, name) {
-			t.Errorf("the filtered answer dropped %q, and the text says the category comes back "+
-				"«целиком»:\n%s", name, filteredOut)
+			t.Errorf("the renderer dropped %q from the filtered answer, and the text tells the model a "+
+				"filtered call returns «список объектов категории» with only the names ending in "+
+				"ПрисоединенныеФайлы taken out; that removal is the handler's, so anything this renderer "+
+				"drops is a name the text does not account for:\n%s", name, filteredOut)
 		}
 	}
 }
@@ -650,6 +660,19 @@ func TestInstructionsLimitIsDeclaredAsACount(t *testing.T) {
 		{QueryTool(), defaultQueryLimit, maxQueryLimit},
 		{EventLogTool(), defaultEventLogLimit, maxEventLogLimit},
 		{SearchCodeTool(), defaultSearchLimit, maxSearchLimit},
+	}
+
+	// PREMISE: the table is populated. Emptied, the loop below runs zero assertions
+	// and zero controls: three schemas go unread and the six numbers the model
+	// reads the ceiling out of go unchecked, while this test still passes on the
+	// two clampLimit assertions at the end. Measured: with the table emptied the
+	// whole package stays green.
+	//
+	// SHRINK-ONLY. Dropping a row is how a tool stops being covered here, and the
+	// sentence this table anchors is precisely about which tools have a limit.
+	if len(cases) < 3 {
+		t.Fatalf("the limit table holds %d rows and held 3 when this guard was written; a dropped row "+
+			"is a tool that stopped being checked against the sentence that names it", len(cases))
 	}
 
 	// PREMISE: the sentence still names exactly these three tools. If it were
