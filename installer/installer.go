@@ -371,15 +371,19 @@ var roleNoteLines = []string{
 }
 
 // roleNoteStrippedLines replaces the note when --strip-default-roles was used.
-// There the instruction is not advice: without the declaration the service
-// answers only users who hold the role explicitly, so an unassigned user is
-// refused no matter which other roles they have.
+//
+// It used to say that users holding «Полные права» are refused along with
+// everyone else. On a real typical configuration that is false: an
+// administrator account keeps the service and notices nothing. What the flag
+// actually costs is the ordinary least-privileged account, which is exactly the
+// account a careful customer points the connector at, so that is what the note
+// names.
 //
 //garble:ignore
 var roleNoteStrippedLines = []string{
 	"Внимание: объявление основной роли снято флагом --strip-default-roles, вместе с ним снят и автоматический доступ.",
-	"Сервис теперь отвечает только тем пользователям, кому роль MCP_ОсновнаяРоль назначена явно. Остальные получают отказ, включая пользователей с ролью \"Полные права\".",
-	"Назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе каждому, кто работает через MCP.",
+	"Померено на реальной типовой базе: учётная запись администратора доступ сохраняет и ничего не заметит, а обычная учётная запись с ограниченными правами теряет сервис целиком.",
+	"Поэтому проверьте ту учётную запись, на которую настроен коннектор: если права у неё ограничены, назначьте ей роль MCP_ОсновнаяРоль вручную в Конфигураторе.",
 	"Сделать это за вас расширение не может: 1С не разрешает коду расширения администрировать пользователей информационной базы.",
 }
 

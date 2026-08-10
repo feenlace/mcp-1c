@@ -96,18 +96,26 @@ func roleNoteStrippedClaims() []textClaim {
 			negated: "Примечание: объявление основной роли сохранено, автоматический доступ не снят.",
 		},
 		{
-			what:    "ONLY users given the role explicitly are served, Полные права included in the refusal",
-			text:    roleNoteStrippedLines[1],
-			must:    []string{"только тем пользователям", "назначена явно", "получают отказ", "Полные права"},
-			mustNot: []string{"всем пользователям", "получают доступ, включая", "отказ не"},
-			negated: "Сервис отвечает всем пользователям, включая тех, кому роль MCP_ОсновнаяРоль не назначена.",
+			// The pairing is the claim, so the fragments are contiguous phrases
+			// rather than single words: the negation of this sentence reuses
+			// every word in it and swaps only which account keeps the service.
+			what: "an ADMINISTRATOR account keeps the service, an ordinary restricted account LOSES it",
+			text: roleNoteStrippedLines[1],
+			must: []string{"администратора доступ сохраняет", "ограниченными правами теряет сервис"},
+			mustNot: []string{"администратора доступ теряет", "администратор получает отказ",
+				// The refuted claim. It was measured false on a real typical
+				// configuration and must not come back.
+				"Полные права"},
+			negated: "Померено: учётная запись администратора доступ теряет, " +
+				"а обычная учётная запись с ограниченными правами сервис сохраняет.",
 		},
 		{
-			what:    "the administrator must assign the role BY HAND to everyone using MCP",
+			what:    "the account the CONNECTOR uses is the one to check, and to be given the role BY HAND",
 			text:    roleNoteStrippedLines[2],
-			must:    []string{"Назначьте", "MCP_ОсновнаяРоль", "вручную", "Конфигураторе", "каждому"},
+			must:    []string{"коннектор", "ограничены", "назначьте", "MCP_ОсновнаяРоль", "вручную", "Конфигураторе"},
 			mustNot: []string{"назначается автоматически", "назначать не нужно"},
-			negated: "Роль MCP_ОсновнаяРоль назначается каждому автоматически, вручную в Конфигураторе делать ничего не нужно.",
+			negated: "Учётной записи коннектора роль MCP_ОсновнаяРоль назначается автоматически, " +
+				"вручную ничего делать не нужно, даже если права ограничены.",
 		},
 		{
 			what:    "the extension CANNOT do it for them, because 1С forbids it",
@@ -195,6 +203,69 @@ func TestCustomerFacingTextMakesTheClaimsItIsThereToMake(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestNoTextClaimsFullRightsUsersAreRefused pins the one claim that was measured
+// FALSE and shipped anyway.
+//
+// The note under --strip-default-roles used to tell the customer that users
+// holding «Полные права» are refused along with everybody else. On two synthetic
+// file bases that was what happened. On БухгалтерияПредприятияУчебная 3.0.111.25,
+// nine real users, the element flipped five times, the administrator account
+// answered 200 in every arm and noticed nothing, while an ordinary account
+// holding 198 roles and no full rights went 200 to 403.
+//
+// A wrong sentence about who loses access sends the reader to check the wrong
+// account, so it is worse than silence. This guard is deliberately blunt: no
+// customer-facing text of this package may claim that a full-rights user is
+// refused, in either note, in any wording that names the role.
+func TestNoTextClaimsFullRightsUsersAreRefused(t *testing.T) {
+	texts := map[string][]string{
+		"roleNoteLines":         roleNoteLines,
+		"roleNoteStrippedLines": roleNoteStrippedLines,
+		"notAppliedNote(false)": strings.Split(notAppliedNote(false), "\n"),
+		"notAppliedNote(true)":  strings.Split(notAppliedNote(true), "\n"),
+	}
+	// Both spellings the repository uses for the role.
+	forbidden := []string{"Полные права", "ПолныеПрава"}
+
+	scanned := 0
+	for name, lines := range texts {
+		if len(lines) == 0 {
+			t.Errorf("%s is empty, so scanning it proves nothing", name)
+		}
+		for _, line := range lines {
+			scanned++
+			for _, f := range forbidden {
+				if strings.Contains(line, f) {
+					t.Errorf("%s names %q in customer-facing text. Measured on a real typical "+
+						"configuration: an administrator account keeps the service when the "+
+						"declaration is stripped. Any sentence built on that role is either the "+
+						"refuted claim or an invitation to check the wrong account.\nline: %q",
+						name, f, line)
+				}
+			}
+		}
+	}
+	if scanned < 12 {
+		t.Fatalf("only %d lines were scanned; the texts are longer than that and the scan is not "+
+			"reaching them", scanned)
+	}
+
+	// Positive control: the same scan, over a line that DOES make the refuted
+	// claim, must find it. Otherwise the zeros above are a scanner that matches
+	// nothing.
+	control := "Остальные получают отказ, включая пользователей с ролью \"Полные права\"."
+	hit := false
+	for _, f := range forbidden {
+		if strings.Contains(control, f) {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatal("the scan cannot find the refuted claim in the sentence that made it, so its verdict " +
+			"on the shipped texts means nothing")
 	}
 }
 
