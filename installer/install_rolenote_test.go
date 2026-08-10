@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -130,22 +131,26 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 // contains quotes: in the source it is spelled with \" and it never appears in
 // the file as the string it evaluates to. A text search reported that line as
 // absent while it was in fact printed from three places.
+//
+// The walk covers EVERY non-test file of the package, not the literal
+// "installer.go". Parsing one named file left a second print from any sibling
+// file invisible to a guard whose name promises to count callers.
 func TestRoleNoteHasOneCaller(t *testing.T) {
-	literals, calls := installerLiteralsAndCalls(t, "printRoleNote")
+	literals, calls := packageLiteralsAndCalls(t, "printRoleNote")
 
 	// Positive controls for both readings, on the same walk: a literal that is
 	// certainly in the file, and a call that is certainly made.
 	if !slices.Contains(literals, "Updating database...") {
-		t.Fatalf("the literal walk did not find a string installer.go certainly contains, so its "+
+		t.Fatalf("the literal walk did not find a string the package certainly contains, so its "+
 			"verdict on the note lines means nothing (found %d literals)", len(literals))
 	}
-	if _, stripCalls := installerLiteralsAndCalls(t, "stripInheritedProperties"); stripCalls < 2 {
-		t.Fatalf("the call walk found %d calls to stripInheritedProperties, which installer.go makes "+
+	if _, stripCalls := packageLiteralsAndCalls(t, "stripInheritedProperties"); stripCalls < 2 {
+		t.Fatalf("the call walk found %d calls to stripInheritedProperties, which the package makes "+
 			"from more than one place, so its verdict on printRoleNote means nothing", stripCalls)
 	}
 
 	if calls != 1 {
-		t.Errorf("printRoleNote is called from %d places in installer.go, want exactly 1. Install has "+
+		t.Errorf("printRoleNote is called from %d places in the package, want exactly 1. Install has "+
 			"a single successful exit, and keeping the call there is what makes a second note "+
 			"structurally impossible", calls)
 	}
@@ -160,35 +165,71 @@ func TestRoleNoteHasOneCaller(t *testing.T) {
 			}
 		}
 		if got != 1 {
-			t.Errorf("line %d of the note is written %d times in installer.go, want 1 (in roleNoteLines): %q",
+			t.Errorf("line %d of the note is written %d times in the package, want 1 (in roleNoteLines): %q",
 				i+1, got, line)
 		}
 	}
 }
 
-// installerLiteralsAndCalls parses installer.go and returns every string literal
-// it contains, already unquoted, together with the number of calls made to the
-// named function.
-func installerLiteralsAndCalls(t *testing.T, funcName string) (literals []string, calls int) {
+// packageGoFiles lists the package's non-test Go sources. The guards below used
+// to parse the literal "installer.go", which made a second print from any other
+// file in the package invisible to a test whose name promises to count callers.
+func packageGoFiles(t *testing.T) []string {
 	t.Helper()
-	file, err := parser.ParseFile(token.NewFileSet(), "installer.go", nil, 0)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse installer.go: %v", err)
+		t.Fatalf("read package directory: %v", err)
 	}
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.BasicLit:
-			if node.Kind == token.STRING {
-				if s, uErr := strconv.Unquote(node.Value); uErr == nil {
-					literals = append(literals, s)
+	var files, skipped []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") {
+			continue
+		}
+		if strings.HasSuffix(name, "_test.go") {
+			skipped = append(skipped, name)
+			continue
+		}
+		files = append(files, name)
+	}
+	// Controls: the walk found the production file, and the exclusion of test
+	// files was exercised against test files that really are on disk. Without
+	// the second, a filter that dropped everything would look the same.
+	if !slices.Contains(files, "installer.go") {
+		t.Fatalf("the package walk did not find installer.go, it found %v", files)
+	}
+	if len(skipped) == 0 {
+		t.Fatal("the walk skipped no _test.go file, so its exclusion rule never ran and a production " +
+			"file named like a test would be dropped unnoticed")
+	}
+	return files
+}
+
+// packageLiteralsAndCalls parses every non-test Go file of the package and
+// returns each string literal it contains, already unquoted, together with the
+// number of calls made to the named function across all of them.
+func packageLiteralsAndCalls(t *testing.T, funcName string) (literals []string, calls int) {
+	t.Helper()
+	for _, path := range packageGoFiles(t) {
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.BasicLit:
+				if node.Kind == token.STRING {
+					if s, uErr := strconv.Unquote(node.Value); uErr == nil {
+						literals = append(literals, s)
+					}
+				}
+			case *ast.CallExpr:
+				if ident, ok := node.Fun.(*ast.Ident); ok && ident.Name == funcName {
+					calls++
 				}
 			}
-		case *ast.CallExpr:
-			if ident, ok := node.Fun.(*ast.Ident); ok && ident.Name == funcName {
-				calls++
-			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 	return literals, calls
 }

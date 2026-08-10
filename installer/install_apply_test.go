@@ -196,6 +196,63 @@ func argsWithoutOut(args []string) []string {
 	return out
 }
 
+// TestApplyLegTriesTheWiderStripFirst pins the ORDER of the two cases, which is
+// load-bearing and was pinned by nothing.
+//
+// A DESIGNER log is not one message. /Out accumulates everything a run emitted,
+// so one refusal can carry both texts at once, and then both predicates match
+// and the order of the cases alone decides what happens. Trying the inherited
+// override first strips widely, which also removes the run mode, and the install
+// is recovered. Trying the run mode first removes only that property, the base
+// still refuses the rest, and the install is lost. Swapping the two cases was a
+// green edit.
+func TestApplyLegTriesTheWiderStripFirst(t *testing.T) {
+	bothTexts := errString(inheritedOverrideLog + "\n" + runModeMismatchLog)
+
+	// The premise: this really is a log both predicates match. Without it the
+	// test would be pinning an order that never comes into play.
+	if !isInheritedOverrideError(bothTexts) || !isRunModeMismatchError(bothTexts) {
+		t.Fatalf("this log is supposed to match BOTH predicates, and it does not: inherited=%v runmode=%v",
+			isInheritedOverrideError(bothTexts), isRunModeMismatchError(bothTexts))
+	}
+
+	dir := newFakeDesigner(t, fakeModeBothPredicates)
+
+	var err error
+	out := captureStdout(t, func() {
+		err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform)
+	})
+	if err != nil {
+		t.Fatalf("with both refusals in one log the wider strip clears the base and the install is "+
+			"recovered. It was not: %v\nstdout:\n%s", err, out)
+	}
+
+	// It recovered through the wide strip, not the narrow one. The printed line
+	// names which branch ran, and only one of them may have run.
+	if !strings.Contains(out, "Retrying without inherited properties") {
+		t.Errorf("the inherited-override branch did not run:\n%s", out)
+	}
+	if strings.Contains(out, "Retrying without DefaultRunMode property") {
+		t.Errorf("the run-mode branch ran first. It strips only the run mode, the base still refuses "+
+			"the remaining inherited properties, and the install is lost:\n%s", out)
+	}
+
+	wantOps := []string{"/LoadConfigFromFiles", "/UpdateDBCfg", "/LoadConfigFromFiles", "/UpdateDBCfg"}
+	if got := callOps(fakeCalls(t, dir)); strings.Join(got, ",") != strings.Join(wantOps, ",") {
+		t.Errorf("call sequence\ngot:  %v\nwant: %v", got, wantOps)
+	}
+
+	// The narrow strip alone would have left ScriptVariant in place, which is
+	// what this base refuses. Proving it is gone proves the wide strip ran.
+	second := loadedConfiguration(t, dir, 2)
+	if strings.Contains(second, "<ScriptVariant>") {
+		t.Errorf("the reload still carries <ScriptVariant>, so the narrow strip ran:\n%s", second)
+	}
+	if first := loadedConfiguration(t, dir, 1); !strings.Contains(first, "<ScriptVariant>") {
+		t.Fatalf("the first load did not carry <ScriptVariant>, so its absence later proves nothing")
+	}
+}
+
 // errString is the smallest possible error carrying exactly the given text.
 type errString string
 
