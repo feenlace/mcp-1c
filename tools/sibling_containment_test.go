@@ -29,9 +29,16 @@ import (
 // and orphan lists of analyze_subsystems, the form element table and the command,
 // handler and element-event lists of form.go, the configuration_info table cells,
 // the query result table, the event log fields and the validate_query error list,
-// as well as the object, form, subsystem and tabular part names in the headings
-// that carry them, which sit at three different heading levels and so were never
-// one `## %s` list either.
+// as well as the form, subsystem and tabular part names in the headings that carry
+// them, which sit at three different heading levels and so were never one `## %s`
+// list either.
+//
+// THE OBJECT TITLE WAS IN THAT LAST GROUP AND HAS SINCE LEFT IT, because the reason
+// below does not hold for it: `# <имя> (<синоним>)` carries NO prose of ours at all,
+// so the datum is not a value inside an answer's sentence, it IS the sentence, and
+// the first one the reader sees. It needs no break to forge a title and is contained
+// by tools/object_structure.go:formatObjectStructure. See
+// tools/object_heading_containment_test.go.
 //
 // THE SIZE OF THE RESIDUAL IS MEASURED AND NOT WRITTEN HERE. It is counted per
 // renderer, against a hostile payload, by
@@ -39,10 +46,11 @@ import (
 // whose numbers are assertions: a sink that is contained, or one that is added,
 // turns that test red instead of leaving this paragraph quietly wrong.
 //
-// NONE OF THEM IS CONTAINED IN THIS BRANCH, deliberately. Every one prints a datum
+// NONE OF THE ONES STILL LISTED IS CONTAINED, deliberately. Every one prints a datum
 // inside a line of ordinary answer text, so containing them changes what almost
 // every answer looks like, and that is a rendering decision about the product
-// rather than a containment fix.
+// rather than a containment fix. That test is what the object title failed, which is
+// why it was taken and they were not.
 
 // quotedLines returns every line of an answer that opens a `> ` blockquote. A
 // payload that ended the quote shows up as a MISSING line rather than an extra one,

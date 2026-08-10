@@ -406,7 +406,7 @@ func TestDumpObjectStruct_SynonymRendered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "# Продажи (Управление продажами)") {
+	if !strings.Contains(out, "# `Продажи` (`Управление продажами`)") {
 		t.Errorf("R-38: header must show the real synonym from the dump:\n%s", out)
 	}
 }

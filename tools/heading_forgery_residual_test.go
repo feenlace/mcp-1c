@@ -230,9 +230,14 @@ func residualSinks() []residualSite {
 			},
 		},
 		{
-			name:        "object structure: name, attribute rows, tabular parts, values, Состав, Подсистемы",
+			// The H1 of this renderer is NO LONGER IN THIS LIST: its name and synonym
+			// went into code spans, which took the count from 24 to 22. It is not moved
+			// into containedSinks because this render still forges through the rows
+			// below the title; the title itself is pinned by
+			// tools/object_heading_containment_test.go.
+			name:        "object structure: attribute rows, tabular parts, values, Состав, Подсистемы",
 			mustContain: "## Табличные части",
-			forged:      24,
+			forged:      22,
 			render:      func() string { return formatObjectStructure(hostileObject()) },
 		},
 		{

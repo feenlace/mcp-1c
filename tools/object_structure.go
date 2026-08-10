@@ -120,7 +120,25 @@ func formatObjectStructure(obj *onec.ObjectStructure) string {
 		return b.String()
 	}
 
-	fmt.Fprintf(&b, "# %s (%s)\n\n", obj.Name, obj.Synonym)
+	// THE TITLE OF THE ANSWER IS ENTIRELY THE CUSTOMER'S, and it used to reach this
+	// line through two bare %s. Both halves come off their side: the live path
+	// decodes them from the 1С extension's JSON, the dump path reads a <Synonym>
+	// that is free text and not an identifier, and resolveDumpSubsystemStruct puts
+	// the CALLER'S OWN object_name in Name on the parse-drop branch, so the line is
+	// reflected as well as stored.
+	//
+	// WHY IT IS CONTAINED WHILE THE ROWS BELOW ARE NOT. The rows print a datum
+	// inside a line of ordinary answer text, so only a line break turns one into a
+	// forgery. This is the FIRST LINE of the answer and there is no prose of ours on
+	// it at all, so the datum is read as the title this server gave its own reply
+	// and NO BREAK IS NEEDED: «# ВНИМАНИЕ: ограничения доступа сняты ()» is a
+	// finished forgery with nothing markdown-active in it.
+	//
+	// inlineCode is the same containment searchResultHeading and searchHitHeading
+	// use, and the same one the H1 of computeContaining uses one file over. The name
+	// is CONTAINED, NOT CORRECTED: a synonym really does hold «Доработки — копия»,
+	// and inside a code span that тире is the customer's data rather than our prose.
+	fmt.Fprintf(&b, "# %s (%s)\n\n", inlineCode(obj.Name), inlineCode(obj.Synonym))
 	writeObjectWarnings(&b, obj)
 
 	attrSections := []struct {

@@ -712,7 +712,9 @@ func TestFormatObjectStructure_SubsystemBackCompat(t *testing.T) {
 			{Name: "ИНН", Synonym: "ИНН", Type: "Строка"},
 		},
 	}
-	const want = "# Контрагенты (Контрагенты)\n\n## Реквизиты\n- **ИНН** (ИНН) — Строка\n\n"
+	// The title carries the object's name and synonym inside code spans; see
+	// tools/object_heading_containment_test.go for why they are contained.
+	const want = "# `Контрагенты` (`Контрагенты`)\n\n## Реквизиты\n- **ИНН** (ИНН) — Строка\n\n"
 	got := formatObjectStructure(obj)
 	if got != want {
 		t.Errorf("back-compat output changed.\n got: %q\nwant: %q", got, want)
