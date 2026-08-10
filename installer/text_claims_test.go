@@ -49,7 +49,16 @@ import (
 // disavowal. It does NOT prove that a sentence means what it claims. Widening
 // the blacklist raises the cost of the next inversion; it never closes the set.
 // The remaining defence is that a human wrote the sentence and another human
-// read it.
+// read it. THAT IS NOT A FIGURE OF SPEECH AND NOT A PLACEHOLDER FOR A BETTER
+// GUARD. Nothing in this file is a substitute for reading the text. If anyone
+// later leans on these tests and stops reading new note wording by eye, the
+// defence is weaker than it was before the tests existed, because it will look
+// covered. Every one of the false sentences this branch removed was found by a
+// person, and none by a guard.
+//
+// The same open-set problem applies to the positive rule further down, in both
+// directions: its vocabularies can be dodged by widening them and by phrasing
+// around them, and both were demonstrated rather than supposed.
 // ---------------------------------------------------------------------------
 
 // textClaim is one customer-facing sentence and the claim it makes.
@@ -125,7 +134,7 @@ func roleNoteClaims() []textClaim {
 			// A check the reader can run BEFORE losing access, not only after.
 			what:    "presence of профили групп доступа IMPLIES the Управление доступом subsystem",
 			text:    roleNoteLines[2],
-			must:    []string{"видно заранее", "есть профили групп доступа", "есть и подсистема Управление доступом"},
+			must:    []string{"видно заранее", "есть справочник профилей групп доступа", "есть и подсистема Управление доступом"},
 			mustNot: []string{"узнать заранее нельзя", "только после", "не связано"},
 			negated: "Какой у вас случай, узнать заранее нельзя: наличие профилей групп доступа с подсистемой Управление доступом не связано.",
 		},
@@ -146,7 +155,7 @@ func roleNoteClaims() []textClaim {
 		{
 			what:    "WITHOUT профили групп доступа, a direct assignment works and STAYS",
 			text:    roleNoteLines[5],
-			must:    []string{"профилей групп доступа в конфигурации нет", "напрямую", "сохраняется"},
+			must:    []string{"справочника профилей групп доступа в конфигурации нет", "напрямую", "сохраняется"},
 			mustNot: []string{"не сохраняется", "стирается"},
 			negated: "Если профилей групп доступа в конфигурации нет, прямое назначение роли всё равно не сохраняется.",
 		},
@@ -195,7 +204,7 @@ func roleNoteStrippedClaims() []textClaim {
 		{
 			what: "the CONNECTOR's account must be granted access explicitly, by the route its configuration allows",
 			text: roleNoteStrippedLines[3],
-			must: []string{"коннектор", "выдать явно", "есть профили групп доступа",
+			must: []string{"коннектор", "выдать явно", "есть справочник профилей групп доступа",
 				"через профиль групп доступа", "иначе прямым назначением"},
 			mustNot: []string{"назначается автоматически", "выдавать не нужно", "вручную"},
 			negated: "Учётной записи коннектора доступ назначается автоматически, выдавать его не нужно.",
@@ -203,7 +212,7 @@ func roleNoteStrippedClaims() []textClaim {
 		{
 			what:    "профили групп доступа mean the subsystem is there, and a direct assignment does NOT survive it",
 			text:    roleNoteStrippedLines[4],
-			must:    []string{"Профили групп доступа означают", "Управление доступом", "не держится", "стирает"},
+			must:    []string{"Справочник профилей групп доступа означает", "Управление доступом", "не держится", "стирает"},
 			mustNot: []string{"назначение держится", "сохраняется", "ничего не меняет"},
 			negated: "Профили групп доступа ничего не означают, прямое назначение держится и сохраняется.",
 		},
@@ -431,14 +440,34 @@ func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
 		t.Fatalf("only %d note lines were scanned; both notes are longer than that together", scanned)
 	}
 
-	// The POSITIVE half, and the one that does not depend on vocabulary at all.
+	// The POSITIVE half. It was described here as "the one that does not depend
+	// on vocabulary at all", and that was false: it depends on TWO open
+	// vocabularies, the imperatives it recognises and the conditions it accepts.
+	// All four of these were run and all four SHIP GREEN today:
 	//
-	// Every shape that got through the word list did so by APPENDING an
-	// imperative to a line that was true on its own, which preserves every must
-	// fragment and trips no mustNot. So: a line that tells the reader to grant
-	// access must also carry the condition under which that is the right thing to
-	// do. An unconditional imperative about granting access is the defect itself,
-	// whatever words it is spelled with.
+	//	vacuous condition   «Если доступ пропал, назначьте роль ... ещё раз.»
+	//	condition on the
+	//	  wrong clause      «Если у вас Windows, назначьте роль ... напрямую.»
+	//	infinitive          «Роль ... нужно назначить пользователю заново.»
+	//	unlisted verb       «Просто присвойте роль ... ещё раз.»
+	//
+	// The first is the harmful one: appended to the symptom line it tells a
+	// customer who has just been bitten by the recalculation to redo the
+	// assignment that will be erased again, and «если» is a real condition that
+	// simply does not discriminate the branch.
+	//
+	// Measured, so the reach is not overstated either: the rule examines exactly
+	// ONE shipped line today, roleNoteLines[3], and the token satisfying it is
+	// «тогда», an anaphor pointing at the condition on the PREVIOUS line. So the
+	// shipped text already leans on the same leniency the wrong-clause bypass
+	// exploits, and the checked == 0 floor below is in practice a floor of one.
+	//
+	// What it does buy, and it is the reason it stays: every shape that got
+	// through the word list did so by APPENDING an imperative to a line that was
+	// true on its own, which preserves every must fragment and trips no mustNot.
+	// A line that tells the reader to grant access must carry the condition under
+	// which that is right. That catches the appended-imperative class regardless
+	// of which forbidden word it avoids.
 	imperatives := []string{"назначьте", "назначайте", "назначь", "выдайте", "выдавайте", "выдай"}
 	conditions := []string{"если", "иначе", "тогда"}
 
@@ -502,6 +531,38 @@ func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("no note line carries an imperative about granting access, so the rule above examined " +
 			"nothing and would not notice one being added")
+	}
+
+	// A condition token that matches EVERY note line disables the rule silently,
+	// and the shrink-only pins above are structurally blind to it because this is
+	// growth, not shrinkage. Measured: adding «а», or a single space, leaves the
+	// whole suite green and makes an appended unconditional imperative ship.
+	//
+	// What this check buys: exactly those two, and anything else that matches all
+	// fifteen note lines. What it does NOT buy: a token matching most lines but
+	// not all still disables the rule for those lines and passes here. It narrows
+	// the hole, it does not close it.
+	allNoteLines := append(append([]string{}, roleNoteLines...), roleNoteStrippedLines...)
+	matches := func(token string) int {
+		n := 0
+		for _, line := range allNoteLines {
+			if strings.Contains(strings.ToLower(line), token) {
+				n++
+			}
+		}
+		return n
+	}
+	for _, c := range conditions {
+		if got := matches(c); got == len(allNoteLines) {
+			t.Errorf("the condition token %q matches all %d note lines, so every imperative counts as "+
+				"conditioned and the rule above checks nothing", c, got)
+		}
+	}
+	// Control: the counter really can reach every line, so the verdicts above are
+	// discrimination and not a counter that matches nothing.
+	if got := matches(" "); got != len(allNoteLines) {
+		t.Fatalf("a single space matches %d of %d note lines; the counter cannot see every line, so "+
+			"its verdict on the real tokens means nothing", got, len(allNoteLines))
 	}
 
 	// Positive control: the scan finds the retired instruction in the sentence
