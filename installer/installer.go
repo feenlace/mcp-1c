@@ -151,8 +151,9 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 
 	// --strip-default-roles. Applied to the temp copy before the load, so the
 	// element never reaches the base. The shipped XML is untouched: the default
-	// keeps the declaration, because it is what grants the service to every user
-	// holding any role of the configuration.
+	// keeps the declaration, because on every base measured it is what grants the
+	// service to an ordinary least-privileged account, which is the account a
+	// careful customer points the connector at.
 	if stripRoles {
 		if stripErr := stripDefaultRoles(cfgPath); stripErr != nil {
 			return fmt.Errorf("stripping default roles: %w", stripErr)
@@ -357,11 +358,14 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 // paths were the old platforms, which meant the customers who most needed the
 // instruction, on 8.3.14 and newer, never saw it.
 //
-// Measured on two file bases differing only in the DefaultRoles element, five
-// users each, GET /hs/mcp-1c/version: ПолныеПрава 200 with, 403 without;
-// ОбычныйДоступ 200 with, 403 without; MCP_ОсновнаяРоль 200 either way; a user
-// with no roles at all 403 either way. Both notes below say what that measured,
-// and nothing more.
+// Measured on two synthetic file bases and again on a real typical
+// configuration, БухгалтерияПредприятияУчебная 3.0.111.25. The readings agree on
+// the ordinary least-privileged account and disagree on the administrator: an
+// account holding roles of the configuration answers 200 with the declaration
+// and 403 without it on both, while an administrator dropped to 403 on the
+// synthetic bases and kept 200 on the real one. A user holding no roles at all
+// is refused either way. Both notes below say what survives both readings, and
+// nothing more. See extension/default_roles_test.go for the full tables.
 //
 //garble:ignore
 var roleNoteLines = []string{
@@ -833,12 +837,20 @@ var defaultRolesRe = regexp.MustCompile(
 // in the configuration's effective ОсновныеРоли.
 //
 // This is not the default, and the reason is measured rather than reasoned. On
-// two file bases differing only in this element, a user holding ПолныеПрава or
-// ОбычныйДоступ gets 200 from the service with it and 403 without it, while a
-// user holding MCP_ОсновнаяРоль gets 200 either way. The declaration is what
-// grants the service to everyone who holds any role of the configuration, so
-// removing it costs the customer the automatic grant and makes an explicit
-// assignment of MCP_ОсновнаяРоль mandatory for every user.
+// every base measured, an ordinary least-privileged account holding roles of the
+// configuration answers 200 with this element and 403 without it, while a user
+// holding MCP_ОсновнаяРоль answers 200 either way. So the declaration is what
+// grants the service to the restricted account a careful customer points the
+// connector at, and stripping it makes an explicit assignment of
+// MCP_ОсновнаяРоль mandatory for that account.
+//
+// An administrator is NOT a witness for this: on a real typical configuration an
+// account holding ПолныеПрава and АдминистраторСистемы kept the service in every
+// arm. Testing the flag from an administrator session will show nothing wrong.
+//
+// The flag's own premise is unverified. On the Standard Subsystems base measured,
+// the customer's session abort does not reproduce with or without this element.
+// What the flag is known to do is remove our contribution to ОсновныеРоли.
 //
 //garble:ignore
 func stripDefaultRoles(cfgPath string) error {

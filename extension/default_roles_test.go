@@ -18,8 +18,12 @@ import (
 // прикладного решения пуст», so on a base with users the declaration looked
 // like dead weight that only caused harm.
 //
-// MEASURED on a Windows VM instead, two file bases identical except for this
-// one element, five users each, GET /hs/mcp-1c/version:
+// MEASURED TWICE, and the two readings do not agree. Both are written down here
+// because the disagreement is the point: whoever simplifies this table back to
+// one row will restate a claim that was already shipped and already refuted.
+//
+// First, on a Windows VM, two SYNTHETIC file bases identical except for this one
+// element, five users each, GET /hs/mcp-1c/version:
 //
 //	user holding ПолныеПрава        WITH 200 -> WITHOUT 403
 //	user holding ОбычныйДоступ      WITH 200 -> WITHOUT 403
@@ -27,19 +31,50 @@ import (
 //	user holding no roles at all    WITH 403 -> WITHOUT 403
 //	anonymous                       WITH 401 -> WITHOUT 401
 //
-// Causation was confirmed bidirectionally on the same bases: adding the element
-// flipped 403 back to 200 and removing it flipped 200 to 403, while the users
-// holding our own role were unaffected either way.
+// Second, on a REAL typical configuration, БухгалтерияПредприятияУчебная
+// 3.0.111.25, nine real users, published and called over HTTP, the element added
+// and removed five times in a row, each arm proved by a dump read back off the
+// base:
 //
-// So the declaration is what grants the service to every user who holds any
-// role other than ours, which in a working base is every working user. The
-// documentation does not describe what the platform does here. Note also why the
-// wrong argument was persuasive: the user for whom the element truly does
-// nothing is the user with no roles at all, and that user was already denied.
+//	директор: ПолныеПрава + АдминистраторСистемы, no MCP role  200 -> 200
+//	Demo: 198 ordinary БП roles, no full rights, no MCP role   200 -> 403
+//	user holding MCP_ОсновнаяРоль only                         200 -> 200
+//	user holding no roles at all                               403 -> 403
+//	anonymous / wrong password / nonexistent user              401 throughout
+//
+// THE ADMINISTRATOR ROW DOES NOT GENERALISE. On the synthetic bases that user
+// dropped to 403; on the real configuration the administrator keeps 200 and
+// would notice nothing. The synthetic bases were misleading in a second way as
+// well: their MAIN configuration declares an empty <DefaultRoles/>, and the
+// merge does not happen into an empty declaration, so the effective list read as
+// zero roles there. On the real base the merge is plain, three roles become four.
+//
+// WHAT SURVIVES BOTH READINGS, and is why this element must stay: an ordinary
+// least-privileged account that holds roles of the configuration is served WITH
+// the declaration and refused WITHOUT it. That is precisely the account a careful
+// customer points the connector at, so removing the element by default would
+// take the service away from the customers who configured it properly.
+//
+// NOT ATTRIBUTABLE: whether the administrator's retained access comes from
+// ПолныеПрава, from АдминистраторСистемы, or from the pair. A user holding
+// exactly one of them could not be constructed, so the row says "administrator"
+// and stops there. Do not refine it without a base that can carry the case.
+//
+// COUNTER-INTUITIVE, and worth knowing before diagnosing this by hand:
+// РольДоступна("MCP_ОсновнаяРоль") returns Нет for Demo even in the arm where
+// Demo is served. The declaration confers the effective right without making the
+// role visible to that check, so a customer who reaches for РольДоступна will be
+// told the role is absent while it is working.
 //
 // The customer's symptom is real and is addressed at install time instead, by
 // the --strip-default-roles flag in the installer, which removes this element
-// from the copy it loads. The default ships the element.
+// from the copy it loads. The default ships the element. That flag's premise is
+// NOT verified: on the Standard Subsystems base measured here the customer's
+// abort does not reproduce, with or without our element, even though that base's
+// own ОсновныеРоли already carries a third role beyond the two the error names.
+// So "an extra role is present" is not by itself what their library rejects, and
+// what the flag is known to do is remove OUR contribution to ОсновныеРоли, which
+// is the thing the customer clears by hand today and reports as working.
 // ---------------------------------------------------------------------------
 
 const configurationPath = "src/Configuration.xml"
@@ -115,10 +150,13 @@ func TestConfigurationDeclaresTheRoleAsADefaultRole(t *testing.T) {
 
 	declared := doc.Configuration.Properties.DefaultRoles
 	if declared == nil {
-		t.Fatalf("%s no longer declares <DefaultRoles>. Measured on two bases differing only in this "+
-			"element: without it a user holding ПолныеПрава or ОбычныйДоступ gets 403 from "+
-			"/hs/mcp-1c/version, with it 200. Removing it takes the service away from every user who "+
-			"does not hold MCP_ОсновнаяРоль explicitly. Customers whose Standard Subsystems "+
+		t.Fatalf("%s no longer declares <DefaultRoles>. The reading that holds on BOTH bases measured: "+
+			"an ordinary least-privileged account holding roles of the configuration answers 200 with "+
+			"this element and 403 without it. On БухгалтерияПредприятияУчебная 3.0.111.25 that was "+
+			"Demo, 198 roles and no full rights, across five flips of the element. Removing it by "+
+			"default takes the service away from exactly the restricted account a careful customer "+
+			"points the connector at. An administrator would keep access and notice nothing, which is "+
+			"why this is easy to remove and hard to catch. Customers whose Standard Subsystems "+
 			"configuration rejects the extra entry use the installer flag --strip-default-roles instead",
 			configurationPath)
 	}

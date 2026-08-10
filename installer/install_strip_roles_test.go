@@ -10,17 +10,23 @@ import (
 // ---------------------------------------------------------------------------
 // --strip-default-roles, and the reason it is a flag rather than the default.
 //
-// MEASURED on two file bases identical except for the <DefaultRoles> element,
-// five users each, GET /hs/mcp-1c/version: a user holding ПолныеПрава or
-// ОбычныйДоступ answers 200 WITH the element and 403 WITHOUT it, while a user
-// holding MCP_ОсновнаяРоль answers 200 either way and a user with no roles at
-// all answers 403 either way. Causation was confirmed bidirectionally on the
-// same bases.
+// MEASURED on two synthetic file bases and again on a real typical
+// configuration. The reading that holds on both: an ordinary least-privileged
+// account holding roles of the configuration answers 200 WITH the element and
+// 403 WITHOUT it, while a user holding MCP_ОсновнаяРоль answers 200 either way
+// and a user with no roles at all answers 403 either way. Causation was
+// confirmed bidirectionally on both, five flips on the real base.
 //
-// So the declaration is the mechanism that grants the service to everyone who
-// holds any role of the configuration. Removing it by default would fix the one
-// customer whose Standard Subsystems configuration refuses the extra entry and
-// take the service away from every other customer's users on their next update.
+// The administrator row does NOT agree between them and is not used here: on the
+// real configuration an administrator kept the service in every arm. The full
+// tables and the reason the synthetic bases misled are in
+// extension/default_roles_test.go.
+//
+// So the declaration is the mechanism that grants the service to the restricted
+// account a careful customer points the connector at. Removing it by default
+// would fix the one customer whose Standard Subsystems configuration refuses the
+// extra entry and take the service away from every other customer's service
+// account on their next update.
 //
 // Under the flag the strip has to be NARROW for the same reason the run-mode
 // strip is: it is paid for one property. The wide-versus-narrow assertion below
@@ -60,8 +66,9 @@ func TestDefaultRolesAreStrippedOnlyUnderTheFlag(t *testing.T) {
 	// Default: the declaration reaches the base. This is what keeps every user
 	// who holds a role of the configuration working.
 	if !strings.Contains(withoutFlag, declaration) {
-		t.Errorf("without the flag the declaration was removed anyway. Measured: that answers 403 to "+
-			"users holding ПолныеПрава or ОбычныйДоступ\n%s", withoutFlag)
+		t.Errorf("without the flag the declaration was removed anyway. Measured on every base: that "+
+			"answers 403 to an ordinary least-privileged account holding roles of the "+
+			"configuration\n%s", withoutFlag)
 	}
 	if !strings.Contains(withoutFlag, item) {
 		t.Errorf("without the flag the declaration no longer names %s:\n%s", item, withoutFlag)
