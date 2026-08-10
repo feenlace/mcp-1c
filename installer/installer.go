@@ -344,19 +344,21 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		}
 	}
 
-	printRoleNote(stripRoles)
+	// Chosen by reading the file that was loaded, not by the flag: three code
+	// paths besides the flag remove the declaration. extDir survives until the
+	// deferred cleanup, so cfgPath is still readable here.
+	printRoleNote(!declaresOurRoleAsDefault(cfgPath))
 	return nil
 }
 
-// roleNoteLines is what a successful install tells the customer about access.
+// roleNoteLines is what a successful install tells the customer about access
+// when the loaded configuration DOES declare our role as a default role, which
+// is the shipped default.
 //
-// The extension no longer declares MCP_ОсновнаяРоль as a default role of the
-// configuration, so the platform hands it to nobody: a user has it only when an
-// administrator assigns it. That was already the effective truth on any base
-// with a non-empty user list, and it is now the whole truth on every base, so
-// the note is no longer tied to the strip paths that used to print it. Those
-// paths were the old platforms, which meant the customers who most needed the
-// instruction, on 8.3.14 and newer, never saw it.
+// This comment used to say the extension no longer declares the role at all.
+// That described a removal which was measured wrong and reverted: the shipped
+// Configuration.xml declares it, and the declaration is what grants the service
+// to an ordinary least-privileged account.
 //
 // Measured on two synthetic file bases and again on a real typical
 // configuration, БухгалтерияПредприятияУчебная 3.0.111.25. The readings agree on
@@ -374,7 +376,10 @@ var roleNoteLines = []string{
 	"Пользователю, у которого нет ни одной роли, сервис отвечает отказом: назначьте ему роль MCP_ОсновнаяРоль вручную в Конфигураторе.",
 }
 
-// roleNoteStrippedLines replaces the note when --strip-default-roles was used.
+// roleNoteStrippedLines replaces it when the loaded configuration does NOT
+// declare our role. That happens under --strip-default-roles and on three other
+// paths, so the text states what is true of the file rather than naming a cause
+// that may not apply.
 //
 // It used to say that users holding «Полные права» are refused along with
 // everyone else. On a real typical configuration that is false: an
@@ -385,15 +390,47 @@ var roleNoteLines = []string{
 //
 //garble:ignore
 var roleNoteStrippedLines = []string{
-	"Внимание: объявление основной роли снято флагом --strip-default-roles, вместе с ним снят и автоматический доступ.",
+	"Внимание: в загруженной конфигурации объявления основной роли нет, а вместе с ним нет и автоматического доступа.",
+	"Так выходит под флагом --strip-default-roles, а также на платформах до 8.3.14 и на старых режимах совместимости, где свойства заимствованных объектов снимаются целиком.",
 	"Померено на реальной типовой базе: учётная запись администратора доступ сохраняет и ничего не заметит, а обычная учётная запись с ограниченными правами теряет сервис целиком.",
 	"Поэтому проверьте ту учётную запись, на которую настроен коннектор: если права у неё ограничены, назначьте ей роль MCP_ОсновнаяРоль вручную в Конфигураторе.",
 	"Сделать это за вас расширение не может: 1С не разрешает коду расширения администрировать пользователей информационной базы.",
 }
 
-// printRoleNote prints the note that matches how the extension was installed.
-// It is called from exactly one place, the single successful exit of Install, so
-// no path can print a note twice or print both.
+// roleName is the role the extension ships and the one both notes talk about.
+const roleName = "MCP_ОсновнаяРоль"
+
+// declaresOurRoleAsDefault reports whether the configuration at cfgPath, which
+// is the copy that was loaded into the base, still names our role in its
+// DefaultRoles.
+//
+// The note is chosen by OBSERVING this, never by the --strip-default-roles flag.
+// Three other paths remove the declaration with the flag unset: the pre-patch
+// for platforms 8.3.10 to 8.3.13, the load-leg retry for old compat modes, and
+// the apply-leg retry for the same. On all three a flag-driven note told the
+// customer that users holding roles of the configuration are served, while the
+// declaration that serves them was absent from what got applied. Observation
+// cannot drift when a fourth strip site is added; a bool threaded from each site
+// can, and this file already grew from two sites to three.
+//
+// An empty <DefaultRoles/> counts as NOT declared, because an empty declaration
+// grants nobody anything. A read failure also counts as not declared: the note
+// then tells the customer to assign the role by hand, which is safe advice to
+// follow needlessly and unsafe advice to omit.
+//
+//garble:ignore
+func declaresOurRoleAsDefault(cfgPath string) bool {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return false
+	}
+	declaration := defaultRolesRe.Find(data)
+	return declaration != nil && bytes.Contains(declaration, []byte("Role."+roleName))
+}
+
+// printRoleNote prints the note that matches what was actually loaded. It is
+// called from exactly one place, the single successful exit of Install, so no
+// path can print a note twice or print both.
 //
 //garble:ignore
 func printRoleNote(stripped bool) {

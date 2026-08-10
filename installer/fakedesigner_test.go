@@ -76,6 +76,11 @@ const (
 	// Only the wide strip clears the refusal, so the order of the two cases in
 	// the apply-leg switch decides whether the install is recovered.
 	fakeModeBothPredicates = "both-predicates"
+	// fakeModeLoadInheritedOverride refuses the FIRST /LoadConfigFromFiles with
+	// the inherited-override text, which sends Install through the load-leg
+	// wide strip and a second load. It is the third of the three paths that
+	// remove <DefaultRoles> without the flag being set.
+	fakeModeLoadInheritedOverride = "load-inherited-override"
 )
 
 // Optional flags, written as files in the fake's directory alongside the mode.
@@ -159,6 +164,10 @@ func serveFakeDesigner(dir string, args []string) int {
 		// installed, which sends Install through the delete and reload.
 		if mode == fakeModeExistsThenRunModeAlways && attempt == 1 {
 			writeFakeLog(outPath, alreadyExistsLog)
+			return 1
+		}
+		if mode == fakeModeLoadInheritedOverride && attempt == 1 {
+			writeFakeLog(outPath, inheritedOverrideLog)
 			return 1
 		}
 		if limit := readFakeFile(dir, fakeFailLoadsAfterFile); limit != "" {
@@ -409,6 +418,19 @@ func captureStdout(t *testing.T, fn func()) string {
 	out := <-done
 	r.Close()
 	return out
+}
+
+// lastLoadedConfiguration returns what the FINAL /LoadConfigFromFiles of the run
+// was handed, which is what the platform ends up applying. Everything the
+// customer is told about access has to agree with this file and with nothing
+// else.
+func lastLoadedConfiguration(t *testing.T, dir string) string {
+	t.Helper()
+	snapshots, err := filepath.Glob(filepath.Join(dir, "loaded-*.xml"))
+	if err != nil || len(snapshots) == 0 {
+		t.Fatalf("the run left no load snapshot, so there is nothing to compare the note against")
+	}
+	return loadedConfiguration(t, dir, len(snapshots))
 }
 
 // loadedConfiguration returns the Configuration.xml the n-th (1-based)

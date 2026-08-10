@@ -45,15 +45,37 @@ type textClaim struct {
 	negated string
 }
 
+// disavowalFragments negate a claim from the FRONT while leaving every word of it
+// in place. Russian does this naturally, and the contiguous-phrase defence does
+// not survive it alone: a sentence can quote both phrases verbatim and still say
+// the opposite. They are checked against every claim.
+var disavowalFragments = []string{
+	"неверно, что",
+	"это не так",
+	"не соответствует",
+	"на самом деле наоборот",
+	"вопреки замеру",
+	"ничего подобного",
+	"замер этого не показывает",
+}
+
 // claimHolds reports why the text fails to make the claim, or "" when it holds.
+//
+// The comparison is CASE FOLDED. It used to be case sensitive, and three
+// inversions walked through it: a capitalised negating particle, a natural
+// Russian sentence with the opposite meaning, and one that reused both
+// contiguous phrases and disavowed the measurement outright. A guard that only
+// sees lower case is a guard against typing mistakes, not against lies.
 func claimHolds(text string, c textClaim) string {
+	lower := strings.ToLower(text)
 	for _, m := range c.must {
-		if !strings.Contains(text, m) {
+		if !strings.Contains(lower, strings.ToLower(m)) {
 			return fmt.Sprintf("missing %q", m)
 		}
 	}
-	for _, m := range c.mustNot {
-		if strings.Contains(text, m) {
+	forbidden := append(append([]string{}, c.mustNot...), disavowalFragments...)
+	for _, m := range forbidden {
+		if strings.Contains(lower, strings.ToLower(m)) {
 			return fmt.Sprintf("contains %q, which inverts the claim", m)
 		}
 	}
@@ -89,18 +111,28 @@ func roleNoteClaims() []textClaim {
 func roleNoteStrippedClaims() []textClaim {
 	return []textClaim{
 		{
-			what:    "the declaration was REMOVED by the flag, and the automatic grant with it",
+			// States what is TRUE OF THE FILE, not what caused it: three paths
+			// besides the flag remove the declaration, so naming the flag as the
+			// cause would be false on all three.
+			what:    "the loaded configuration does NOT declare the role, and there is no automatic access",
 			text:    roleNoteStrippedLines[0],
-			must:    []string{"снято флагом", "--strip-default-roles", "автоматический доступ"},
-			mustNot: []string{"сохранено", "не снято", "доступ сохранён"},
-			negated: "Примечание: объявление основной роли сохранено, автоматический доступ не снят.",
+			must:    []string{"в загруженной конфигурации", "объявления основной роли нет", "автоматического доступа"},
+			mustNot: []string{"объявление основной роли есть", "доступ сохранён", "снято флагом"},
+			negated: "Внимание: в загруженной конфигурации объявление основной роли есть, и автоматический доступ сохранён.",
+		},
+		{
+			what:    "the causes are the flag AND the old platform / old compat mode paths",
+			text:    roleNoteStrippedLines[1],
+			must:    []string{"--strip-default-roles", "8.3.14", "режимах совместимости"},
+			mustNot: []string{"только под флагом", "исключительно под флагом"},
+			negated: "Так выходит только под флагом --strip-default-roles.",
 		},
 		{
 			// The pairing is the claim, so the fragments are contiguous phrases
 			// rather than single words: the negation of this sentence reuses
 			// every word in it and swaps only which account keeps the service.
 			what: "an ADMINISTRATOR account keeps the service, an ordinary restricted account LOSES it",
-			text: roleNoteStrippedLines[1],
+			text: roleNoteStrippedLines[2],
 			must: []string{"администратора доступ сохраняет", "ограниченными правами теряет сервис"},
 			mustNot: []string{"администратора доступ теряет", "администратор получает отказ",
 				// The refuted claim. It was measured false on a real typical
@@ -111,7 +143,7 @@ func roleNoteStrippedClaims() []textClaim {
 		},
 		{
 			what:    "the account the CONNECTOR uses is the one to check, and to be given the role BY HAND",
-			text:    roleNoteStrippedLines[2],
+			text:    roleNoteStrippedLines[3],
 			must:    []string{"коннектор", "ограничены", "назначьте", "MCP_ОсновнаяРоль", "вручную", "Конфигураторе"},
 			mustNot: []string{"назначается автоматически", "назначать не нужно"},
 			negated: "Учётной записи коннектора роль MCP_ОсновнаяРоль назначается автоматически, " +
@@ -119,7 +151,7 @@ func roleNoteStrippedClaims() []textClaim {
 		},
 		{
 			what:    "the extension CANNOT do it for them, because 1С forbids it",
-			text:    roleNoteStrippedLines[3],
+			text:    roleNoteStrippedLines[4],
 			must:    []string{"не может", "не разрешает", "администрировать пользователей"},
 			mustNot: []string{"расширение назначит", "сделает это за вас"},
 			negated: "Расширение сделает это за вас: 1С разрешает коду расширения администрировать пользователей информационной базы.",
@@ -195,11 +227,19 @@ func TestCustomerFacingTextMakesTheClaimsItIsThereToMake(t *testing.T) {
 						c.what, why, c.text)
 				}
 
-				// The SAME checker, run over the negation, must complain. This is
-				// the mutation, performed here rather than trusted.
-				if why := claimHolds(c.negated, c); why == "" {
-					t.Errorf("the checker accepts a sentence that claims the OPPOSITE of %q, so it "+
-						"would not notice the text being inverted.\nnegated: %q", c.what, c.negated)
+				// The SAME checker, run over three inversions, must complain
+				// about each. These are the mutations, performed here rather
+				// than trusted, and all three were measured green before the
+				// matcher was case folded and given the disavowal list.
+				for _, bad := range []struct{ how, text string }{
+					{"the negation", c.negated},
+					{"the negation SHOUTED, same words, different case", strings.ToUpper(c.negated)},
+					{"a leading disavowal quoting the sentence verbatim", "Неверно, что " + c.text},
+				} {
+					if why := claimHolds(bad.text, c); why == "" {
+						t.Errorf("the checker accepts %s, which claims the OPPOSITE of %q, so it would "+
+							"not notice the text being inverted.\ntext: %q", bad.how, c.what, bad.text)
+					}
 				}
 			}
 		})

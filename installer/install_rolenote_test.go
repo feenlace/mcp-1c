@@ -69,13 +69,6 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 			platformVersion: "8.3.27", wantNotes: 1,
 		},
 		{
-			// The path that already printed the note. It must still print it,
-			// and must not print it twice now that there is an unconditional
-			// call as well.
-			name: "old platform, pre-strip path", mode: fakeModeOK,
-			platformVersion: "8.3.13", wantNotes: 1,
-		},
-		{
 			// Recovered through the run-mode retry: still a successful install,
 			// so still exactly one note.
 			name: "run-mode mismatch, recovered on the apply leg", mode: fakeModeRunModeMismatch,
@@ -105,6 +98,23 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 			platformVersion: "8.3.27", stripRoles: true, wantNotes: 1,
 		},
 		{
+			// NO FLAG, and the declaration is still gone: the pre-patch for
+			// platforms below 8.3.14 strips inherited properties, and
+			// <DefaultRoles> is one of the twelve.
+			name: "old platform strips the declaration without the flag", mode: fakeModeOK,
+			platformVersion: "8.3.13", wantNotes: 1,
+		},
+		{
+			// NO FLAG: the load-leg retry for old compat modes strips it.
+			name: "load-leg inherited-override strip, no flag", mode: fakeModeLoadInheritedOverride,
+			platformVersion: "8.3.27", wantNotes: 1,
+		},
+		{
+			// NO FLAG: the apply-leg retry this branch added strips it.
+			name: "apply-leg inherited-override strip, no flag", mode: fakeModeInheritedOverride,
+			platformVersion: "8.3.27", wantNotes: 1,
+		},
+		{
 			name: "strip-default-roles on a failed install", mode: fakeModeRunModeAlways,
 			platformVersion: "8.3.27", stripRoles: true, wantErr: true, wantNotes: 0,
 		},
@@ -112,7 +122,7 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			newFakeDesigner(t, tc.mode)
+			dir := newFakeDesigner(t, tc.mode)
 			exe := fakePlatformExe(t)
 
 			var err error
@@ -126,10 +136,22 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 				t.Fatalf("Install failed: %v\nstdout:\n%s", err, out)
 			}
 
-			// The note that matches how the install ran, and ONLY that one.
+			// WHICH note is right is decided by the XML that was actually
+			// loaded, never by the flag. Three code paths strip the declaration
+			// with the flag unset, so a flag-driven selector tells the customer
+			// that users with roles are served while the declaration that serves
+			// them is absent from the applied configuration.
 			printed, silent := roleNoteLines, roleNoteStrippedLines
 			printedName, silentName := "default", "stripped"
-			if tc.stripRoles {
+			if !tc.wantErr {
+				loaded := lastLoadedConfiguration(t, dir)
+				if !strings.Contains(loaded, "<DefaultRoles>") {
+					printed, silent = roleNoteStrippedLines, roleNoteLines
+					printedName, silentName = "stripped", "default"
+				}
+				t.Logf("last loaded XML declares default roles: %v (flag was %v)",
+					strings.Contains(loaded, "<DefaultRoles>"), tc.stripRoles)
+			} else if tc.stripRoles {
 				printed, silent = roleNoteStrippedLines, roleNoteLines
 				printedName, silentName = "stripped", "default"
 			}
@@ -141,6 +163,92 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 				t.Errorf("the %s role note printed %d times on a run that must not use it. The two "+
 					"notes make opposite promises about who reaches the service\nstdout:\n%s",
 					silentName, got, out)
+			}
+		})
+	}
+}
+
+// TestRoleNoteSelectorIsTheXMLNotTheFlag is the guard for the regression the
+// flag-driven selector was.
+//
+// The declaration's survival does NOT depend on --strip-default-roles. Three
+// other paths remove it with the flag unset: the pre-patch for platforms 8.3.10
+// to 8.3.13, the load-leg retry for old compat modes, and the apply-leg retry
+// for the same. Selecting the note by the flag told those customers that a user
+// holding roles of the configuration is served without further action, while the
+// declaration that serves them was absent from the applied XML. That is false by
+// our own measurement.
+//
+// The reading below is DERIVED: for every successful install, the note the
+// customer got is compared against the file the run actually loaded. Nothing
+// here says which note belongs to which scenario, so switching the selector back
+// to the flag reddens on the three flag-unset paths without any case needing to
+// be rewritten.
+func TestRoleNoteSelectorIsTheXMLNotTheFlag(t *testing.T) {
+	scenarios := []struct {
+		name       string
+		mode       string
+		platform   string
+		stripRoles bool
+		// declared is what the run is EXPECTED to end up loading. It is stated
+		// so the scenario set cannot silently collapse to one side.
+		declared bool
+	}{
+		{"nothing strips it", fakeModeOK, "8.3.27", false, true},
+		{"the flag strips it", fakeModeOK, "8.3.27", true, false},
+		{"the pre-patch strips it, flag unset", fakeModeOK, "8.3.13", false, false},
+		{"the load-leg retry strips it, flag unset", fakeModeLoadInheritedOverride, "8.3.27", false, false},
+		{"the apply-leg retry strips it, flag unset", fakeModeInheritedOverride, "8.3.27", false, false},
+		{"the narrow run-mode strip leaves it alone", fakeModeRunModeMismatch, "8.3.27", false, true},
+	}
+
+	// The set has to contain the case the flag-driven selector gets wrong, or
+	// this test passes on the implementation it exists to reject.
+	disagreements := 0
+	for _, sc := range scenarios {
+		if sc.stripRoles != !sc.declared {
+			disagreements++
+		}
+	}
+	if disagreements < 3 {
+		t.Fatalf("only %d scenarios have the flag disagreeing with the XML; those are the only ones "+
+			"that can tell an observing selector from a flag-driven one", disagreements)
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			dir := newFakeDesigner(t, sc.mode)
+
+			var err error
+			out := captureStdout(t, func() {
+				err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", sc.platform, sc.stripRoles)
+			})
+			if err != nil {
+				t.Fatalf("Install failed: %v\nstdout:\n%s", err, out)
+			}
+
+			loaded := lastLoadedConfiguration(t, dir)
+			declared := strings.Contains(loaded, "Role."+roleName)
+			if declared != sc.declared {
+				t.Fatalf("this scenario was supposed to end up with declared=%v and ended up with %v, "+
+					"so it is not exercising what it claims", sc.declared, declared)
+			}
+
+			want, wantName := roleNoteLines, "default"
+			other, otherName := roleNoteStrippedLines, "stripped"
+			if !declared {
+				want, wantName = roleNoteStrippedLines, "stripped"
+				other, otherName = roleNoteLines, "default"
+			}
+
+			if got := countRoleNote(t, out, want); got != 1 {
+				t.Errorf("the loaded configuration declares our role: %v, so the %s note belongs here "+
+					"and it printed %d times\nstdout:\n%s", declared, wantName, got, out)
+			}
+			if got := countRoleNote(t, out, other); got != 0 {
+				t.Errorf("the %s note printed %d times while the loaded configuration declares our "+
+					"role: %v. The flag was %v, and the flag is not what decides this\nstdout:\n%s",
+					otherName, got, declared, sc.stripRoles, out)
 			}
 		})
 	}
