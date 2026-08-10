@@ -1,6 +1,8 @@
 package installer
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -128,6 +130,80 @@ func TestDefaultRolesAreStrippedOnlyUnderTheFlag(t *testing.T) {
 	}
 	t.Logf("the wide strip matches %d elements; %d of them must survive --strip-default-roles",
 		len(wide), survivors)
+}
+
+// TestDeclaresOurRoleAsDefaultReadsWhatItClaims pins the observation the note is
+// selected by, including the two cases its doc comment promises and no install
+// path produces.
+//
+// A declaration that is empty, or that names somebody else's role, grants OUR
+// role to nobody. Treating either as "declared" would print the note that says
+// users holding roles of the configuration are already served, which is the
+// exact falsehood the observing selector exists to prevent. Nothing else in the
+// suite reaches these two shapes, because no code path builds them: measured,
+// weakening the check to "any DefaultRoles element is enough" left every other
+// test in this package green.
+func TestDeclaresOurRoleAsDefaultReadsWhatItClaims(t *testing.T) {
+	const head = "<Properties>\n\t\t\t<Name>MCP_HTTPService</Name>\n"
+	const tail = "\t\t\t<Vendor/>\n</Properties>"
+
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "declared, as shipped",
+			body: "\t\t\t<DefaultRoles>\n\t\t\t\t<xr:Item xsi:type=\"xr:MDObjectRef\">Role.MCP_ОсновнаяРоль</xr:Item>\n\t\t\t</DefaultRoles>\n",
+			want: true,
+		},
+		{
+			name: "empty self-closing declaration grants nobody anything",
+			body: "\t\t\t<DefaultRoles/>\n",
+			want: false,
+		},
+		{
+			name: "declaration naming somebody else's role",
+			body: "\t\t\t<DefaultRoles>\n\t\t\t\t<xr:Item xsi:type=\"xr:MDObjectRef\">Role.ПолныеПрава</xr:Item>\n\t\t\t</DefaultRoles>\n",
+			want: false,
+		},
+		{
+			name: "no declaration at all",
+			body: "",
+			want: false,
+		},
+	}
+
+	// The set must contain both answers, or a function returning a constant
+	// would satisfy it.
+	trues := 0
+	for _, tc := range cases {
+		if tc.want {
+			trues++
+		}
+	}
+	if trues == 0 || trues == len(cases) {
+		t.Fatalf("%d of %d cases expect true; a set that expects one answer cannot detect a "+
+			"constant", trues, len(cases))
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "Configuration.xml")
+			if err := os.WriteFile(path, []byte(head+tc.body+tail), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got := declaresOurRoleAsDefault(path); got != tc.want {
+				t.Errorf("declaresOurRoleAsDefault = %v, want %v, for:\n%s", got, tc.want, tc.body)
+			}
+		})
+	}
+
+	// A file that cannot be read counts as NOT declared, so the note falls back
+	// to telling the customer to assign the role by hand.
+	if declaresOurRoleAsDefault(filepath.Join(t.TempDir(), "absent.xml")) {
+		t.Error("an unreadable configuration was reported as declaring the role")
+	}
 }
 
 // TestDefaultRolesRegexpHandlesBothSpellings pins the regexp against the empty
