@@ -200,7 +200,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		// ManagedApplication, DESIGNER rejects the extension with a controlled
 		// property mismatch error mentioning "ОсновнойРежимЗапуска".
 		// Remove the property and retry.
-		if err != nil && strings.Contains(err.Error(), "ОсновнойРежимЗапуска") {
+		if isRunModeMismatchError(err) {
 			fmt.Println("Retrying without DefaultRunMode property (controlled property mismatch)...")
 			cfgData, readErr := os.ReadFile(cfgPath)
 			if readErr != nil {
@@ -246,7 +246,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		// Old configurations (compat mode 8.3.13 and below) reject extensions
 		// that override inherited properties. Strip all controlled properties
 		// from the extension Configuration.xml and retry.
-		if err != nil && strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов") {
+		if isInheritedOverrideError(err) {
 			fmt.Println("Retrying without inherited properties (old compat mode)...")
 			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
 				return fmt.Errorf("loading extension config: strip inherited properties: %w", patchErr)
@@ -273,7 +273,16 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		"/UpdateDBCfg",
 		"-Extension", extensionName,
 	); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов") {
+		// Both retries below reload before re-applying, because /UpdateDBCfg does
+		// NOT read extDir: it applies whatever the last successful
+		// /LoadConfigFromFiles put into the infobase. Stripping a property
+		// without loading the stripped XML again changes nothing the apply leg
+		// can see.
+		//
+		// The two predicates are disjoint and both stay reachable: each matches a
+		// different DESIGNER text, and neither is a prefix of the other.
+		switch {
+		case isInheritedOverrideError(err):
 			fmt.Println("Retrying without inherited properties (old compat mode)...")
 			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
 				return fmt.Errorf("updating database config: strip inherited properties: %w", patchErr)
@@ -290,14 +299,62 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			); retryErr != nil {
 				return classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr))
 			}
-			fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-			fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-			fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
-			return nil
+
+		case isRunModeMismatchError(err):
+			// The base configuration's DefaultRunMode differs from ours, and the
+			// platform treats that property as controlled. Measured on 1С 8.3.27:
+			// /LoadConfigFromFiles accepts the extension and only /UpdateDBCfg
+			// refuses it, exiting 101, so the identical retry on the load leg
+			// above never fires for this error on 8.3.14 and newer.
+			//
+			// The removal is NARROW on purpose. stripInheritedProperties would
+			// take four further elements of the shipped configuration with it,
+			// the extension's own Version among them; a run-mode mismatch must
+			// cost the customer the run mode and nothing else.
+			fmt.Println("Retrying without DefaultRunMode property (controlled property mismatch)...")
+			if stripErr := stripDefaultRunMode(cfgPath); stripErr != nil {
+				return fmt.Errorf("updating database config: strip DefaultRunMode: %w", stripErr)
+			}
+			if reloadErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+				"/LoadConfigFromFiles", extDir,
+				"-Extension", extensionName,
+			); reloadErr != nil {
+				return classifyDesignerError(
+					fmt.Errorf("reloading extension config after DefaultRunMode strip: %w", reloadErr))
+			}
+			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+				"/UpdateDBCfg",
+				"-Extension", extensionName,
+			); retryErr != nil {
+				return classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr))
+			}
+
+		default:
+			return classifyDesignerError(fmt.Errorf("updating database config: %w", err))
 		}
-		return classifyDesignerError(fmt.Errorf("updating database config: %w", err))
 	}
 	return nil
+}
+
+// isRunModeMismatchError reports whether a DESIGNER failure is the controlled
+// property mismatch on DefaultRunMode. Measured on 1С 8.3.27, the platform words
+// it as «Значение контролируемого свойства ОсновнойРежимЗапуска у объекта не
+// совпадает со значением в расширяемой конфигурации», so the property name in
+// the configurator's own language is the part worth matching.
+//
+//garble:ignore
+func isRunModeMismatchError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "ОсновнойРежимЗапуска")
+}
+
+// isInheritedOverrideError reports whether a DESIGNER failure is the refusal old
+// configurations (compat mode 8.3.13 and below) give to an extension that
+// overrides inherited properties of the base configuration.
+//
+//garble:ignore
+func isInheritedOverrideError(err error) bool {
+	return err != nil &&
+		strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов")
 }
 
 // compatModeNotFoundRe matches the DESIGNER batch-mode error reported when the
@@ -630,6 +687,24 @@ func stripInheritedProperties(cfgPath string) error {
 	}
 	patched := inheritedPropertyRe.ReplaceAll(data, nil)
 	return os.WriteFile(cfgPath, patched, 0o644)
+}
+
+// stripDefaultRunMode removes ONLY the DefaultRunMode element from
+// Configuration.xml, for the case where the base configuration sets a different
+// run mode and the platform treats that property as controlled.
+//
+// This is deliberately not stripInheritedProperties. That one names twelve
+// elements and, on the extension as shipped, takes four besides the run mode,
+// among them the extension's own Version. A run-mode mismatch is a one-property
+// disagreement and must be paid for with one property.
+//
+//garble:ignore
+func stripDefaultRunMode(cfgPath string) error {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfgPath, defaultRunModeRe.ReplaceAll(data, nil), 0o644)
 }
 
 // stripUnsupportedElements removes XML elements that older 1C platforms do not
