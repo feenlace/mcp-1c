@@ -50,6 +50,9 @@
 				<v8:Value xsi:type="app:ApplicationUsePurpose">PlatformApplication</v8:Value>
 			</UsePurposes>
 			<ScriptVariant>Russian</ScriptVariant>
+			<DefaultRoles>
+				<xr:Item xsi:type="xr:MDObjectRef">Role.MCP_ОсновнаяРоль</xr:Item>
+			</DefaultRoles>
 			<Vendor/>
 			<Version>0.4.7</Version>
 			<DefaultLanguage>Language.Русский</DefaultLanguage>
