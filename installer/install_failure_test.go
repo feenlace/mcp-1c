@@ -47,7 +47,7 @@ func TestInstallSaysWhatAFailedApplyLeavesBehind(t *testing.T) {
 
 		var err error
 		out := captureStdout(t, func() {
-			err = Install(extension.Source, `C:\base`, false, exe, "", "", shippedPlatform)
+			err = Install(extension.Source, `C:\base`, false, exe, "", "", shippedPlatform, false)
 		})
 		if err == nil {
 			t.Fatalf("Install reported success while /UpdateDBCfg refused every time\nstdout:\n%s", out)
@@ -84,7 +84,7 @@ func TestInstallSaysWhatAFailedApplyLeavesBehind(t *testing.T) {
 
 		var err error
 		out := captureStdout(t, func() {
-			err = Install(extension.Source, `C:\base`, false, exe, "", "", shippedPlatform)
+			err = Install(extension.Source, `C:\base`, false, exe, "", "", shippedPlatform, false)
 		})
 		if err == nil {
 			t.Fatalf("Install reported success while /LoadConfigFromFiles refused\nstdout:\n%s", out)
