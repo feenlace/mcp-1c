@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -54,7 +55,51 @@ const (
 	// apply-leg switch, so both branches are exercised end to end and not only
 	// through their predicates.
 	fakeModeInheritedOverride = "inherited-override"
+	// fakeModeInheritedAlways refuses /UpdateDBCfg unconditionally with the
+	// inherited-override text, so that branch's retry runs and still fails.
+	fakeModeInheritedAlways = "inherited-always"
+	// fakeModeCompatNotFound is the base whose compat mode forbids extensions
+	// outright. /LoadConfigFromFiles CLAIMS success and the extension is
+	// silently rejected, so /UpdateDBCfg reports it missing. Nothing is loaded.
+	fakeModeCompatNotFound = "notfound"
+	// fakeModeUnrelatedApplyFailure refuses /UpdateDBCfg with a failure that
+	// matches no retry predicate, which is the ordinary way to reach the
+	// default branch of the apply-leg switch.
+	fakeModeUnrelatedApplyFailure = "unrelated"
+	// fakeModeExistsThenRunModeAlways makes the FIRST load report that the
+	// extension already exists, so Install deletes the old one and reloads, and
+	// then refuses every apply. This is the run in which the note used to
+	// promise a previous version four lines after we printed that we deleted it.
+	fakeModeExistsThenRunModeAlways = "exists-runmode-always"
+	// fakeModeBothPredicates emits a log carrying BOTH retry texts at once,
+	// which a real /Out can do because it accumulates every message of a run.
+	// Only the wide strip clears the refusal, so the order of the two cases in
+	// the apply-leg switch decides whether the install is recovered.
+	fakeModeBothPredicates = "both-predicates"
 )
+
+// Optional flags, written as files in the fake's directory alongside the mode.
+const (
+	// fakeReadOnlyAfterLoadFile makes the fake chmod the extension's
+	// Configuration.xml read-only once it has been loaded, so the next strip in
+	// Install fails on write. That is the only way to reach the strip-error
+	// return of either retry branch.
+	fakeReadOnlyAfterLoadFile = "readonly-after-load"
+	// fakeFailLoadsAfterFile holds a number N: loads after the N-th one fail.
+	// It reaches the reload-error return of either retry branch.
+	fakeFailLoadsAfterFile = "fail-loads-after"
+)
+
+// alreadyExistsLog is the load refusal that makes Install delete the installed
+// extension and load again.
+const alreadyExistsLog = "Ошибка: Уже существует расширение конфигурации MCP_HTTPService"
+
+// compatNotFoundLog is what a base whose compat mode forbids extensions reports
+// from /UpdateDBCfg. classifyDesignerError recognises this text.
+const compatNotFoundLog = "Не найдено: расширение конфигурации с указанным именем не найдено: " + extensionName
+
+// unrelatedApplyLog is an apply failure no retry predicate matches.
+const unrelatedApplyLog = "Ошибка: Неверный пароль базы данных"
 
 // inheritedOverrideLog is the refusal old configurations give to an extension
 // that overrides inherited properties of the base configuration.
@@ -109,6 +154,19 @@ func serveFakeDesigner(dir string, args []string) int {
 			writeFakeLog(outPath, loadFailureLog)
 			return 1
 		}
+		attempt := countFakeCalls(dir, "/LoadConfigFromFiles")
+		// The first load of this mode reports the extension as already
+		// installed, which sends Install through the delete and reload.
+		if mode == fakeModeExistsThenRunModeAlways && attempt == 1 {
+			writeFakeLog(outPath, alreadyExistsLog)
+			return 1
+		}
+		if limit := readFakeFile(dir, fakeFailLoadsAfterFile); limit != "" {
+			if n, convErr := strconv.Atoi(limit); convErr == nil && attempt > n {
+				writeFakeLog(outPath, loadFailureLog)
+				return 1
+			}
+		}
 		cfg, err := os.ReadFile(filepath.Join(extDir, "Configuration.xml"))
 		if err != nil {
 			writeFakeLog(outPath, "Не найдено: "+err.Error())
@@ -126,6 +184,11 @@ func serveFakeDesigner(dir string, args []string) int {
 			writeFakeLog(outPath, err.Error())
 			return 1
 		}
+		// Make the next strip fail on write, which is the only route to the
+		// strip-error return of either retry branch.
+		if readFakeFileExists(dir, fakeReadOnlyAfterLoadFile) {
+			os.Chmod(filepath.Join(extDir, "Configuration.xml"), 0o444) //nolint:errcheck // best effort
+		}
 		writeFakeLog(outPath, "Загрузка конфигурации из файлов завершена")
 		return 0
 
@@ -138,9 +201,18 @@ func serveFakeDesigner(dir string, args []string) int {
 			return 1
 		}
 		switch mode {
-		case fakeModeRunModeAlways:
+		case fakeModeRunModeAlways, fakeModeExistsThenRunModeAlways:
 			writeFakeLog(outPath, runModeMismatchLog)
 			return 101
+		case fakeModeInheritedAlways:
+			writeFakeLog(outPath, inheritedOverrideLog)
+			return 101
+		case fakeModeCompatNotFound:
+			writeFakeLog(outPath, compatNotFoundLog)
+			return 1
+		case fakeModeUnrelatedApplyFailure:
+			writeFakeLog(outPath, unrelatedApplyLog)
+			return 1
 		case fakeModeRunModeMismatch:
 			if strings.Contains(string(loaded), "<DefaultRunMode>") {
 				writeFakeLog(outPath, runModeMismatchLog)
@@ -152,6 +224,13 @@ func serveFakeDesigner(dir string, args []string) int {
 			// this refusal.
 			if strings.Contains(string(loaded), "<ScriptVariant>") {
 				writeFakeLog(outPath, inheritedOverrideLog)
+				return 101
+			}
+		case fakeModeBothPredicates:
+			// One /Out carrying both refusals. Only the wide strip clears it,
+			// so recovering the install depends on which case is tried first.
+			if strings.Contains(string(loaded), "<ScriptVariant>") {
+				writeFakeLog(outPath, inheritedOverrideLog+"\n"+runModeMismatchLog)
 				return 101
 			}
 		}
@@ -195,6 +274,27 @@ func recordFakeCall(dir, op string, args []string) {
 	fmt.Fprintf(f, "%s\t%s\n", op, strings.Join(args, "\t"))
 }
 
+// countFakeCalls returns how many invocations of the given operation have been
+// recorded so far, including the one being served.
+func countFakeCalls(dir, op string) int {
+	raw, err := os.ReadFile(filepath.Join(dir, fakeCallsFile))
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, op+"\t") {
+			n++
+		}
+	}
+	return n
+}
+
+func readFakeFileExists(dir, name string) bool {
+	_, err := os.Stat(filepath.Join(dir, name))
+	return err == nil
+}
+
 func readFakeFile(dir, name string) string {
 	data, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
@@ -214,12 +314,19 @@ func writeFakeLog(outPath, text string) {
 
 // newFakeDesigner prepares a directory for the fake, points the environment at
 // it and returns the directory. The platform path callers should pass to Install
-// is the test binary itself.
-func newFakeDesigner(t *testing.T, mode string) string {
+// is the test binary itself. Extra flag files are created empty unless the name
+// carries a value after '=', as in "fail-loads-after=1".
+func newFakeDesigner(t *testing.T, mode string, flags ...string) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, fakeModeFile), []byte(mode), 0o644); err != nil {
 		t.Fatalf("write fake mode: %v", err)
+	}
+	for _, flag := range flags {
+		name, value, _ := strings.Cut(flag, "=")
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0o644); err != nil {
+			t.Fatalf("write fake flag %q: %v", name, err)
+		}
 	}
 	t.Setenv(fakeDesignerDirEnv, dir)
 	return dir

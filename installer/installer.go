@@ -158,6 +158,11 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		"-Extension", extensionName,
 	)
 
+	// removedOld records that this run deleted an extension that was already
+	// installed. It changes what an apply-leg failure can truthfully say: the
+	// previous version is gone, so it is not still serving.
+	removedOld := false
+
 	// If extension already exists, delete it and retry the load.
 	if err != nil && strings.Contains(err.Error(), "Уже существует") {
 		if delErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
@@ -166,6 +171,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		); delErr != nil {
 			return fmt.Errorf("deleting old extension before retry: %w", delErr)
 		}
+		removedOld = true
 		fmt.Println("Removed old extension:", extensionName)
 
 		err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
@@ -276,19 +282,19 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		case isInheritedOverrideError(err):
 			fmt.Println("Retrying without inherited properties (old compat mode)...")
 			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
-				return notApplied(fmt.Errorf("updating database config: strip inherited properties: %w", patchErr))
+				return notApplied(fmt.Errorf("updating database config: strip inherited properties: %w", patchErr), removedOld)
 			}
 			if reloadErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			); reloadErr != nil {
-				return notApplied(classifyDesignerError(fmt.Errorf("reloading extension config after strip: %w", reloadErr)))
+				return notApplied(classifyDesignerError(fmt.Errorf("reloading extension config after strip: %w", reloadErr)), removedOld)
 			}
 			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/UpdateDBCfg",
 				"-Extension", extensionName,
 			); retryErr != nil {
-				return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr)))
+				return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr)), removedOld)
 			}
 
 		case isRunModeMismatchError(err):
@@ -304,24 +310,24 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			// cost the customer the run mode and nothing else.
 			fmt.Println("Retrying without DefaultRunMode property (controlled property mismatch)...")
 			if stripErr := stripDefaultRunMode(cfgPath); stripErr != nil {
-				return notApplied(fmt.Errorf("updating database config: strip DefaultRunMode: %w", stripErr))
+				return notApplied(fmt.Errorf("updating database config: strip DefaultRunMode: %w", stripErr), removedOld)
 			}
 			if reloadErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			); reloadErr != nil {
 				return notApplied(classifyDesignerError(
-					fmt.Errorf("reloading extension config after DefaultRunMode strip: %w", reloadErr)))
+					fmt.Errorf("reloading extension config after DefaultRunMode strip: %w", reloadErr)), removedOld)
 			}
 			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/UpdateDBCfg",
 				"-Extension", extensionName,
 			); retryErr != nil {
-				return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr)))
+				return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr)), removedOld)
 			}
 
 		default:
-			return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", err)))
+			return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", err)), removedOld)
 		}
 	}
 
@@ -364,24 +370,58 @@ func printRoleNote() {
 // who read only the error concluded «обновилось всё-таки» and went on running the
 // old code.
 //
+// Each sentence stands alone because each one is true under a different
+// condition, and a sentence printed outside its condition is a lie about the
+// customer's base rather than a wordier message.
+//
 //garble:ignore
-const notAppliedNote = "Изменения в базу данных не внесены: расширение загружено в конфигурацию, но не применено.\n" +
-	"Если расширение в этой базе уже стояло, продолжает работать прежняя его версия, " +
-	"а новая осталась загруженной и не применённой.\n" +
-	"Если это первая установка, расширение не работает.\n" +
-	"Устраните причину и повторите установку."
+const (
+	notAppliedHead = "Изменения в базу данных не внесены: расширение загружено в конфигурацию, но не применено."
+	// True only when no previously installed extension was removed during this
+	// run. When one was, the old version is gone and cannot be working.
+	notAppliedPreviousKeepsWorking = "Если расширение в этой базе уже стояло, продолжает работать прежняя его версия, " +
+		"а новая осталась загруженной и не применённой."
+	notAppliedFirstInstall = "Если это первая установка, расширение не работает."
+	// Replaces both conditionals when Install deleted the installed extension
+	// before loading: neither "the previous version keeps working" nor "this is
+	// the first install" describes that run.
+	notAppliedPreviousDeleted = "Прежняя версия расширения была удалена перед загрузкой, " +
+		"поэтому сейчас расширение не работает."
+	notAppliedAdvice = "Устраните причину и повторите установку."
+)
 
-// notApplied appends notAppliedNote to an apply-leg failure. It is used ONLY
-// after /LoadConfigFromFiles has succeeded: on a load failure nothing reached
-// the infobase, and the note would be a second false statement in place of an
+// notAppliedNote renders the note for a run.
+//
+//garble:ignore
+func notAppliedNote(removedOld bool) string {
+	lines := []string{notAppliedHead}
+	if removedOld {
+		lines = append(lines, notAppliedPreviousDeleted)
+	} else {
+		lines = append(lines, notAppliedPreviousKeepsWorking, notAppliedFirstInstall)
+	}
+	return strings.Join(append(lines, notAppliedAdvice), "\n")
+}
+
+// notApplied appends the note to an apply-leg failure. It is used ONLY after
+// /LoadConfigFromFiles has succeeded: on a load failure nothing reached the
+// infobase, and the note would be a second false statement in place of an
 // incomplete one.
 //
 //garble:ignore
-func notApplied(err error) error {
+func notApplied(err error, removedOld bool) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%w\n\n%s", err, notAppliedNote)
+	// The base whose compat mode forbids extensions reaches the apply leg with
+	// nothing loaded: /LoadConfigFromFiles only CLAIMED success, the extension
+	// was silently rejected, and /UpdateDBCfg reports it missing. Every sentence
+	// of the note is false there, and it would contradict the diagnosis it is
+	// appended to, which tells the customer the base takes no extensions at all.
+	if compatModeNotFoundRe.MatchString(err.Error()) {
+		return err
+	}
+	return fmt.Errorf("%w\n\n%s", err, notAppliedNote(removedOld))
 }
 
 // isRunModeMismatchError reports whether a DESIGNER failure is the controlled

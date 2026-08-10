@@ -28,7 +28,7 @@ import (
 func TestInstallSaysWhatAFailedApplyLeavesBehind(t *testing.T) {
 	// The note is read out of production, never copied, so the test cannot
 	// agree with a stale version of the text.
-	note := notAppliedNote
+	note := notAppliedNote(false)
 	if strings.Count(note, "\n") < 3 {
 		t.Fatalf("the note is %d lines. It has to state the fact and then what to do, and a "+
 			"one-line note cannot do both", strings.Count(note, "\n")+1)
