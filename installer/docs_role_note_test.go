@@ -23,12 +23,15 @@ import (
 // terminal, and forcing them to be the same sentence would be pinning a
 // coincidence. What is compared is the FACTS a reader needs on either route.
 //
-// The facts changed once already. They used to include «Полные права» as the
-// users who need no further action, which the measurement then contradicted:
-// those users are served by the default-role declaration, and under
-// --strip-default-roles they are refused like everyone else. A fact list that
-// outlives the thing it describes is the defect this file exists to catch, so it
-// is now the flag, not a role name, that has to appear on both routes.
+// The facts have changed twice, and both times because a measurement contradicted
+// them. First they named «Полные права» as the users who need no further action;
+// on a real configuration an administrator keeps access either way. Then they
+// required the word «вручную», which was the retired instruction itself: a role
+// assigned to a user directly is deleted by the next recalculation of user roles
+// wherever the Управление доступом subsystem is present. What both routes must
+// now carry is the route that survives that recalculation, the профиль групп
+// доступа. A fact list that outlives the thing it describes is the defect this
+// file exists to catch, and it has now been that defect twice.
 // ---------------------------------------------------------------------------
 
 // roleDocFact is one thing the reader has to be told, and a fragment that says
@@ -41,8 +44,8 @@ type roleDocFact struct {
 
 var roleDocFacts = []roleDocFact{
 	{"which role is involved", "MCP_ОсновнаяРоль"},
-	{"that the role is assigned by hand, because the extension cannot assign it", "вручную"},
-	{"the flag that removes the automatic grant, and therefore when the role becomes mandatory",
+	{"the route to use where the configuration has Управление доступом", "профиль групп доступа"},
+	{"the flag that removes the automatic grant, and therefore when access must be granted explicitly",
 		"--strip-default-roles"},
 }
 
@@ -136,8 +139,8 @@ func TestRoleInstructionIsDocumentedOnBothInstallRoutes(t *testing.T) {
 // on itself: it runs the same reading over a document that carries the
 // instruction on one route only, and requires a complaint about the other.
 func TestRoleInstructionSplitCanFail(t *testing.T) {
-	const oneSidedDoc = "Ставится командой mcp-1c --install, роль MCP_ОсновнаяРоль назначается вручную, " +
-		"а с флагом --strip-default-roles она нужна каждому.\n" +
+	const oneSidedDoc = "Ставится командой mcp-1c --install, доступ выдаётся через профиль групп доступа " +
+		"для роли MCP_ОсновнаяРоль, а с флагом --strip-default-roles он нужен каждому.\n" +
 		"### Установка через Конфигуратор\nОткройте базу в Конфигураторе и нажмите F7.\n"
 
 	cut := strings.Index(oneSidedDoc, "### Установка через Конфигуратор")
