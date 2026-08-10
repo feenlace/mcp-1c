@@ -2,6 +2,7 @@ package installer
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -414,7 +415,12 @@ func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
 		// Stems, not one grammatical case: Russian declines both of these and a
 		// guard pinned to the nominative would pass a note that never mentions
 		// them at all in any other form.
-		for _, required := range []string{"управление доступом", "групп доступа"} {
+		requiredFragments := []string{"управление доступом", "групп доступа"}
+		if len(requiredFragments) < 2 {
+			t.Errorf("the split requirement lists %d fragments; both branches need naming, and an "+
+				"emptied list checks neither", len(requiredFragments))
+		}
+		for _, required := range requiredFragments {
 			if !strings.Contains(joined, required) {
 				t.Errorf("%s never mentions %q, so it does not tell the reader which of the two "+
 					"configurations they are in or how access is delivered there", name, required)
@@ -435,6 +441,35 @@ func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
 	// whatever words it is spelled with.
 	imperatives := []string{"назначьте", "назначайте", "назначь", "выдайте", "выдавайте", "выдай"}
 	conditions := []string{"если", "иначе", "тогда"}
+
+	// Shrink-only pins, and the entries that must never leave written down a
+	// SECOND time, independently of the lists they constrain. A pin derived from
+	// a list cannot notice a deletion from that list: emptying any of these three
+	// leaves every other test in this package green, because a guard that stops
+	// guarding produces no failure while the text is still clean.
+	//
+	// «вручную» is named because it is the whole retired instruction in one word,
+	// and «назначьте» and «если» because between them they are what caught the
+	// shapes that shipped green.
+	for _, pin := range []struct {
+		name string
+		set  []string
+		min  int
+		keep string
+	}{
+		{"retired", retired, 4, "вручную"},
+		{"imperatives", imperatives, 6, "назначьте"},
+		{"conditions", conditions, 3, "если"},
+	} {
+		if len(pin.set) < pin.min {
+			t.Errorf("%s has %d entries, want at least %d: this set has only ever been widened, and "+
+				"shrinking it silently removes checks", pin.name, len(pin.set), pin.min)
+		}
+		if !slices.Contains(pin.set, pin.keep) {
+			t.Errorf("%s no longer contains %q. That entry is what catches the instruction this test "+
+				"exists to keep out", pin.name, pin.keep)
+		}
+	}
 	checked := 0
 	for name, lines := range notes {
 		for _, line := range lines {
