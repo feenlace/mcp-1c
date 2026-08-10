@@ -30,6 +30,25 @@ import (
 // it and required to complain. That is the mutation this file performs on
 // itself: without it, a claim whose fragments happen to be unfalsifiable would
 // look exactly like a claim that holds.
+//
+// DECLARED BOUNDARY, so that nobody reads this file as a proof of meaning.
+// The defence against negation is a BLACKLIST: a fixed set of forbidden
+// fragments per claim, plus disavowalFragments. A blacklist of the ways Russian
+// can negate a sentence cannot be completed, and pretending otherwise would be
+// worse than admitting it. Measured against this file as it stands, on the
+// administrator pairing: of nine disavowal openings tried that are not on the
+// list, nine got through, and of four inversions tried that keep every pinned
+// phrase intact, four got through. Those two numbers describe the samples, not
+// the guard. What they show is the shape: the blacklist stops exactly what it
+// enumerates and nothing else.
+//
+// So what this file proves is bounded and worth stating plainly. It catches the
+// inversions it enumerates, which are the ones that were actually shipped or
+// actually attempted: the swap, the swap in a different case, and a leading
+// disavowal. It does NOT prove that a sentence means what it claims. Widening
+// the blacklist raises the cost of the next inversion; it never closes the set.
+// The remaining defence is that a human wrote the sentence and another human
+// read it.
 // ---------------------------------------------------------------------------
 
 // textClaim is one customer-facing sentence and the claim it makes.
@@ -309,21 +328,32 @@ func TestNoTextClaimsFullRightsUsersAreRefused(t *testing.T) {
 	}
 }
 
-// TestEveryCustomerFacingSentenceIsPinned makes the tables above cover the whole
-// texts. A sentence added to either text without a claim here is unpinned, and
-// unpinned is exactly the state both texts were in.
-func TestEveryCustomerFacingSentenceIsPinned(t *testing.T) {
-	pinned := map[string]bool{}
+// TestEveryCustomerFacingSentenceHasAClaim proves COVERAGE and nothing more, and
+// its old name promised more than that.
+//
+// textClaim.text is a REFERENCE to the production variable, not a copy of it, so
+// editing a shipped sentence edits the claim's text with it and this test cannot
+// see the change. Calling it "IsPinned" told the next reader that the text was
+// nailed down here; it is not. What is nailed down here is that no sentence
+// ships WITHOUT a claim entry, so adding a line to either text without adding a
+// claim reddens. Edits to an existing sentence are defended one test up, by the
+// must and mustNot fragments, within the boundary declared at the top of this
+// file.
+//
+// The copy was deliberately not duplicated: a second spelling of every sentence
+// is a second place to update on each edit, and it would catch only what the
+// fragment tables already judge on meaning rather than on bytes.
+func TestEveryCustomerFacingSentenceHasAClaim(t *testing.T) {
+	claimed := map[string]bool{}
 	all := append(roleNoteClaims(), roleNoteStrippedClaims()...)
 	for _, c := range append(all, notAppliedClaims()...) {
-		pinned[c.text] = true
+		claimed[c.text] = true
 	}
 
 	for _, set := range [][]string{roleNoteLines, roleNoteStrippedLines} {
 		for _, line := range set {
-			if !pinned[line] {
-				t.Errorf("this role-note line makes no pinned claim, so it could be replaced by its "+
-					"negation without reddening anything: %q", line)
+			if !claimed[line] {
+				t.Errorf("this role-note line has no claim entry, so nothing above judges what it says: %q", line)
 			}
 		}
 	}
@@ -331,16 +361,16 @@ func TestEveryCustomerFacingSentenceIsPinned(t *testing.T) {
 	// two conditionals it replaces.
 	for _, rendered := range []string{notAppliedNote(false), notAppliedNote(true)} {
 		for _, line := range strings.Split(rendered, "\n") {
-			if !pinned[line] {
-				t.Errorf("this note sentence makes no pinned claim: %q", line)
+			if !claimed[line] {
+				t.Errorf("this note sentence has no claim entry, so nothing above judges what it says: %q", line)
 			}
 		}
 	}
 
 	// Control: the map really is doing work. A sentence that is NOT part of
 	// either text must not be reported as pinned.
-	if pinned["Расширение установлено успешно."] {
-		t.Fatal("the pinned set answers yes to a sentence neither text contains, so its verdicts above " +
-			"mean nothing")
+	if claimed["Расширение установлено успешно."] {
+		t.Fatal("the claimed set answers yes to a sentence neither text contains, so its verdicts " +
+			"above mean nothing")
 	}
 }
