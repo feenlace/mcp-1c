@@ -1,0 +1,168 @@
+package installer
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+// ---------------------------------------------------------------------------
+// The role instruction has to be in the documentation, because on the manual
+// route there is no stdout to print it to.
+//
+// docs/1c-setup.md walks a customer through downloading MCP_HTTPService.cfe and
+// adding it in the Конфигуратор. That customer never runs the binary and never
+// sees a line the installer prints. Everything printRoleNote says is exactly as
+// true for them, and until now nothing in the tree made sure they were told.
+//
+// The guard is about coverage of the ROUTES, not about wording. Each file is cut
+// at the heading that starts the manual route and both halves are required to
+// carry the instruction, so adding it once at the top and leaving the manual
+// route bare does not pass. The wording is not compared with roleNoteLines: the
+// documentation is prose for a reader with a mouse and the note is a line in a
+// terminal, and forcing them to be the same sentence would be pinning a
+// coincidence. What is compared is the FACTS a reader needs on either route.
+//
+// The facts have changed twice, and both times because a measurement contradicted
+// them. First they named «Полные права» as the users who need no further action;
+// on a real configuration an administrator keeps access either way. Then they
+// required the word «вручную», which was the retired instruction itself: a role
+// assigned to a user directly is deleted by the next recalculation of user roles
+// wherever the Управление доступом subsystem is present. What both routes must
+// now carry is the route that survives that recalculation, the профиль групп
+// доступа. A fact list that outlives the thing it describes is the defect this
+// file exists to catch, and it has now been that defect twice.
+// ---------------------------------------------------------------------------
+
+// roleDocFact is one thing the reader has to be told, and a fragment that says
+// it. Only fragments free of markup and of dashes are used, so the check does
+// not depend on how the sentence is decorated.
+type roleDocFact struct {
+	what     string
+	fragment string
+}
+
+var roleDocFacts = []roleDocFact{
+	{"which role is involved", "MCP_ОсновнаяРоль"},
+	{"the route to use where the configuration has Управление доступом", "профиль групп доступа"},
+	{"the flag that removes the automatic grant, and therefore when access must be granted explicitly",
+		"--strip-default-roles"},
+}
+
+// roleDocs are the documents that walk a reader through installing the
+// extension, with the heading at which each one turns from the command line
+// route to the manual one.
+var roleDocs = []struct {
+	path         string
+	manualRoute  string
+	manualRouteN string
+	// manualRouteEnd is the heading at which the manual route stops. Without it
+	// the "manual route" ran to the end of the file and swept in the
+	// troubleshooting section, which mentions the same facts: measured, deleting
+	// the role step from the manual route left this test green because prose
+	// three sections below satisfied it.
+	manualRouteEnd string
+}{
+	{"../docs/1c-setup.md", "### Установка через Конфигуратор", "Установка через Конфигуратор",
+		"## Шаг 4."},
+	{"../docs/getting-started.md", "**Вручную (если автоматическая не сработала):**", "Вручную",
+		"### Шаг 3."},
+}
+
+func TestRoleInstructionIsDocumentedOnBothInstallRoutes(t *testing.T) {
+	if len(roleDocFacts) < 3 {
+		t.Fatalf("the guard checks %d facts; the note carries three and all three matter",
+			len(roleDocFacts))
+	}
+
+	for _, doc := range roleDocs {
+		t.Run(doc.path, func(t *testing.T) {
+			raw, err := os.ReadFile(doc.path)
+			if err != nil {
+				t.Fatalf("read %s: %v", doc.path, err)
+			}
+			text := string(raw)
+
+			cut := strings.Index(text, doc.manualRoute)
+			if cut < 0 {
+				t.Fatalf("%s no longer contains the heading %q that starts its manual route, so this "+
+					"test cannot tell the two routes apart", doc.path, doc.manualRoute)
+			}
+			automatic, manual := text[:cut], text[cut:]
+
+			// The manual route ENDS somewhere. Everything past that heading is a
+			// different section and must not stand in for the route's own text.
+			stop := strings.Index(manual, doc.manualRouteEnd)
+			if stop < 0 {
+				t.Fatalf("%s no longer contains %q, the heading at which its manual route ends, so the "+
+					"route cannot be bounded and later sections would answer for it",
+					doc.path, doc.manualRouteEnd)
+			}
+			tail := manual[stop:]
+			manual = manual[:stop]
+
+			// Positive controls: the cut produced three real parts, and each is
+			// the one it is claimed to be.
+			if !strings.Contains(automatic, "--install") {
+				t.Fatalf("%s: the half before %q does not mention --install, so it is not the command "+
+					"line route and the split is wrong", doc.path, doc.manualRouteN)
+			}
+			if !strings.Contains(manual, "Конфигуратор") {
+				t.Fatalf("%s: the section after %q does not mention the Конфигуратор, so it is not the "+
+					"manual route and the split is wrong", doc.path, doc.manualRouteN)
+			}
+			if len(tail) == 0 {
+				t.Fatalf("%s: nothing follows the manual route, so bounding it changed nothing and the "+
+					"bound is not being exercised", doc.path)
+			}
+
+			for _, half := range []struct {
+				name string
+				text string
+			}{
+				{"the command line route", automatic},
+				{"the manual route", manual},
+			} {
+				for _, fact := range roleDocFacts {
+					if !strings.Contains(half.text, fact.fragment) {
+						t.Errorf("%s, %s: nothing states %s (looked for %q). A reader who takes this "+
+							"route is never told, and on the manual route there is no stdout to tell them",
+							doc.path, half.name, fact.what, fact.fragment)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestRoleInstructionSplitCanFail is the mutation the test above cannot perform
+// on itself: it runs the same reading over a document that carries the
+// instruction on one route only, and requires a complaint about the other.
+func TestRoleInstructionSplitCanFail(t *testing.T) {
+	const oneSidedDoc = "Ставится командой mcp-1c --install, доступ выдаётся через профиль групп доступа " +
+		"для роли MCP_ОсновнаяРоль, а с флагом --strip-default-roles он нужен каждому.\n" +
+		"### Установка через Конфигуратор\nОткройте базу в Конфигураторе и нажмите F7.\n"
+
+	cut := strings.Index(oneSidedDoc, "### Установка через Конфигуратор")
+	if cut < 0 {
+		t.Fatal("the control document lost its own heading")
+	}
+	automatic, manual := oneSidedDoc[:cut], oneSidedDoc[cut:]
+
+	missing := 0
+	for _, fact := range roleDocFacts {
+		if !strings.Contains(manual, fact.fragment) {
+			missing++
+		}
+	}
+	if missing != len(roleDocFacts) {
+		t.Errorf("the manual half of the one-sided control is missing %d of %d facts, want all of "+
+			"them; the reading does not distinguish the halves", missing, len(roleDocFacts))
+	}
+	for _, fact := range roleDocFacts {
+		if !strings.Contains(automatic, fact.fragment) {
+			t.Errorf("the automatic half of the control should carry every fact, but %q is absent",
+				fact.fragment)
+		}
+	}
+}

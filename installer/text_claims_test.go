@@ -1,0 +1,630 @@
+package installer
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// ---------------------------------------------------------------------------
+// What the sentences SAY, not that some string was printed.
+//
+// Every guard on these texts proved delivery: the note is attached to the
+// error, the role note is printed once per successful install. Delivery is not
+// truth. Replacing every line of both texts with its exact negation left the
+// package green, and a lie is the only defect this text can have: it is prose,
+// it has no behaviour of its own, and the whole reason these texts exist is that
+// the installer was saying something false.
+//
+// Three texts are covered: the role note as installed by default, the role note
+// under --strip-default-roles, and the apply-failure note. The first two make
+// OPPOSITE promises about who reaches the service, so swapping them would be a
+// lie on both paths at once.
+//
+// So each sentence carries the fragments that make its claim, and the fragments
+// whose presence would invert it. The two are not symmetric on purpose:
+// «не установлена» CONTAINS «установлена», so requiring the positive word alone
+// passes on the negation. The forbidden list is what catches that.
+//
+// Each claim also carries a negated rendering, and the SAME checker is run over
+// it and required to complain. That is the mutation this file performs on
+// itself: without it, a claim whose fragments happen to be unfalsifiable would
+// look exactly like a claim that holds.
+//
+// DECLARED BOUNDARY, so that nobody reads this file as a proof of meaning.
+// The defence against negation is a BLACKLIST: a fixed set of forbidden
+// fragments per claim, plus disavowalFragments. A blacklist of the ways Russian
+// can negate a sentence cannot be completed, and pretending otherwise would be
+// worse than admitting it. Measured against this file as it stands, on the
+// administrator pairing: of nine disavowal openings tried that are not on the
+// list, nine got through, and of four inversions tried that keep every pinned
+// phrase intact, four got through. Those two numbers describe the samples, not
+// the guard. What they show is the shape: the blacklist stops exactly what it
+// enumerates and nothing else.
+//
+// So what this file proves is bounded and worth stating plainly. It catches the
+// inversions it enumerates, which are the ones that were actually shipped or
+// actually attempted: the swap, the swap in a different case, and a leading
+// disavowal. It does NOT prove that a sentence means what it claims. Widening
+// the blacklist raises the cost of the next inversion; it never closes the set.
+// The remaining defence is that a human wrote the sentence and another human
+// read it. THAT IS NOT A FIGURE OF SPEECH AND NOT A PLACEHOLDER FOR A BETTER
+// GUARD. Nothing in this file is a substitute for reading the text. If anyone
+// later leans on these tests and stops reading new note wording by eye, the
+// defence is weaker than it was before the tests existed, because it will look
+// covered. Every one of the false sentences this branch removed was found by a
+// person, and none by a guard.
+//
+// The same open-set problem applies to the positive rule further down, in both
+// directions: its vocabularies can be dodged by widening them and by phrasing
+// around them, and both were demonstrated rather than supposed.
+// ---------------------------------------------------------------------------
+
+// textClaim is one customer-facing sentence and the claim it makes.
+type textClaim struct {
+	what string // the claim, in English, for the failure message
+	text string // the shipped sentence, taken from production
+	// must are fragments without which the sentence no longer makes the claim.
+	must []string
+	// mustNot are fragments whose presence inverts or negates the claim.
+	mustNot []string
+	// negated is the sentence rewritten to claim the opposite. The checker is
+	// required to reject it.
+	negated string
+}
+
+// disavowalFragments negate a claim from the FRONT while leaving every word of it
+// in place. Russian does this naturally, and the contiguous-phrase defence does
+// not survive it alone: a sentence can quote both phrases verbatim and still say
+// the opposite. They are checked against every claim.
+var disavowalFragments = []string{
+	"неверно, что",
+	"это не так",
+	"не соответствует",
+	"на самом деле наоборот",
+	"вопреки замеру",
+	"ничего подобного",
+	"замер этого не показывает",
+}
+
+// claimHolds reports why the text fails to make the claim, or "" when it holds.
+//
+// The comparison is CASE FOLDED. It used to be case sensitive, and three
+// inversions walked through it: a capitalised negating particle, a natural
+// Russian sentence with the opposite meaning, and one that reused both
+// contiguous phrases and disavowed the measurement outright. A guard that only
+// sees lower case is a guard against typing mistakes, not against lies.
+func claimHolds(text string, c textClaim) string {
+	lower := strings.ToLower(text)
+	for _, m := range c.must {
+		if !strings.Contains(lower, strings.ToLower(m)) {
+			return fmt.Sprintf("missing %q", m)
+		}
+	}
+	forbidden := append(append([]string{}, c.mustNot...), disavowalFragments...)
+	for _, m := range forbidden {
+		if strings.Contains(lower, strings.ToLower(m)) {
+			return fmt.Sprintf("contains %q, which inverts the claim", m)
+		}
+	}
+	return ""
+}
+
+func roleNoteClaims() []textClaim {
+	return []textClaim{
+		{
+			what:    "the role IS installed and IS declared a default role of the extension",
+			text:    roleNoteLines[0],
+			must:    []string{"MCP_ОсновнаяРоль", "установлена", "объявлена основной ролью"},
+			mustNot: []string{"не установлена", "не объявлена", "не создана"},
+			negated: "Примечание: роль MCP_ОсновнаяРоль не установлена и не объявлена основной ролью расширения.",
+		},
+		{
+			// Restored: the retired line was also the only place that told the
+			// reader a user with NO roles is refused. The docs kept it; someone
+			// installing from the command line sees only this note.
+			what:    "users with roles reach the service now, and a user with NO roles is REFUSED",
+			text:    roleNoteLines[1],
+			must:    []string{"уже есть роли", "без дополнительных действий", "нет ни одной роли", "отказом"},
+			mustNot: []string{"тоже получают доступ", "получает доступ без"},
+			negated: "Сейчас пользователи, у которых уже есть роли конфигурации, получают доступ без дополнительных действий, и пользователь, у которого нет ни одной роли, тоже получает доступ.",
+		},
+		{
+			// A check the reader can run BEFORE losing access, not only after.
+			what:    "presence of профили групп доступа IMPLIES the Управление доступом subsystem",
+			text:    roleNoteLines[2],
+			must:    []string{"видно заранее", "есть справочник профилей групп доступа", "есть и подсистема Управление доступом"},
+			mustNot: []string{"узнать заранее нельзя", "только после", "не связано"},
+			negated: "Какой у вас случай, узнать заранее нельзя: наличие профилей групп доступа с подсистемой Управление доступом не связано.",
+		},
+		{
+			what:    "in that case access goes by профиль групп доступа, because the recalculation undoes both other mechanisms",
+			text:    roleNoteLines[3],
+			must:    []string{"выдавайте доступ профилем групп доступа", "стирает роль", "выключает свойство", "автоматический доступ"},
+			mustNot: []string{"вручную", "ничего не стирает"},
+			negated: "Тогда назначайте роль напрямую: пересчёт ролей пользователей ничего не стирает.",
+		},
+		{
+			what:    "a recalculation is an ORDINARY administrative event, so direct assignment cannot be relied on there",
+			text:    roleNoteLines[4],
+			must:    []string{"обычное административное действие", "полагаться нельзя"},
+			mustNot: []string{"редкое", "никогда не происходит", "можно полагаться"},
+			negated: "Пересчёт ролей это редкое событие, поэтому на прямое назначение там можно полагаться.",
+		},
+		{
+			what:    "WITHOUT профили групп доступа, a direct assignment works and STAYS",
+			text:    roleNoteLines[5],
+			must:    []string{"справочника профилей групп доступа в конфигурации нет", "напрямую", "сохраняется"},
+			mustNot: []string{"не сохраняется", "стирается"},
+			negated: "Если профилей групп доступа в конфигурации нет, прямое назначение роли всё равно не сохраняется.",
+		},
+		{
+			what:    "the SYMPTOM, for a reader who is already bitten",
+			text:    roleNoteLines[6],
+			must:    []string{"доступ работал и перестал", "роль у пользователя пропала"},
+			mustNot: []string{"роль остаётся на месте", "доступ не меняется"},
+			negated: "Признак того, что вы всё же в первом случае: доступ не меняется и роль остаётся на месте.",
+		},
+		{
+			what:    "the extension CANNOT do it for them: safe mode, and the platform refuses",
+			text:    roleNoteCannotDoIt,
+			must:    []string{"не может", "безопасном режиме", "отвергает"},
+			mustNot: []string{"расширение назначит", "сделает это за вас"},
+			negated: "Расширение сделает это за вас: оно работает вне безопасного режима, и платформа разрешает администрирование пользователей.",
+		},
+	}
+}
+
+func roleNoteStrippedClaims() []textClaim {
+	return []textClaim{
+		{
+			what:    "the loaded configuration does NOT declare the role, and there is no automatic access",
+			text:    roleNoteStrippedLines[0],
+			must:    []string{"в загруженной конфигурации", "объявления основной роли нет", "автоматического доступа"},
+			mustNot: []string{"объявление основной роли есть", "доступ сохранён", "снято флагом"},
+			negated: "Внимание: в загруженной конфигурации объявление основной роли есть, и автоматический доступ сохранён.",
+		},
+		{
+			what:    "the causes are the flag AND the old platform / old compat mode paths",
+			text:    roleNoteStrippedLines[1],
+			must:    []string{"--strip-default-roles", "8.3.14", "режимах совместимости"},
+			mustNot: []string{"только под флагом", "исключительно под флагом"},
+			negated: "Так выходит только под флагом --strip-default-roles.",
+		},
+		{
+			what: "an ADMINISTRATOR account keeps the service, an ordinary restricted account LOSES it",
+			text: roleNoteStrippedLines[2],
+			must: []string{"администратора доступ сохраняет", "ограниченными правами теряет сервис"},
+			mustNot: []string{"администратора доступ теряет", "администратор получает отказ",
+				"Полные права"},
+			negated: "Померено: учётная запись администратора доступ теряет, " +
+				"а обычная учётная запись с ограниченными правами сервис сохраняет.",
+		},
+		{
+			what: "the CONNECTOR's account must be granted access explicitly, by the route its configuration allows",
+			text: roleNoteStrippedLines[3],
+			must: []string{"коннектор", "выдать явно", "есть справочник профилей групп доступа",
+				"через профиль групп доступа", "иначе прямым назначением"},
+			mustNot: []string{"назначается автоматически", "выдавать не нужно", "вручную"},
+			negated: "Учётной записи коннектора доступ назначается автоматически, выдавать его не нужно.",
+		},
+		{
+			what:    "профили групп доступа mean the subsystem is there, and a direct assignment does NOT survive it",
+			text:    roleNoteStrippedLines[4],
+			must:    []string{"Справочник профилей групп доступа означает", "Управление доступом", "не держится", "стирает"},
+			mustNot: []string{"назначение держится", "сохраняется", "ничего не меняет"},
+			negated: "Профили групп доступа ничего не означают, прямое назначение держится и сохраняется.",
+		},
+		{
+			what:    "the SYMPTOM, for a reader who is already bitten",
+			text:    roleNoteStrippedLines[5],
+			must:    []string{"доступ работал и перестал", "роль у пользователя пропала"},
+			mustNot: []string{"роль остаётся на месте", "доступ не меняется"},
+			negated: "Признак: доступ не меняется и роль остаётся на месте.",
+		},
+	}
+}
+
+func notAppliedClaims() []textClaim {
+	return []textClaim{
+		{
+			what:    "the database was NOT changed and the extension is loaded but NOT applied",
+			text:    notAppliedHead,
+			must:    []string{"не внесены", "загружено", "не применено"},
+			mustNot: []string{"успешно", "изменения внесены", "и применено"},
+			negated: "Изменения в базу данных внесены: расширение загружено в конфигурацию и применено.",
+		},
+		{
+			what:    "an extension that was already there KEEPS working and the new one is stranded",
+			text:    notAppliedPreviousKeepsWorking,
+			must:    []string{"уже стояло", "продолжает работать", "прежняя"},
+			mustNot: []string{"не работает", "перестала", "остановлена"},
+			negated: "Если расширение в этой базе уже стояло, прежняя его версия больше не работает.",
+		},
+		{
+			what:    "on a first install the extension does NOT work",
+			text:    notAppliedFirstInstall,
+			must:    []string{"первая установка", "не работает"},
+			mustNot: []string{"уже работает", "работает штатно"},
+			negated: "Если это первая установка, расширение уже работает.",
+		},
+		{
+			what:    "the previous version was REMOVED, so nothing is serving now",
+			text:    notAppliedPreviousDeleted,
+			must:    []string{"удалена", "не работает"},
+			mustNot: []string{"не удалена", "сохранена", "продолжает работать"},
+			negated: "Прежняя версия расширения сохранена и продолжает работать.",
+		},
+		{
+			what:    "the customer should fix the cause and INSTALL AGAIN",
+			text:    notAppliedAdvice,
+			must:    []string{"повторите установку"},
+			mustNot: []string{"повторять установку не нужно", "не повторяйте"},
+			negated: "Повторять установку не нужно.",
+		},
+	}
+}
+
+func TestCustomerFacingTextMakesTheClaimsItIsThereToMake(t *testing.T) {
+	groups := []struct {
+		name   string
+		claims []textClaim
+	}{
+		{"role note, default", roleNoteClaims()},
+		{"role note, --strip-default-roles", roleNoteStrippedClaims()},
+		{"apply-failure note", notAppliedClaims()},
+	}
+
+	for _, group := range groups {
+		t.Run(group.name, func(t *testing.T) {
+			if len(group.claims) < 3 {
+				t.Fatalf("%s has %d claims pinned; an emptied table is a green that proves nothing",
+					group.name, len(group.claims))
+			}
+			for _, c := range group.claims {
+				if len(c.must) == 0 || len(c.mustNot) == 0 || c.negated == "" {
+					t.Errorf("the claim %q is not fully specified, so it cannot be falsified", c.what)
+					continue
+				}
+
+				// The shipped sentence makes the claim.
+				if why := claimHolds(c.text, c); why != "" {
+					t.Errorf("the shipped text no longer claims that %s: %s\ntext: %q",
+						c.what, why, c.text)
+				}
+
+				// The SAME checker, run over three inversions, must complain
+				// about each. These are the mutations, performed here rather
+				// than trusted, and all three were measured green before the
+				// matcher was case folded and given the disavowal list.
+				for _, bad := range []struct{ how, text string }{
+					{"the negation", c.negated},
+					{"the negation SHOUTED, same words, different case", strings.ToUpper(c.negated)},
+					{"a leading disavowal quoting the sentence verbatim", "Неверно, что " + c.text},
+				} {
+					if why := claimHolds(bad.text, c); why == "" {
+						t.Errorf("the checker accepts %s, which claims the OPPOSITE of %q, so it would "+
+							"not notice the text being inverted.\ntext: %q", bad.how, c.what, bad.text)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestNoTextClaimsFullRightsUsersAreRefused pins the one claim that was measured
+// FALSE and shipped anyway.
+//
+// The note under --strip-default-roles used to tell the customer that users
+// holding «Полные права» are refused along with everybody else. On two synthetic
+// file bases that was what happened. On БухгалтерияПредприятияУчебная 3.0.111.25,
+// nine real users, the element flipped five times, the administrator account
+// answered 200 in every arm and noticed nothing, while an ordinary account
+// holding 198 roles and no full rights went 200 to 403.
+//
+// A wrong sentence about who loses access sends the reader to check the wrong
+// account, so it is worse than silence. This guard is deliberately blunt: no
+// customer-facing text of this package may claim that a full-rights user is
+// refused, in either note, in any wording that names the role.
+func TestNoTextClaimsFullRightsUsersAreRefused(t *testing.T) {
+	texts := map[string][]string{
+		"roleNoteLines":         roleNoteLines,
+		"roleNoteStrippedLines": roleNoteStrippedLines,
+		"notAppliedNote(false)": strings.Split(notAppliedNote(false), "\n"),
+		"notAppliedNote(true)":  strings.Split(notAppliedNote(true), "\n"),
+	}
+	// Both spellings the repository uses for the role.
+	forbidden := []string{"Полные права", "ПолныеПрава"}
+
+	scanned := 0
+	for name, lines := range texts {
+		if len(lines) == 0 {
+			t.Errorf("%s is empty, so scanning it proves nothing", name)
+		}
+		for _, line := range lines {
+			scanned++
+			for _, f := range forbidden {
+				if strings.Contains(line, f) {
+					t.Errorf("%s names %q in customer-facing text. Measured on a real typical "+
+						"configuration: an administrator account keeps the service when the "+
+						"declaration is stripped. Any sentence built on that role is either the "+
+						"refuted claim or an invitation to check the wrong account.\nline: %q",
+						name, f, line)
+				}
+			}
+		}
+	}
+	if scanned < 12 {
+		t.Fatalf("only %d lines were scanned; the texts are longer than that and the scan is not "+
+			"reaching them", scanned)
+	}
+
+	// Positive control: the same scan, over a line that DOES make the refuted
+	// claim, must find it. Otherwise the zeros above are a scanner that matches
+	// nothing.
+	control := "Остальные получают отказ, включая пользователей с ролью \"Полные права\"."
+	hit := false
+	for _, f := range forbidden {
+		if strings.Contains(control, f) {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatal("the scan cannot find the refuted claim in the sentence that made it, so its verdict " +
+			"on the shipped texts means nothing")
+	}
+}
+
+// TestNoTextTellsTheCustomerToAssignTheRoleByHand pins the second claim that was
+// measured FALSE and shipped anyway, and this one shipped UNCONDITIONALLY.
+//
+// «назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе» printed on every
+// successful install. On a configuration carrying the Управление доступом
+// subsystem it is false: measured on a twin of a real Бухгалтерия 3.0.111.25,
+// one call to УправлениеДоступомСлужебный.ОбновитьРолиПользователей() deleted
+// exactly that role from the user and switched off the extension property that
+// carries the automatic access, and the user went from 200 to 403.
+//
+// An instruction that stops working later is worse than no instruction: the
+// customer follows it, sees it work, and discovers months later that access
+// vanished. So the imperative is forbidden here, and both notes are required to
+// carry BOTH branches of the split, because a note that mentions only one of them
+// is the same defect wearing a condition.
+func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
+	// The retired instruction, in the shapes it was actually shipped in.
+	// «вручную» is the whole retired instruction in one word, and neither note
+	// contains it any more. Unlike the disavowal blacklist declared at the top of
+	// this file, THIS one is closed: it is not a sample of the ways to phrase an
+	// idea, it is a single word that must not appear at all, and checking for a
+	// word is exhaustive. The three longer shapes stay for the failure message.
+	retired := []string{"вручную", "вручную в конфигураторе", "назначьте ему роль", "назначьте ей роль"}
+
+	notes := map[string][]string{
+		"roleNoteLines":         roleNoteLines,
+		"roleNoteStrippedLines": roleNoteStrippedLines,
+	}
+
+	scanned := 0
+	for name, lines := range notes {
+		joined := strings.ToLower(strings.Join(lines, "\n"))
+		for _, line := range lines {
+			scanned++
+			for _, r := range retired {
+				if strings.Contains(strings.ToLower(line), r) {
+					t.Errorf("%s tells the customer to assign the role by hand (%q). Measured: on a "+
+						"configuration with Управление доступом a recalculation of user roles deletes "+
+						"exactly that assignment and switches off the property carrying the automatic "+
+						"access.\nline: %q", name, r, line)
+				}
+			}
+		}
+		// Both branches of the split have to be present, or the note is right
+		// about one kind of base and silent about the other.
+		// Stems, not one grammatical case: Russian declines both of these and a
+		// guard pinned to the nominative would pass a note that never mentions
+		// them at all in any other form.
+		requiredFragments := []string{"управление доступом", "групп доступа"}
+		if len(requiredFragments) < 2 {
+			t.Errorf("the split requirement lists %d fragments; both branches need naming, and an "+
+				"emptied list checks neither", len(requiredFragments))
+		}
+		for _, required := range requiredFragments {
+			if !strings.Contains(joined, required) {
+				t.Errorf("%s never mentions %q, so it does not tell the reader which of the two "+
+					"configurations they are in or how access is delivered there", name, required)
+			}
+		}
+	}
+	if scanned < 10 {
+		t.Fatalf("only %d note lines were scanned; both notes are longer than that together", scanned)
+	}
+
+	// The POSITIVE half. It was described here as "the one that does not depend
+	// on vocabulary at all", and that was false: it depends on TWO open
+	// vocabularies, the imperatives it recognises and the conditions it accepts.
+	// All four of these were run and all four SHIP GREEN today:
+	//
+	//	vacuous condition   «Если доступ пропал, назначьте роль ... ещё раз.»
+	//	condition on the
+	//	  wrong clause      «Если у вас Windows, назначьте роль ... напрямую.»
+	//	infinitive          «Роль ... нужно назначить пользователю заново.»
+	//	unlisted verb       «Просто присвойте роль ... ещё раз.»
+	//
+	// The first is the harmful one: appended to the symptom line it tells a
+	// customer who has just been bitten by the recalculation to redo the
+	// assignment that will be erased again, and «если» is a real condition that
+	// simply does not discriminate the branch.
+	//
+	// Measured, so the reach is not overstated either: the rule examines exactly
+	// ONE shipped line today, roleNoteLines[3], and the token satisfying it is
+	// «тогда», an anaphor pointing at the condition on the PREVIOUS line. So the
+	// shipped text already leans on the same leniency the wrong-clause bypass
+	// exploits, and the checked == 0 floor below is in practice a floor of one.
+	//
+	// What it does buy, and it is the reason it stays: every shape that got
+	// through the word list did so by APPENDING an imperative to a line that was
+	// true on its own, which preserves every must fragment and trips no mustNot.
+	// A line that tells the reader to grant access must carry the condition under
+	// which that is right. That catches the appended-imperative class regardless
+	// of which forbidden word it avoids.
+	imperatives := []string{"назначьте", "назначайте", "назначь", "выдайте", "выдавайте", "выдай"}
+	conditions := []string{"если", "иначе", "тогда"}
+
+	// Shrink-only pins, and the entries that must never leave written down a
+	// SECOND time, independently of the lists they constrain. A pin derived from
+	// a list cannot notice a deletion from that list: emptying any of these three
+	// leaves every other test in this package green, because a guard that stops
+	// guarding produces no failure while the text is still clean.
+	//
+	// «вручную» is named because it is the whole retired instruction in one word,
+	// and «назначьте» and «если» because between them they are what caught the
+	// shapes that shipped green.
+	for _, pin := range []struct {
+		name string
+		set  []string
+		min  int
+		keep string
+	}{
+		{"retired", retired, 4, "вручную"},
+		{"imperatives", imperatives, 6, "назначьте"},
+		{"conditions", conditions, 3, "если"},
+	} {
+		if len(pin.set) < pin.min {
+			t.Errorf("%s has %d entries, want at least %d: this set has only ever been widened, and "+
+				"shrinking it silently removes checks", pin.name, len(pin.set), pin.min)
+		}
+		if !slices.Contains(pin.set, pin.keep) {
+			t.Errorf("%s no longer contains %q. That entry is what catches the instruction this test "+
+				"exists to keep out", pin.name, pin.keep)
+		}
+	}
+	checked := 0
+	for name, lines := range notes {
+		for _, line := range lines {
+			low := strings.ToLower(line)
+			var found string
+			for _, imp := range imperatives {
+				if strings.Contains(low, imp) {
+					found = imp
+					break
+				}
+			}
+			if found == "" {
+				continue
+			}
+			checked++
+			conditioned := false
+			for _, c := range conditions {
+				if strings.Contains(low, c) {
+					conditioned = true
+					break
+				}
+			}
+			if !conditioned {
+				t.Errorf("%s gives an UNCONDITIONAL instruction to grant access (%q) with no condition "+
+					"on the line. Which route is right depends on the configuration, so an instruction "+
+					"without its condition is wrong on one of the two.\nline: %q", name, found, line)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no note line carries an imperative about granting access, so the rule above examined " +
+			"nothing and would not notice one being added")
+	}
+
+	// A condition token that matches EVERY note line disables the rule silently,
+	// and the shrink-only pins above are structurally blind to it because this is
+	// growth, not shrinkage. Measured: adding «а», or a single space, leaves the
+	// whole suite green and makes an appended unconditional imperative ship.
+	//
+	// What this check buys: exactly those two, and anything else that matches all
+	// fifteen note lines. What it does NOT buy: a token matching most lines but
+	// not all still disables the rule for those lines and passes here. It narrows
+	// the hole, it does not close it.
+	allNoteLines := append(append([]string{}, roleNoteLines...), roleNoteStrippedLines...)
+	matches := func(token string) int {
+		n := 0
+		for _, line := range allNoteLines {
+			if strings.Contains(strings.ToLower(line), token) {
+				n++
+			}
+		}
+		return n
+	}
+	for _, c := range conditions {
+		if got := matches(c); got == len(allNoteLines) {
+			t.Errorf("the condition token %q matches all %d note lines, so every imperative counts as "+
+				"conditioned and the rule above checks nothing", c, got)
+		}
+	}
+	// Control: the counter really can reach every line, so the verdicts above are
+	// discrimination and not a counter that matches nothing.
+	if got := matches(" "); got != len(allNoteLines) {
+		t.Fatalf("a single space matches %d of %d note lines; the counter cannot see every line, so "+
+			"its verdict on the real tokens means nothing", got, len(allNoteLines))
+	}
+
+	// Positive control: the scan finds the retired instruction in the sentence
+	// that made it, so the zeros above are absence and not a scanner that
+	// matches nothing.
+	control := "Пользователю, у которого нет ни одной роли, сервис отвечает отказом: назначьте ему роль " +
+		"MCP_ОсновнаяРоль вручную в Конфигураторе."
+	hits := 0
+	for _, r := range retired {
+		if strings.Contains(strings.ToLower(control), r) {
+			hits++
+		}
+	}
+	if hits < 2 {
+		t.Fatalf("the scan found %d of the retired shapes in the sentence that shipped them, so its "+
+			"verdict on the shipped notes means nothing", hits)
+	}
+}
+
+// TestEveryCustomerFacingSentenceHasAClaim proves COVERAGE and nothing more, and
+// its old name promised more than that.
+//
+// textClaim.text is a REFERENCE to the production variable, not a copy of it, so
+// editing a shipped sentence edits the claim's text with it and this test cannot
+// see the change. Calling it "IsPinned" told the next reader that the text was
+// nailed down here; it is not. What is nailed down here is that no sentence
+// ships WITHOUT a claim entry, so adding a line to either text without adding a
+// claim reddens. Edits to an existing sentence are defended one test up, by the
+// must and mustNot fragments, within the boundary declared at the top of this
+// file.
+//
+// The copy was deliberately not duplicated: a second spelling of every sentence
+// is a second place to update on each edit, and it would catch only what the
+// fragment tables already judge on meaning rather than on bytes.
+func TestEveryCustomerFacingSentenceHasAClaim(t *testing.T) {
+	claimed := map[string]bool{}
+	all := append(roleNoteClaims(), roleNoteStrippedClaims()...)
+	for _, c := range append(all, notAppliedClaims()...) {
+		claimed[c.text] = true
+	}
+
+	for _, set := range [][]string{roleNoteLines, roleNoteStrippedLines} {
+		for _, line := range set {
+			if !claimed[line] {
+				t.Errorf("this role-note line has no claim entry, so nothing above judges what it says: %q", line)
+			}
+		}
+	}
+	// Both renderings, so the delete-path sentence is covered as well as the
+	// two conditionals it replaces.
+	for _, rendered := range []string{notAppliedNote(false), notAppliedNote(true)} {
+		for _, line := range strings.Split(rendered, "\n") {
+			if !claimed[line] {
+				t.Errorf("this note sentence has no claim entry, so nothing above judges what it says: %q", line)
+			}
+		}
+	}
+
+	// Control: the map really is doing work. A sentence that is NOT part of
+	// either text must not be reported as pinned.
+	if claimed["Расширение установлено успешно."] {
+		t.Fatal("the claimed set answers yes to a sentence neither text contains, so its verdicts " +
+			"above mean nothing")
+	}
+}

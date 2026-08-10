@@ -92,9 +92,11 @@ func parsePlatformVersion(platformExe, overrideVersion string) (major, minor int
 // version cannot be detected from the platform path automatically.
 // When serverMode is true, the database is treated as a client-server infobase
 // (MS SQL, PostgreSQL) and DESIGNER is invoked with /S instead of /F.
+// When stripRoles is true, the default-role declaration is removed from the copy
+// being loaded (see --strip-default-roles).
 //
 //garble:ignore
-func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser, dbPassword, platformVersion string) error {
+func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser, dbPassword, platformVersion string, stripRoles bool) error {
 	if platformExe == "" {
 		var err error
 		platformExe, err = FindPlatform()
@@ -144,10 +146,17 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			if stripErr := stripInheritedProperties(cfgPath); stripErr != nil {
 				return fmt.Errorf("pre-patching inherited properties: %w", stripErr)
 			}
-			// Print info about role assignment
-			fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-			fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-			fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
+		}
+	}
+
+	// --strip-default-roles. Applied to the temp copy before the load, so the
+	// element never reaches the base. The shipped XML is untouched: the default
+	// keeps the declaration, because on every base measured it is what grants the
+	// service to an ordinary least-privileged account, which is the account a
+	// careful customer points the connector at.
+	if stripRoles {
+		if stripErr := stripDefaultRoles(cfgPath); stripErr != nil {
+			return fmt.Errorf("stripping default roles: %w", stripErr)
 		}
 	}
 
@@ -162,6 +171,11 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		"-Extension", extensionName,
 	)
 
+	// removedOld records that this run deleted an extension that was already
+	// installed. It changes what an apply-leg failure can truthfully say: the
+	// previous version is gone, so it is not still serving.
+	removedOld := false
+
 	// If extension already exists, delete it and retry the load.
 	if err != nil && strings.Contains(err.Error(), "Уже существует") {
 		if delErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
@@ -170,6 +184,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		); delErr != nil {
 			return fmt.Errorf("deleting old extension before retry: %w", delErr)
 		}
+		removedOld = true
 		fmt.Println("Removed old extension:", extensionName)
 
 		err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
@@ -200,7 +215,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		// ManagedApplication, DESIGNER rejects the extension with a controlled
 		// property mismatch error mentioning "ОсновнойРежимЗапуска".
 		// Remove the property and retry.
-		if err != nil && strings.Contains(err.Error(), "ОсновнойРежимЗапуска") {
+		if isRunModeMismatchError(err) {
 			fmt.Println("Retrying without DefaultRunMode property (controlled property mismatch)...")
 			cfgData, readErr := os.ReadFile(cfgPath)
 			if readErr != nil {
@@ -246,7 +261,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		// Old configurations (compat mode 8.3.13 and below) reject extensions
 		// that override inherited properties. Strip all controlled properties
 		// from the extension Configuration.xml and retry.
-		if err != nil && strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов") {
+		if isInheritedOverrideError(err) {
 			fmt.Println("Retrying without inherited properties (old compat mode)...")
 			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
 				return fmt.Errorf("loading extension config: strip inherited properties: %w", patchErr)
@@ -255,11 +270,6 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			)
-			if err == nil {
-				fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-				fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-				fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
-			}
 		}
 
 		if err != nil {
@@ -273,31 +283,306 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		"/UpdateDBCfg",
 		"-Extension", extensionName,
 	); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов") {
+		// Both retries below reload before re-applying, because /UpdateDBCfg does
+		// NOT read extDir: it applies whatever the last successful
+		// /LoadConfigFromFiles put into the infobase. Stripping a property
+		// without loading the stripped XML again changes nothing the apply leg
+		// can see.
+		//
+		// The two predicates are disjoint and both stay reachable: each matches a
+		// different DESIGNER text, and neither is a prefix of the other.
+		switch {
+		case isInheritedOverrideError(err):
 			fmt.Println("Retrying without inherited properties (old compat mode)...")
 			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
-				return fmt.Errorf("updating database config: strip inherited properties: %w", patchErr)
+				return notApplied(fmt.Errorf("updating database config: strip inherited properties: %w", patchErr), removedOld)
 			}
 			if reloadErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			); reloadErr != nil {
-				return classifyDesignerError(fmt.Errorf("reloading extension config after strip: %w", reloadErr))
+				return notApplied(classifyDesignerError(fmt.Errorf("reloading extension config after strip: %w", reloadErr)), removedOld)
 			}
 			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/UpdateDBCfg",
 				"-Extension", extensionName,
 			); retryErr != nil {
-				return classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr))
+				return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr)), removedOld)
 			}
-			fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-			fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-			fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
-			return nil
+
+		case isRunModeMismatchError(err):
+			// The base configuration's DefaultRunMode differs from ours, and the
+			// platform treats that property as controlled. Measured on 1С 8.3.27:
+			// /LoadConfigFromFiles accepts the extension and only /UpdateDBCfg
+			// refuses it, exiting 101, so the identical retry on the load leg
+			// above never fires for this error on 8.3.14 and newer.
+			//
+			// The removal is NARROW on purpose. stripInheritedProperties would
+			// take four further elements of the shipped configuration with it,
+			// the extension's own Version among them; a run-mode mismatch must
+			// cost the customer the run mode and nothing else.
+			fmt.Println("Retrying without DefaultRunMode property (controlled property mismatch)...")
+			if stripErr := stripDefaultRunMode(cfgPath); stripErr != nil {
+				return notApplied(fmt.Errorf("updating database config: strip DefaultRunMode: %w", stripErr), removedOld)
+			}
+			if reloadErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+				"/LoadConfigFromFiles", extDir,
+				"-Extension", extensionName,
+			); reloadErr != nil {
+				return notApplied(classifyDesignerError(
+					fmt.Errorf("reloading extension config after DefaultRunMode strip: %w", reloadErr)), removedOld)
+			}
+			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+				"/UpdateDBCfg",
+				"-Extension", extensionName,
+			); retryErr != nil {
+				return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr)), removedOld)
+			}
+
+		default:
+			return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", err)), removedOld)
 		}
-		return classifyDesignerError(fmt.Errorf("updating database config: %w", err))
 	}
+
+	// Chosen by reading the file that was loaded, not by the flag: three code
+	// paths besides the flag remove the declaration. extDir survives until the
+	// deferred cleanup, so cfgPath is still readable here.
+	printRoleNote(!declaresOurRoleAsDefault(cfgPath))
 	return nil
+}
+
+// roleNoteLines is what a successful install tells the customer about access
+// when the loaded configuration DOES declare our role as a default role, which
+// is the shipped default.
+//
+// This comment used to say the extension no longer declares the role at all.
+// That described a removal which was measured wrong and reverted: the shipped
+// Configuration.xml declares it, and the declaration is what grants the service
+// to an ordinary least-privileged account.
+//
+// Measured on two synthetic file bases and again on a real typical
+// configuration, БухгалтерияПредприятияУчебная 3.0.111.25. The readings agree on
+// the ordinary least-privileged account and disagree on the administrator: an
+// account holding roles of the configuration answers 200 with the declaration
+// and 403 without it on both, while an administrator dropped to 403 on the
+// synthetic bases and kept 200 on the real one. A user holding no roles at all
+// is refused either way. Both notes below say what survives both readings, and
+// nothing more. See extension/default_roles_test.go for the full tables.
+//
+// The last line of this note used to be «назначьте роль MCP_ОсновнаяРоль вручную
+// в Конфигураторе», printed on EVERY successful install. It is false wherever the
+// configuration has the Управление доступом subsystem. Measured on a twin of a
+// real Бухгалтерия 3.0.111.25 with nine users: one call to
+// УправлениеДоступомСлужебный.ОбновитьРолиПользователей() took Demo from 199
+// roles to 198, removing MCP_ОсновнаяРоль and ONLY it, the surviving 198 being
+// byte-identical to the pre-assignment baseline. The same call flipped the
+// extension's ИспользоватьОсновныеРолиДляВсехПользователей from True to False,
+// and Demo went from 200 to 403 «Недостаточно прав» while the administrator
+// stayed at 200. Both HTTP rows were taken after an iisreset; without one the
+// "after" row lied 200 out of a pooled session.
+//
+// So on such a configuration BOTH mechanisms this note used to rely on are
+// undone by one ordinary administrative action: the direct assignment is
+// deleted, and the attachment property that carries the automatic access is
+// switched off. Access has to be delivered through a профиль групп доступа.
+//
+// Only users that exist in Справочник.Пользователи are reconciled: a user with
+// no directory entry kept the role. That is recorded because it explains the
+// mechanism, and it is explicitly NOT advice. Telling customers to keep a
+// service account out of the user directory to dodge the reconciliation would be
+// irresponsible, and no text of ours says anything of the kind.
+//
+// Nor can we automate our way out of it. The extension runs in safe mode, and an
+// attempt to administer infobase users through /execute comes back HTTP 500
+// carrying the platform's security warning. Nothing in either note may imply the
+// product can fix this for the customer.
+//
+// The reader is given a check they can run BEFORE losing access, not only the
+// after-the-fact symptom: if the configuration has профили групп доступа then it
+// has Управление доступом. That is a capability check and needs no version
+// grounding, because Справочник.ПрофилиГруппДоступа is a constituent of the
+// subsystem: its presence implies the subsystem, and the subsystem brings it, so
+// the absence of profiles puts the reader in the other branch. The symptom stays
+// as well, for anyone who is already bitten.
+//
+// The trigger is deliberately NOT described as automatic or inevitable. It was
+// not established: installing did not fire it, a new extension defaults the flag
+// to True, an ordinary login did not fire it, re-saving a user card did not, and
+// the scheduled job our source reading pointed at does not exist in that
+// configuration. What is written is what was demonstrated, that a recalculation
+// of user roles does it and that a recalculation is a normal administrative
+// event.
+//
+//garble:ignore
+var roleNoteLines = []string{
+	"Примечание: роль MCP_ОсновнаяРоль установлена и объявлена основной ролью расширения.",
+	"Сейчас пользователи, у которых уже есть роли конфигурации, получают доступ к сервису без дополнительных действий, а пользователю, у которого нет ни одной роли, сервис отвечает отказом.",
+	"Какой у вас случай, видно заранее: если в конфигурации есть справочник профилей групп доступа, значит в ней есть и подсистема Управление доступом.",
+	"Тогда выдавайте доступ профилем групп доступа: пересчёт ролей пользователей стирает роль, назначенную пользователю напрямую, и выключает свойство расширения, которым держится автоматический доступ.",
+	"Пересчёт ролей это обычное административное действие, поэтому на прямое назначение там полагаться нельзя.",
+	"Если справочника профилей групп доступа в конфигурации нет, роль MCP_ОсновнаяРоль назначается пользователю напрямую, и назначение сохраняется.",
+	"Признак того, что вы всё же в первом случае: доступ работал и перестал, а роль у пользователя пропала.",
+	roleNoteCannotDoIt,
+}
+
+// roleNoteStrippedLines replaces it when the loaded configuration does NOT
+// declare our role. That happens under --strip-default-roles and on three other
+// paths, so the text states what is true of the file rather than naming a cause
+// that may not apply.
+//
+// It used to say that users holding «Полные права» are refused along with
+// everyone else. On a real typical configuration that is false: an
+// administrator account keeps the service and notices nothing. What the flag
+// actually costs is the ordinary least-privileged account, which is exactly the
+// account a careful customer points the connector at, so that is what the note
+// names.
+//
+//garble:ignore
+var roleNoteStrippedLines = []string{
+	"Внимание: в загруженной конфигурации объявления основной роли нет, а вместе с ним нет и автоматического доступа.",
+	"Так выходит под флагом --strip-default-roles, а также на платформах до 8.3.14 и на старых режимах совместимости, где свойства заимствованных объектов снимаются целиком.",
+	"Померено на реальной типовой базе: учётная запись администратора доступ сохраняет и ничего не заметит, а обычная учётная запись с ограниченными правами теряет сервис целиком.",
+	"Поэтому доступ той учётной записи, на которую настроен коннектор, нужно выдать явно: если в конфигурации есть справочник профилей групп доступа, то через профиль групп доступа, иначе прямым назначением роли MCP_ОсновнаяРоль.",
+	"Справочник профилей групп доступа означает, что в конфигурации есть подсистема Управление доступом, и там прямое назначение не держится: пересчёт ролей пользователей его стирает.",
+	"Признак: доступ работал и перестал, а роль у пользователя пропала.",
+	roleNoteCannotDoIt,
+}
+
+// roleNoteCannotDoIt is true under every configuration and in both notes, so it
+// is written once and shared. Measured: the extension runs in safe mode and an
+// attempt to administer infobase users through /execute returns HTTP 500 with
+// the platform's security warning.
+//
+//garble:ignore
+const roleNoteCannotDoIt = "Сделать это за вас расширение не может: оно работает в безопасном режиме, и платформа отвергает администрирование пользователей информационной базы из расширения."
+
+// roleName is the role the extension ships and the one both notes talk about.
+const roleName = "MCP_ОсновнаяРоль"
+
+// declaresOurRoleAsDefault reports whether the configuration at cfgPath, which
+// is the copy that was loaded into the base, still names our role in its
+// DefaultRoles.
+//
+// The note is chosen by OBSERVING this, never by the --strip-default-roles flag.
+// Three other paths remove the declaration with the flag unset: the pre-patch
+// for platforms 8.3.10 to 8.3.13, the load-leg retry for old compat modes, and
+// the apply-leg retry for the same. On all three a flag-driven note told the
+// customer that users holding roles of the configuration are served, while the
+// declaration that serves them was absent from what got applied. Observation
+// cannot drift when a fourth strip site is added; a bool threaded from each site
+// can, and this file already grew from two sites to three.
+//
+// An empty <DefaultRoles/> counts as NOT declared, because an empty declaration
+// grants nobody anything. A read failure also counts as not declared: the note
+// then tells the customer to assign the role by hand, which is safe advice to
+// follow needlessly and unsafe advice to omit.
+//
+//garble:ignore
+func declaresOurRoleAsDefault(cfgPath string) bool {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return false
+	}
+	declaration := defaultRolesRe.Find(data)
+	return declaration != nil && bytes.Contains(declaration, []byte("Role."+roleName))
+}
+
+// printRoleNote prints the note that matches what was actually loaded. It is
+// called from exactly one place, the single successful exit of Install, so no
+// path can print a note twice or print both.
+//
+//garble:ignore
+func printRoleNote(stripped bool) {
+	lines := roleNoteLines
+	if stripped {
+		lines = roleNoteStrippedLines
+	}
+	for _, line := range lines {
+		fmt.Println(line)
+	}
+}
+
+// notAppliedNote explains what an exhausted apply leg leaves behind. Saying only
+// "updating database config: ..." is accurate and incomplete, and the two ways a
+// customer completes it are both wrong: on a fresh install the extension is
+// loaded but dead, and on an update the PREVIOUS version is still applied and
+// serving while the new one sits unapplied in the main configuration. A customer
+// who read only the error concluded «обновилось всё-таки» and went on running the
+// old code.
+//
+// Each sentence stands alone because each one is true under a different
+// condition, and a sentence printed outside its condition is a lie about the
+// customer's base rather than a wordier message.
+//
+//garble:ignore
+const (
+	notAppliedHead = "Изменения в базу данных не внесены: расширение загружено в конфигурацию, но не применено."
+	// True only when no previously installed extension was removed during this
+	// run. When one was, the old version is gone and cannot be working.
+	notAppliedPreviousKeepsWorking = "Если расширение в этой базе уже стояло, продолжает работать прежняя его версия, " +
+		"а новая осталась загруженной и не применённой."
+	notAppliedFirstInstall = "Если это первая установка, расширение не работает."
+	// Replaces both conditionals when Install deleted the installed extension
+	// before loading: neither "the previous version keeps working" nor "this is
+	// the first install" describes that run.
+	notAppliedPreviousDeleted = "Прежняя версия расширения была удалена перед загрузкой, " +
+		"поэтому сейчас расширение не работает."
+	notAppliedAdvice = "Устраните причину и повторите установку."
+)
+
+// notAppliedNote renders the note for a run.
+//
+//garble:ignore
+func notAppliedNote(removedOld bool) string {
+	lines := []string{notAppliedHead}
+	if removedOld {
+		lines = append(lines, notAppliedPreviousDeleted)
+	} else {
+		lines = append(lines, notAppliedPreviousKeepsWorking, notAppliedFirstInstall)
+	}
+	return strings.Join(append(lines, notAppliedAdvice), "\n")
+}
+
+// notApplied appends the note to an apply-leg failure. It is used ONLY after
+// /LoadConfigFromFiles has succeeded: on a load failure nothing reached the
+// infobase, and the note would be a second false statement in place of an
+// incomplete one.
+//
+//garble:ignore
+func notApplied(err error, removedOld bool) error {
+	if err == nil {
+		return nil
+	}
+	// The base whose compat mode forbids extensions reaches the apply leg with
+	// nothing loaded: /LoadConfigFromFiles only CLAIMED success, the extension
+	// was silently rejected, and /UpdateDBCfg reports it missing. Every sentence
+	// of the note is false there, and it would contradict the diagnosis it is
+	// appended to, which tells the customer the base takes no extensions at all.
+	if compatModeNotFoundRe.MatchString(err.Error()) {
+		return err
+	}
+	return fmt.Errorf("%w\n\n%s", err, notAppliedNote(removedOld))
+}
+
+// isRunModeMismatchError reports whether a DESIGNER failure is the controlled
+// property mismatch on DefaultRunMode. Measured on 1С 8.3.27, the platform words
+// it as «Значение контролируемого свойства ОсновнойРежимЗапуска у объекта не
+// совпадает со значением в расширяемой конфигурации», so the property name in
+// the configurator's own language is the part worth matching.
+//
+//garble:ignore
+func isRunModeMismatchError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "ОсновнойРежимЗапуска")
+}
+
+// isInheritedOverrideError reports whether a DESIGNER failure is the refusal old
+// configurations (compat mode 8.3.13 and below) give to an extension that
+// overrides inherited properties of the base configuration.
+//
+//garble:ignore
+func isInheritedOverrideError(err error) bool {
+	return err != nil &&
+		strings.Contains(strings.ToLower(err.Error()), "переопределение свойств заимствованных объектов")
 }
 
 // compatModeNotFoundRe matches the DESIGNER batch-mode error reported when the
@@ -630,6 +915,68 @@ func stripInheritedProperties(cfgPath string) error {
 	}
 	patched := inheritedPropertyRe.ReplaceAll(data, nil)
 	return os.WriteFile(cfgPath, patched, 0o644)
+}
+
+// defaultRolesRe matches the DefaultRoles element of the extension's
+// Configuration.xml, in both spellings: the populated form the extension ships,
+// and the empty self-closing form 1С writes when the property was set and then
+// cleared. The empty form is still a declaration and still grants nothing, so
+// both have to go.
+//
+//garble:ignore
+var defaultRolesRe = regexp.MustCompile(
+	`(?s)\s*<DefaultRoles>.*?</DefaultRoles>|\s*<DefaultRoles\s*/>`,
+)
+
+// stripDefaultRoles removes ONLY the DefaultRoles element, for customers whose
+// Standard Subsystems configuration refuses to start a session while our role is
+// in the configuration's effective ОсновныеРоли.
+//
+// This is not the default, and the reason is measured rather than reasoned. On
+// every base measured, an ordinary least-privileged account holding roles of the
+// configuration answers 200 with this element and 403 without it, while a user
+// holding MCP_ОсновнаяРоль answers 200 either way. So the declaration is what
+// grants the service to the restricted account a careful customer points the
+// connector at, and stripping it makes an explicit assignment of
+// MCP_ОсновнаяРоль mandatory for that account.
+//
+// An administrator is NOT a witness for this: on a real typical configuration an
+// account holding ПолныеПрава and АдминистраторСистемы kept the service in every
+// arm. Testing the flag from an administrator session will show nothing wrong.
+//
+// What the flag can and cannot do. It removes our contribution to ОсновныеРоли.
+// On a Standard Subsystems library whose check COUNTS that list, that can return
+// the count to an accepted value, but only if our role is the only extra entry.
+// On a library like the one measured here, whose check tests only that
+// АдминистраторСистемы and ПолныеПрава are present and ignores the count, our
+// entry cannot cause the abort at all and the flag has nothing to fix. The
+// tables and the two fingerprints are in extension/default_roles_test.go.
+//
+//garble:ignore
+func stripDefaultRoles(cfgPath string) error {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfgPath, defaultRolesRe.ReplaceAll(data, nil), 0o644)
+}
+
+// stripDefaultRunMode removes ONLY the DefaultRunMode element from
+// Configuration.xml, for the case where the base configuration sets a different
+// run mode and the platform treats that property as controlled.
+//
+// This is deliberately not stripInheritedProperties. That one names twelve
+// elements and, on the extension as shipped, takes four besides the run mode,
+// among them the extension's own Version. A run-mode mismatch is a one-property
+// disagreement and must be paid for with one property.
+//
+//garble:ignore
+func stripDefaultRunMode(cfgPath string) error {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfgPath, defaultRunModeRe.ReplaceAll(data, nil), 0o644)
 }
 
 // stripUnsupportedElements removes XML elements that older 1C platforms do not
