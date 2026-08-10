@@ -66,7 +66,7 @@ func main() {
 	platformVersion := flag.String("platform-version", "", "1C platform version override (e.g. 8.3.13), auto-detected from path if omitted")
 	dbUser := flag.String("db-user", "", "1C database user for DESIGNER (install mode)")
 	dbPassword := flag.String("db-password", "", "1C database password for DESIGNER (install mode)")
-	stripDefaultRoles := flag.Bool("strip-default-roles", false, "Install mode: do not declare MCP_ОсновнаяРоль as a default role of the configuration. Use this when a Standard Subsystems configuration refuses to start a session with «в свойстве ОсновныеРоли ... указаны лишние роли». Cost: the service then answers only users who have been assigned MCP_ОсновнаяРоль explicitly.")
+	stripDefaultRoles := flag.Bool("strip-default-roles", false, "Install mode: do not declare MCP_ОсновнаяРоль as a default role of the configuration. For Standard Subsystems configurations that refuse to start a session with «в свойстве ОсновныеРоли ... указаны лишние роли». It removes our contribution to ОсновныеРоли, which is what such customers clear by hand; it has not been verified against a base that reproduces the abort. Cost, measured: an ordinary least-privileged account loses the service until MCP_ОсновнаяРоль is assigned to it explicitly, while an administrator keeps access and notices nothing.")
 	quiet := flag.Bool("quiet", false, "Suppress all stderr output even when running in a terminal. Takes precedence over --verbose. Also activated by env MCP_1C_NO_TTY=1.")
 	verbose := flag.Bool("verbose", false, "Force verbose stderr output even when stdin is a pipe (useful for MCP client debugging). Overrides auto-detect and is itself overridden by --quiet.")
 	// Sentinel 0 => "flag not passed", so the MCP_1C_MAX_RESPONSE_SIZE env var
