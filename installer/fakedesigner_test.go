@@ -48,7 +48,17 @@ const (
 	// fakeModeLoadFails refuses /LoadConfigFromFiles, so nothing ever reaches
 	// the apply leg.
 	fakeModeLoadFails = "loadfail"
+	// fakeModeInheritedOverride refuses /UpdateDBCfg while the loaded
+	// configuration still carries the properties an old compat mode rejects,
+	// and accepts it once they are gone. This drives the OTHER branch of the
+	// apply-leg switch, so both branches are exercised end to end and not only
+	// through their predicates.
+	fakeModeInheritedOverride = "inherited-override"
 )
+
+// inheritedOverrideLog is the refusal old configurations give to an extension
+// that overrides inherited properties of the base configuration.
+const inheritedOverrideLog = "Ошибка: переопределение свойств заимствованных объектов не поддерживается"
 
 // runModeMismatchLog is the DESIGNER message measured on a real 1С 8.3.27 base,
 // reproduced verbatim including the double space the platform leaves where the
@@ -134,6 +144,14 @@ func serveFakeDesigner(dir string, args []string) int {
 		case fakeModeRunModeMismatch:
 			if strings.Contains(string(loaded), "<DefaultRunMode>") {
 				writeFakeLog(outPath, runModeMismatchLog)
+				return 101
+			}
+		case fakeModeInheritedOverride:
+			// ScriptVariant is one of the twelve stripInheritedProperties takes
+			// and one defaultRunModeRe does not, so only the wide strip clears
+			// this refusal.
+			if strings.Contains(string(loaded), "<ScriptVariant>") {
+				writeFakeLog(outPath, inheritedOverrideLog)
 				return 101
 			}
 		}

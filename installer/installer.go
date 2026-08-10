@@ -144,10 +144,6 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			if stripErr := stripInheritedProperties(cfgPath); stripErr != nil {
 				return fmt.Errorf("pre-patching inherited properties: %w", stripErr)
 			}
-			// Print info about role assignment
-			fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-			fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-			fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
 		}
 	}
 
@@ -255,11 +251,6 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			)
-			if err == nil {
-				fmt.Println("Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.")
-				fmt.Println("Пользователям с ролью \"Полные права\" дополнительных действий не требуется.")
-				fmt.Println("Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.")
-			}
 		}
 
 		if err != nil {
@@ -333,7 +324,36 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", err)))
 		}
 	}
+
+	printRoleNote()
 	return nil
+}
+
+// roleNoteLines is what a successful install tells the customer about access.
+//
+// The extension no longer declares MCP_ОсновнаяРоль as a default role of the
+// configuration, so the platform hands it to nobody: a user has it only when an
+// administrator assigns it. That was already the effective truth on any base
+// with a non-empty user list, and it is now the whole truth on every base, so
+// the note is no longer tied to the strip paths that used to print it. Those
+// paths were the old platforms, which meant the customers who most needed the
+// instruction, on 8.3.14 and newer, never saw it.
+//
+//garble:ignore
+var roleNoteLines = []string{
+	"Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.",
+	"Пользователям с ролью \"Полные права\" дополнительных действий не требуется.",
+	"Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.",
+}
+
+// printRoleNote prints roleNoteLines. It is called from exactly one place, the
+// single successful exit of Install, so no path can print the note twice.
+//
+//garble:ignore
+func printRoleNote() {
+	for _, line := range roleNoteLines {
+		fmt.Println(line)
+	}
 }
 
 // notAppliedNote explains what an exhausted apply leg leaves behind. Saying only
