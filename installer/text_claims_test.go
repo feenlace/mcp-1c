@@ -111,18 +111,47 @@ func roleNoteClaims() []textClaim {
 			negated: "Примечание: роль MCP_ОсновнаяРоль не установлена и не объявлена основной ролью расширения.",
 		},
 		{
-			what:    "users who already hold roles of the configuration reach the service with NO further action",
+			what:    "RIGHT NOW users who already hold roles of the configuration reach the service with no further action",
 			text:    roleNoteLines[1],
 			must:    []string{"уже есть роли", "получают доступ", "без дополнительных действий"},
 			mustNot: []string{"не получают доступ", "требуются дополнительные", "получают отказ"},
-			negated: "Пользователи, у которых уже есть роли конфигурации, получают отказ и требуются дополнительные действия.",
+			negated: "Сейчас пользователи, у которых уже есть роли конфигурации, получают отказ и требуются дополнительные действия.",
 		},
 		{
-			what:    "a user with NO roles is refused and must be given the role BY HAND",
+			// The claim that replaced «назначьте роль вручную в Конфигураторе».
+			what:    "with Управление доступом, access goes through a профиль групп доступа, because a recalculation undoes both other mechanisms",
 			text:    roleNoteLines[2],
-			must:    []string{"нет ни одной роли", "отказом", "назначьте", "вручную", "Конфигураторе"},
-			mustNot: []string{"назначается автоматически", "назначать не нужно", "отвечает без отказа"},
-			negated: "Пользователю, у которого нет ни одной роли, роль MCP_ОсновнаяРоль назначается автоматически.",
+			must:    []string{"Управление доступом", "через профиль групп доступа", "пересчёт ролей", "стирает", "выключает свойство"},
+			mustNot: []string{"назначьте", "вручную в Конфигураторе", "сохраняется"},
+			negated: "Если в конфигурации есть подсистема Управление доступом, назначьте роль вручную в Конфигураторе: пересчёт ролей пользователей ничего не меняет.",
+		},
+		{
+			what:    "a recalculation is an ORDINARY administrative event, so direct assignment cannot be relied on there",
+			text:    roleNoteLines[3],
+			must:    []string{"обычное административное действие", "полагаться нельзя"},
+			mustNot: []string{"редкое", "никогда не происходит", "можно полагаться"},
+			negated: "Пересчёт ролей это редкое событие, поэтому на прямое назначение там можно полагаться.",
+		},
+		{
+			what:    "WITHOUT Управление доступом, a direct assignment works and STAYS",
+			text:    roleNoteLines[4],
+			must:    []string{"нет", "напрямую", "сохраняется"},
+			mustNot: []string{"не сохраняется", "стирается", "тоже стирается"},
+			negated: "Если подсистемы Управление доступом в конфигурации нет, прямое назначение роли всё равно не сохраняется.",
+		},
+		{
+			what:    "the SYMPTOM of the first case, given instead of a detection recipe we cannot ground",
+			text:    roleNoteLines[5],
+			must:    []string{"доступ работал и перестал", "роль у пользователя пропала"},
+			mustNot: []string{"роль остаётся на месте", "доступ не меняется"},
+			negated: "Признак того, что вы в первом случае: доступ не меняется и роль остаётся на месте.",
+		},
+		{
+			what:    "the extension CANNOT do it for them: safe mode, and the platform refuses",
+			text:    roleNoteCannotDoIt,
+			must:    []string{"не может", "безопасном режиме", "отвергает"},
+			mustNot: []string{"расширение назначит", "сделает это за вас"},
+			negated: "Расширение сделает это за вас: оно работает вне безопасного режима, и платформа разрешает администрирование пользователей.",
 		},
 	}
 }
@@ -161,19 +190,29 @@ func roleNoteStrippedClaims() []textClaim {
 				"а обычная учётная запись с ограниченными правами сервис сохраняет.",
 		},
 		{
-			what:    "the account the CONNECTOR uses is the one to check, and to be given the role BY HAND",
-			text:    roleNoteStrippedLines[3],
-			must:    []string{"коннектор", "ограничены", "назначьте", "MCP_ОсновнаяРоль", "вручную", "Конфигураторе"},
-			mustNot: []string{"назначается автоматически", "назначать не нужно"},
-			negated: "Учётной записи коннектора роль MCP_ОсновнаяРоль назначается автоматически, " +
-				"вручную ничего делать не нужно, даже если права ограничены.",
+			what: "the CONNECTOR's account must be granted access explicitly, and by which route depends on Управление доступом",
+			text: roleNoteStrippedLines[3],
+			must: []string{"коннектор", "выдать явно", "Управление доступом", "через профиль групп доступа",
+				"иначе прямым назначением"},
+			mustNot: []string{"назначается автоматически", "выдавать не нужно", "вручную в Конфигураторе"},
+			negated: "Учётной записи коннектора доступ назначается автоматически, выдавать его не нужно.",
 		},
 		{
-			what:    "the extension CANNOT do it for them, because 1С forbids it",
-			text:    roleNoteStrippedLines[4],
-			must:    []string{"не может", "не разрешает", "администрировать пользователей"},
+			what: "with Управление доступом a direct assignment does NOT survive, and the symptom says so",
+			text: roleNoteStrippedLines[4],
+			must: []string{"не держится", "пересчёт ролей", "стирает", "доступ работал и перестал"},
+			// «не держится» CONTAINS «держится», so the forbidden fragment has to
+			// be the positive form with its subject attached. This is the same
+			// containment trap as «не установлена» against «установлена».
+			mustNot: []string{"назначение держится", "сохраняется", "пересчёт ничего не меняет"},
+			negated: "В конфигурации с Управление доступом прямое назначение держится и сохраняется, пересчёт ничего не меняет.",
+		},
+		{
+			what:    "the extension CANNOT do it for them: safe mode, and the platform refuses",
+			text:    roleNoteCannotDoIt,
+			must:    []string{"не может", "безопасном режиме", "отвергает"},
 			mustNot: []string{"расширение назначит", "сделает это за вас"},
-			negated: "Расширение сделает это за вас: 1С разрешает коду расширения администрировать пользователей информационной базы.",
+			negated: "Расширение сделает это за вас: оно работает вне безопасного режима, и платформа разрешает администрирование пользователей.",
 		},
 	}
 }
@@ -325,6 +364,74 @@ func TestNoTextClaimsFullRightsUsersAreRefused(t *testing.T) {
 	if !hit {
 		t.Fatal("the scan cannot find the refuted claim in the sentence that made it, so its verdict " +
 			"on the shipped texts means nothing")
+	}
+}
+
+// TestNoTextTellsTheCustomerToAssignTheRoleByHand pins the second claim that was
+// measured FALSE and shipped anyway, and this one shipped UNCONDITIONALLY.
+//
+// «назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе» printed on every
+// successful install. On a configuration carrying the Управление доступом
+// subsystem it is false: measured on a twin of a real Бухгалтерия 3.0.111.25,
+// one call to УправлениеДоступомСлужебный.ОбновитьРолиПользователей() deleted
+// exactly that role from the user and switched off the extension property that
+// carries the automatic access, and the user went from 200 to 403.
+//
+// An instruction that stops working later is worse than no instruction: the
+// customer follows it, sees it work, and discovers months later that access
+// vanished. So the imperative is forbidden here, and both notes are required to
+// carry BOTH branches of the split, because a note that mentions only one of them
+// is the same defect wearing a condition.
+func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
+	// The retired instruction, in the shapes it was actually shipped in.
+	retired := []string{"вручную в конфигураторе", "назначьте ему роль", "назначьте ей роль"}
+
+	notes := map[string][]string{
+		"roleNoteLines":         roleNoteLines,
+		"roleNoteStrippedLines": roleNoteStrippedLines,
+	}
+
+	scanned := 0
+	for name, lines := range notes {
+		joined := strings.ToLower(strings.Join(lines, "\n"))
+		for _, line := range lines {
+			scanned++
+			for _, r := range retired {
+				if strings.Contains(strings.ToLower(line), r) {
+					t.Errorf("%s tells the customer to assign the role by hand (%q). Measured: on a "+
+						"configuration with Управление доступом a recalculation of user roles deletes "+
+						"exactly that assignment and switches off the property carrying the automatic "+
+						"access.\nline: %q", name, r, line)
+				}
+			}
+		}
+		// Both branches of the split have to be present, or the note is right
+		// about one kind of base and silent about the other.
+		for _, required := range []string{"управление доступом", "профиль групп доступа"} {
+			if !strings.Contains(joined, required) {
+				t.Errorf("%s never mentions %q, so it does not tell the reader which of the two "+
+					"configurations they are in or how access is delivered there", name, required)
+			}
+		}
+	}
+	if scanned < 10 {
+		t.Fatalf("only %d note lines were scanned; both notes are longer than that together", scanned)
+	}
+
+	// Positive control: the scan finds the retired instruction in the sentence
+	// that made it, so the zeros above are absence and not a scanner that
+	// matches nothing.
+	control := "Пользователю, у которого нет ни одной роли, сервис отвечает отказом: назначьте ему роль " +
+		"MCP_ОсновнаяРоль вручную в Конфигураторе."
+	hits := 0
+	for _, r := range retired {
+		if strings.Contains(strings.ToLower(control), r) {
+			hits++
+		}
+	}
+	if hits < 2 {
+		t.Fatalf("the scan found %d of the retired shapes in the sentence that shipped them, so its "+
+			"verdict on the shipped notes means nothing", hits)
 	}
 }
 

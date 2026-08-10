@@ -369,11 +369,51 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 // is refused either way. Both notes below say what survives both readings, and
 // nothing more. See extension/default_roles_test.go for the full tables.
 //
+// The last line of this note used to be «назначьте роль MCP_ОсновнаяРоль вручную
+// в Конфигураторе», printed on EVERY successful install. It is false wherever the
+// configuration has the Управление доступом subsystem. Measured on a twin of a
+// real Бухгалтерия 3.0.111.25 with nine users: one call to
+// УправлениеДоступомСлужебный.ОбновитьРолиПользователей() took Demo from 199
+// roles to 198, removing MCP_ОсновнаяРоль and ONLY it, the surviving 198 being
+// byte-identical to the pre-assignment baseline. The same call flipped the
+// extension's ИспользоватьОсновныеРолиДляВсехПользователей from True to False,
+// and Demo went from 200 to 403 «Недостаточно прав» while the administrator
+// stayed at 200. Both HTTP rows were taken after an iisreset; without one the
+// "after" row lied 200 out of a pooled session.
+//
+// So on such a configuration BOTH mechanisms this note used to rely on are
+// undone by one ordinary administrative action: the direct assignment is
+// deleted, and the attachment property that carries the automatic access is
+// switched off. Access has to be delivered through a профиль групп доступа.
+//
+// Only users that exist in Справочник.Пользователи are reconciled: a user with
+// no directory entry kept the role. That is recorded because it explains the
+// mechanism, and it is explicitly NOT advice. Telling customers to keep a
+// service account out of the user directory to dodge the reconciliation would be
+// irresponsible, and no text of ours says anything of the kind.
+//
+// Nor can we automate our way out of it. The extension runs in safe mode, and an
+// attempt to administer infobase users through /execute comes back HTTP 500
+// carrying the platform's security warning. Nothing in either note may imply the
+// product can fix this for the customer.
+//
+// The trigger is deliberately NOT described as automatic or inevitable. It was
+// not established: installing did not fire it, a new extension defaults the flag
+// to True, an ordinary login did not fire it, re-saving a user card did not, and
+// the scheduled job our source reading pointed at does not exist in that
+// configuration. What is written is what was demonstrated, that a recalculation
+// of user roles does it and that a recalculation is a normal administrative
+// event.
+//
 //garble:ignore
 var roleNoteLines = []string{
 	"Примечание: роль MCP_ОсновнаяРоль установлена и объявлена основной ролью расширения.",
-	"Пользователи, у которых уже есть роли конфигурации, получают доступ к сервису без дополнительных действий.",
-	"Пользователю, у которого нет ни одной роли, сервис отвечает отказом: назначьте ему роль MCP_ОсновнаяРоль вручную в Конфигураторе.",
+	"Сейчас пользователи, у которых уже есть роли конфигурации, получают доступ к сервису без дополнительных действий.",
+	"Если в конфигурации есть подсистема Управление доступом, выдавайте доступ через профиль групп доступа: пересчёт ролей пользователей стирает роль, назначенную пользователю напрямую, и выключает свойство расширения, которым этот доступ держится.",
+	"Пересчёт ролей это обычное административное действие, поэтому на прямое назначение там полагаться нельзя.",
+	"Если подсистемы Управление доступом в конфигурации нет, роль MCP_ОсновнаяРоль назначается пользователю напрямую, и назначение сохраняется.",
+	"Признак того, что вы в первом случае: доступ работал и перестал, а роль у пользователя пропала.",
+	roleNoteCannotDoIt,
 }
 
 // roleNoteStrippedLines replaces it when the loaded configuration does NOT
@@ -393,9 +433,18 @@ var roleNoteStrippedLines = []string{
 	"Внимание: в загруженной конфигурации объявления основной роли нет, а вместе с ним нет и автоматического доступа.",
 	"Так выходит под флагом --strip-default-roles, а также на платформах до 8.3.14 и на старых режимах совместимости, где свойства заимствованных объектов снимаются целиком.",
 	"Померено на реальной типовой базе: учётная запись администратора доступ сохраняет и ничего не заметит, а обычная учётная запись с ограниченными правами теряет сервис целиком.",
-	"Поэтому проверьте ту учётную запись, на которую настроен коннектор: если права у неё ограничены, назначьте ей роль MCP_ОсновнаяРоль вручную в Конфигураторе.",
-	"Сделать это за вас расширение не может: 1С не разрешает коду расширения администрировать пользователей информационной базы.",
+	"Поэтому доступ той учётной записи, на которую настроен коннектор, нужно выдать явно: если в конфигурации есть подсистема Управление доступом, через профиль групп доступа, иначе прямым назначением роли MCP_ОсновнаяРоль.",
+	"В конфигурации с Управление доступом прямое назначение не держится: пересчёт ролей пользователей его стирает. Признак: доступ работал и перестал, а роль у пользователя пропала.",
+	roleNoteCannotDoIt,
 }
+
+// roleNoteCannotDoIt is true under every configuration and in both notes, so it
+// is written once and shared. Measured: the extension runs in safe mode and an
+// attempt to administer infobase users through /execute returns HTTP 500 with
+// the platform's security warning.
+//
+//garble:ignore
+const roleNoteCannotDoIt = "Сделать это за вас расширение не может: оно работает в безопасном режиме, и платформа отвергает администрирование пользователей информационной базы из расширения."
 
 // roleName is the role the extension ships and the one both notes talk about.
 const roleName = "MCP_ОсновнаяРоль"

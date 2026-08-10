@@ -32,22 +32,40 @@ import (
 // ---------------------------------------------------------------------------
 
 // countRoleNote returns how many complete copies of the given note the output
-// contains. Every line is counted separately and the counts must agree, so a
-// half-printed note is not reported as a whole one.
-func countRoleNote(t *testing.T, out string, lines []string) int {
+// contains.
+//
+// Only the lines UNIQUE to this note are counted. The two notes deliberately
+// share one sentence, the one saying the extension cannot assign the role
+// itself, because it is true under every configuration and is written once
+// rather than in two wordings. Counting the shared line as part of either note
+// would report the other note as half printed on every run.
+//
+// Every unique line is counted separately and the counts must agree, so a note
+// printed in pieces is not reported as a whole one.
+func countRoleNote(t *testing.T, out string, lines, other []string) int {
 	t.Helper()
-	if len(lines) < 3 {
-		t.Fatalf("the note is %d lines; it is meant to say what the role does, who reaches the "+
-			"service already, and who must be given the role by hand", len(lines))
+	shared := map[string]bool{}
+	for _, l := range other {
+		shared[l] = true
 	}
-	counts := make([]int, 0, len(lines))
-	for _, line := range lines {
+	var unique []string
+	for _, l := range lines {
+		if !shared[l] {
+			unique = append(unique, l)
+		}
+	}
+	if len(unique) < 3 {
+		t.Fatalf("only %d of the %d lines are unique to this note; below three there is not enough "+
+			"left to tell the two notes apart", len(unique), len(lines))
+	}
+	counts := make([]int, 0, len(unique))
+	for _, line := range unique {
 		counts = append(counts, strings.Count(out, line))
 	}
 	for i, c := range counts {
 		if c != counts[0] {
-			t.Fatalf("the note printed in pieces: line 1 appears %d times, line %d appears %d times\n%s",
-				counts[0], i+1, c, out)
+			t.Fatalf("the note printed in pieces: unique line 1 appears %d times, unique line %d "+
+				"appears %d times\n%s", counts[0], i+1, c, out)
 		}
 	}
 	return counts[0]
@@ -155,11 +173,20 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 				printed, silent = roleNoteStrippedLines, roleNoteLines
 				printedName, silentName = "stripped", "default"
 			}
-			if got := countRoleNote(t, out, printed); got != tc.wantNotes {
+			if got := countRoleNote(t, out, printed, silent); got != tc.wantNotes {
 				t.Errorf("the %s role note printed %d times, want %d\nstdout:\n%s",
 					printedName, got, tc.wantNotes, out)
 			}
-			if got := countRoleNote(t, out, silent); got != 0 {
+			// The sentence both notes share is counted on its own, because the
+			// comparison above deliberately skips it. On a successful install
+			// exactly one note prints, so it must appear exactly once; on a
+			// failed one, not at all.
+			if got := strings.Count(out, roleNoteCannotDoIt); got != tc.wantNotes {
+				t.Errorf("the sentence shared by both notes printed %d times, want %d\nstdout:\n%s",
+					got, tc.wantNotes, out)
+			}
+
+			if got := countRoleNote(t, out, silent, printed); got != 0 {
 				t.Errorf("the %s role note printed %d times on a run that must not use it. The two "+
 					"notes make opposite promises about who reaches the service\nstdout:\n%s",
 					silentName, got, out)
@@ -241,11 +268,11 @@ func TestRoleNoteSelectorIsTheXMLNotTheFlag(t *testing.T) {
 				other, otherName = roleNoteLines, "default"
 			}
 
-			if got := countRoleNote(t, out, want); got != 1 {
+			if got := countRoleNote(t, out, want, other); got != 1 {
 				t.Errorf("the loaded configuration declares our role: %v, so the %s note belongs here "+
 					"and it printed %d times\nstdout:\n%s", declared, wantName, got, out)
 			}
-			if got := countRoleNote(t, out, other); got != 0 {
+			if got := countRoleNote(t, out, other, want); got != 0 {
 				t.Errorf("the %s note printed %d times while the loaded configuration declares our "+
 					"role: %v. The flag was %v, and the flag is not what decides this\nstdout:\n%s",
 					otherName, got, declared, sc.stripRoles, out)
