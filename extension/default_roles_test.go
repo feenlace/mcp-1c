@@ -68,13 +68,34 @@ import (
 //
 // The customer's symptom is real and is addressed at install time instead, by
 // the --strip-default-roles flag in the installer, which removes this element
-// from the copy it loads. The default ships the element. That flag's premise is
-// NOT verified: on the Standard Subsystems base measured here the customer's
-// abort does not reproduce, with or without our element, even though that base's
-// own ОсновныеРоли already carries a third role beyond the two the error names.
-// So "an extra role is present" is not by itself what their library rejects, and
-// what the flag is known to do is remove OUR contribution to ОсновныеРоли, which
-// is the thing the customer clears by hand today and reports as working.
+// from the copy it loads. The default ships the element.
+//
+// WHY THE ABORT DOES NOT REPRODUCE HERE, read out of the dumped source of our
+// own base rather than inferred. ОбщийМодуль.СтандартныеПодсистемыСервер raises
+// only when ОсновныеРоли is missing АдминистраторСистемы or ПолныеПрава. There
+// is no count test, and the message ENDS at «...АдминистраторСистемы и
+// ПолныеПрава.» A search for «лишние роли» across six dumped modules returned
+// zero, with positive controls firing. Measured live in that base: four default
+// roles including ours, both standard roles present, the expression evaluates
+// false, and the early-return guard did NOT fire, so the check ran and was
+// simply indifferent to the extra entry. That library is 3.1.5.331, established
+// three independent ways.
+//
+// The customer is on an older library, and TWO INDEPENDENT FINGERPRINTS agree.
+// The message: their tail reads «...ПолныеПрава или указаны лишние роли», a
+// clause our source cannot produce. The stack, which does not depend on wording
+// at all: their raising line in СтандартныеПодсистемыСервер is 2801 against our
+// 2967, the line calling ПередЗапускомПрограммы() is 36 against our 57, and the
+// line in МодульСеанса is 8 against our 16.
+//
+// The pre-3.1 source carrying the count rule was read from a public mirror, not
+// from a base we control, so it is strong corroboration rather than something we
+// measured. What stands without it, and is what the customer-facing text says:
+// the flag removes OUR contribution to ОсновныеРоли; on a library whose check
+// counts that list this can return the count to an accepted value PROVIDED our
+// role is the only extra one; and on a library like ours, which tests only
+// membership, our entry cannot cause this abort at all, so the flag has nothing
+// to fix there and using it would trade working access for nothing.
 // ---------------------------------------------------------------------------
 
 const configurationPath = "src/Configuration.xml"

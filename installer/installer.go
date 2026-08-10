@@ -885,9 +885,13 @@ var defaultRolesRe = regexp.MustCompile(
 // account holding ПолныеПрава and АдминистраторСистемы kept the service in every
 // arm. Testing the flag from an administrator session will show nothing wrong.
 //
-// The flag's own premise is unverified. On the Standard Subsystems base measured,
-// the customer's session abort does not reproduce with or without this element.
-// What the flag is known to do is remove our contribution to ОсновныеРоли.
+// What the flag can and cannot do. It removes our contribution to ОсновныеРоли.
+// On a Standard Subsystems library whose check COUNTS that list, that can return
+// the count to an accepted value, but only if our role is the only extra entry.
+// On a library like the one measured here, whose check tests only that
+// АдминистраторСистемы and ПолныеПрава are present and ignores the count, our
+// entry cannot cause the abort at all and the flag has nothing to fix. The
+// tables and the two fingerprints are in extension/default_roles_test.go.
 //
 //garble:ignore
 func stripDefaultRoles(cfgPath string) error {
