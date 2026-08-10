@@ -285,19 +285,19 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		case isInheritedOverrideError(err):
 			fmt.Println("Retrying without inherited properties (old compat mode)...")
 			if patchErr := stripInheritedProperties(cfgPath); patchErr != nil {
-				return fmt.Errorf("updating database config: strip inherited properties: %w", patchErr)
+				return notApplied(fmt.Errorf("updating database config: strip inherited properties: %w", patchErr))
 			}
 			if reloadErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			); reloadErr != nil {
-				return classifyDesignerError(fmt.Errorf("reloading extension config after strip: %w", reloadErr))
+				return notApplied(classifyDesignerError(fmt.Errorf("reloading extension config after strip: %w", reloadErr)))
 			}
 			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/UpdateDBCfg",
 				"-Extension", extensionName,
 			); retryErr != nil {
-				return classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr))
+				return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr)))
 			}
 
 		case isRunModeMismatchError(err):
@@ -313,27 +313,55 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			// cost the customer the run mode and nothing else.
 			fmt.Println("Retrying without DefaultRunMode property (controlled property mismatch)...")
 			if stripErr := stripDefaultRunMode(cfgPath); stripErr != nil {
-				return fmt.Errorf("updating database config: strip DefaultRunMode: %w", stripErr)
+				return notApplied(fmt.Errorf("updating database config: strip DefaultRunMode: %w", stripErr))
 			}
 			if reloadErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/LoadConfigFromFiles", extDir,
 				"-Extension", extensionName,
 			); reloadErr != nil {
-				return classifyDesignerError(
-					fmt.Errorf("reloading extension config after DefaultRunMode strip: %w", reloadErr))
+				return notApplied(classifyDesignerError(
+					fmt.Errorf("reloading extension config after DefaultRunMode strip: %w", reloadErr)))
 			}
 			if retryErr := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 				"/UpdateDBCfg",
 				"-Extension", extensionName,
 			); retryErr != nil {
-				return classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr))
+				return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", retryErr)))
 			}
 
 		default:
-			return classifyDesignerError(fmt.Errorf("updating database config: %w", err))
+			return notApplied(classifyDesignerError(fmt.Errorf("updating database config: %w", err)))
 		}
 	}
 	return nil
+}
+
+// notAppliedNote explains what an exhausted apply leg leaves behind. Saying only
+// "updating database config: ..." is accurate and incomplete, and the two ways a
+// customer completes it are both wrong: on a fresh install the extension is
+// loaded but dead, and on an update the PREVIOUS version is still applied and
+// serving while the new one sits unapplied in the main configuration. A customer
+// who read only the error concluded «обновилось всё-таки» and went on running the
+// old code.
+//
+//garble:ignore
+const notAppliedNote = "Изменения в базу данных не внесены: расширение загружено в конфигурацию, но не применено.\n" +
+	"Если расширение в этой базе уже стояло, продолжает работать прежняя его версия, " +
+	"а новая осталась загруженной и не применённой.\n" +
+	"Если это первая установка, расширение не работает.\n" +
+	"Устраните причину и повторите установку."
+
+// notApplied appends notAppliedNote to an apply-leg failure. It is used ONLY
+// after /LoadConfigFromFiles has succeeded: on a load failure nothing reached
+// the infobase, and the note would be a second false statement in place of an
+// incomplete one.
+//
+//garble:ignore
+func notApplied(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w\n\n%s", err, notAppliedNote)
 }
 
 // isRunModeMismatchError reports whether a DESIGNER failure is the controlled
