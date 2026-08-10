@@ -53,9 +53,17 @@ var roleDocs = []struct {
 	path         string
 	manualRoute  string
 	manualRouteN string
+	// manualRouteEnd is the heading at which the manual route stops. Without it
+	// the "manual route" ran to the end of the file and swept in the
+	// troubleshooting section, which mentions the same facts: measured, deleting
+	// the role step from the manual route left this test green because prose
+	// three sections below satisfied it.
+	manualRouteEnd string
 }{
-	{"../docs/1c-setup.md", "### Установка через Конфигуратор", "Установка через Конфигуратор"},
-	{"../docs/getting-started.md", "**Вручную (если автоматическая не сработала):**", "Вручную"},
+	{"../docs/1c-setup.md", "### Установка через Конфигуратор", "Установка через Конфигуратор",
+		"## Шаг 4."},
+	{"../docs/getting-started.md", "**Вручную (если автоматическая не сработала):**", "Вручную",
+		"### Шаг 3."},
 }
 
 func TestRoleInstructionIsDocumentedOnBothInstallRoutes(t *testing.T) {
@@ -79,15 +87,30 @@ func TestRoleInstructionIsDocumentedOnBothInstallRoutes(t *testing.T) {
 			}
 			automatic, manual := text[:cut], text[cut:]
 
-			// Positive control: the cut produced two real halves, and each half
-			// is the one it is claimed to be.
+			// The manual route ENDS somewhere. Everything past that heading is a
+			// different section and must not stand in for the route's own text.
+			stop := strings.Index(manual, doc.manualRouteEnd)
+			if stop < 0 {
+				t.Fatalf("%s no longer contains %q, the heading at which its manual route ends, so the "+
+					"route cannot be bounded and later sections would answer for it",
+					doc.path, doc.manualRouteEnd)
+			}
+			tail := manual[stop:]
+			manual = manual[:stop]
+
+			// Positive controls: the cut produced three real parts, and each is
+			// the one it is claimed to be.
 			if !strings.Contains(automatic, "--install") {
 				t.Fatalf("%s: the half before %q does not mention --install, so it is not the command "+
 					"line route and the split is wrong", doc.path, doc.manualRouteN)
 			}
 			if !strings.Contains(manual, "Конфигуратор") {
-				t.Fatalf("%s: the half after %q does not mention the Конфигуратор, so it is not the "+
+				t.Fatalf("%s: the section after %q does not mention the Конфигуратор, so it is not the "+
 					"manual route and the split is wrong", doc.path, doc.manualRouteN)
+			}
+			if len(tail) == 0 {
+				t.Fatalf("%s: nothing follows the manual route, so bounding it changed nothing and the "+
+					"bound is not being exercised", doc.path)
 			}
 
 			for _, half := range []struct {
