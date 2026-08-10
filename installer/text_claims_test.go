@@ -111,40 +111,50 @@ func roleNoteClaims() []textClaim {
 			negated: "Примечание: роль MCP_ОсновнаяРоль не установлена и не объявлена основной ролью расширения.",
 		},
 		{
-			what:    "RIGHT NOW users who already hold roles of the configuration reach the service with no further action",
+			// Restored: the retired line was also the only place that told the
+			// reader a user with NO roles is refused. The docs kept it; someone
+			// installing from the command line sees only this note.
+			what:    "users with roles reach the service now, and a user with NO roles is REFUSED",
 			text:    roleNoteLines[1],
-			must:    []string{"уже есть роли", "получают доступ", "без дополнительных действий"},
-			mustNot: []string{"не получают доступ", "требуются дополнительные", "получают отказ"},
-			negated: "Сейчас пользователи, у которых уже есть роли конфигурации, получают отказ и требуются дополнительные действия.",
+			must:    []string{"уже есть роли", "без дополнительных действий", "нет ни одной роли", "отказом"},
+			mustNot: []string{"тоже получают доступ", "получает доступ без"},
+			negated: "Сейчас пользователи, у которых уже есть роли конфигурации, получают доступ без дополнительных действий, и пользователь, у которого нет ни одной роли, тоже получает доступ.",
 		},
 		{
-			// The claim that replaced «назначьте роль вручную в Конфигураторе».
-			what:    "with Управление доступом, access goes through a профиль групп доступа, because a recalculation undoes both other mechanisms",
+			// A check the reader can run BEFORE losing access, not only after.
+			what:    "presence of профили групп доступа IMPLIES the Управление доступом subsystem",
 			text:    roleNoteLines[2],
-			must:    []string{"Управление доступом", "через профиль групп доступа", "пересчёт ролей", "стирает", "выключает свойство"},
-			mustNot: []string{"назначьте", "вручную в Конфигураторе", "сохраняется"},
-			negated: "Если в конфигурации есть подсистема Управление доступом, назначьте роль вручную в Конфигураторе: пересчёт ролей пользователей ничего не меняет.",
+			must:    []string{"видно заранее", "есть профили групп доступа", "есть и подсистема Управление доступом"},
+			mustNot: []string{"узнать заранее нельзя", "только после", "не связано"},
+			negated: "Какой у вас случай, узнать заранее нельзя: наличие профилей групп доступа с подсистемой Управление доступом не связано.",
+		},
+		{
+			what:    "in that case access goes by профиль групп доступа, because the recalculation undoes both other mechanisms",
+			text:    roleNoteLines[3],
+			must:    []string{"выдавайте доступ профилем групп доступа", "стирает роль", "выключает свойство", "автоматический доступ"},
+			mustNot: []string{"вручную", "ничего не стирает"},
+			negated: "Тогда назначайте роль напрямую: пересчёт ролей пользователей ничего не стирает.",
 		},
 		{
 			what:    "a recalculation is an ORDINARY administrative event, so direct assignment cannot be relied on there",
-			text:    roleNoteLines[3],
+			text:    roleNoteLines[4],
 			must:    []string{"обычное административное действие", "полагаться нельзя"},
 			mustNot: []string{"редкое", "никогда не происходит", "можно полагаться"},
 			negated: "Пересчёт ролей это редкое событие, поэтому на прямое назначение там можно полагаться.",
 		},
 		{
-			what:    "WITHOUT Управление доступом, a direct assignment works and STAYS",
-			text:    roleNoteLines[4],
-			must:    []string{"нет", "напрямую", "сохраняется"},
-			mustNot: []string{"не сохраняется", "стирается", "тоже стирается"},
-			negated: "Если подсистемы Управление доступом в конфигурации нет, прямое назначение роли всё равно не сохраняется.",
+			what:    "WITHOUT профили групп доступа, a direct assignment works and STAYS",
+			text:    roleNoteLines[5],
+			must:    []string{"профилей групп доступа в конфигурации нет", "напрямую", "сохраняется"},
+			mustNot: []string{"не сохраняется", "стирается"},
+			negated: "Если профилей групп доступа в конфигурации нет, прямое назначение роли всё равно не сохраняется.",
 		},
 		{
-			what:    "the SYMPTOM of the first case, given instead of a detection recipe we cannot ground",
-			text:    roleNoteLines[5],
+			what:    "the SYMPTOM, for a reader who is already bitten",
+			text:    roleNoteLines[6],
 			must:    []string{"доступ работал и перестал", "роль у пользователя пропала"},
 			mustNot: []string{"роль остаётся на месте", "доступ не меняется"},
-			negated: "Признак того, что вы в первом случае: доступ не меняется и роль остаётся на месте.",
+			negated: "Признак того, что вы всё же в первом случае: доступ не меняется и роль остаётся на месте.",
 		},
 		{
 			what:    "the extension CANNOT do it for them: safe mode, and the platform refuses",
@@ -159,9 +169,6 @@ func roleNoteClaims() []textClaim {
 func roleNoteStrippedClaims() []textClaim {
 	return []textClaim{
 		{
-			// States what is TRUE OF THE FILE, not what caused it: three paths
-			// besides the flag remove the declaration, so naming the flag as the
-			// cause would be false on all three.
 			what:    "the loaded configuration does NOT declare the role, and there is no automatic access",
 			text:    roleNoteStrippedLines[0],
 			must:    []string{"в загруженной конфигурации", "объявления основной роли нет", "автоматического доступа"},
@@ -176,43 +183,35 @@ func roleNoteStrippedClaims() []textClaim {
 			negated: "Так выходит только под флагом --strip-default-roles.",
 		},
 		{
-			// The pairing is the claim, so the fragments are contiguous phrases
-			// rather than single words: the negation of this sentence reuses
-			// every word in it and swaps only which account keeps the service.
 			what: "an ADMINISTRATOR account keeps the service, an ordinary restricted account LOSES it",
 			text: roleNoteStrippedLines[2],
 			must: []string{"администратора доступ сохраняет", "ограниченными правами теряет сервис"},
 			mustNot: []string{"администратора доступ теряет", "администратор получает отказ",
-				// The refuted claim. It was measured false on a real typical
-				// configuration and must not come back.
 				"Полные права"},
 			negated: "Померено: учётная запись администратора доступ теряет, " +
 				"а обычная учётная запись с ограниченными правами сервис сохраняет.",
 		},
 		{
-			what: "the CONNECTOR's account must be granted access explicitly, and by which route depends on Управление доступом",
+			what: "the CONNECTOR's account must be granted access explicitly, by the route its configuration allows",
 			text: roleNoteStrippedLines[3],
-			must: []string{"коннектор", "выдать явно", "Управление доступом", "через профиль групп доступа",
-				"иначе прямым назначением"},
-			mustNot: []string{"назначается автоматически", "выдавать не нужно", "вручную в Конфигураторе"},
+			must: []string{"коннектор", "выдать явно", "есть профили групп доступа",
+				"через профиль групп доступа", "иначе прямым назначением"},
+			mustNot: []string{"назначается автоматически", "выдавать не нужно", "вручную"},
 			negated: "Учётной записи коннектора доступ назначается автоматически, выдавать его не нужно.",
 		},
 		{
-			what: "with Управление доступом a direct assignment does NOT survive, and the symptom says so",
-			text: roleNoteStrippedLines[4],
-			must: []string{"не держится", "пересчёт ролей", "стирает", "доступ работал и перестал"},
-			// «не держится» CONTAINS «держится», so the forbidden fragment has to
-			// be the positive form with its subject attached. This is the same
-			// containment trap as «не установлена» against «установлена».
-			mustNot: []string{"назначение держится", "сохраняется", "пересчёт ничего не меняет"},
-			negated: "В конфигурации с Управление доступом прямое назначение держится и сохраняется, пересчёт ничего не меняет.",
+			what:    "профили групп доступа mean the subsystem is there, and a direct assignment does NOT survive it",
+			text:    roleNoteStrippedLines[4],
+			must:    []string{"Профили групп доступа означают", "Управление доступом", "не держится", "стирает"},
+			mustNot: []string{"назначение держится", "сохраняется", "ничего не меняет"},
+			negated: "Профили групп доступа ничего не означают, прямое назначение держится и сохраняется.",
 		},
 		{
-			what:    "the extension CANNOT do it for them: safe mode, and the platform refuses",
-			text:    roleNoteCannotDoIt,
-			must:    []string{"не может", "безопасном режиме", "отвергает"},
-			mustNot: []string{"расширение назначит", "сделает это за вас"},
-			negated: "Расширение сделает это за вас: оно работает вне безопасного режима, и платформа разрешает администрирование пользователей.",
+			what:    "the SYMPTOM, for a reader who is already bitten",
+			text:    roleNoteStrippedLines[5],
+			must:    []string{"доступ работал и перестал", "роль у пользователя пропала"},
+			mustNot: []string{"роль остаётся на месте", "доступ не меняется"},
+			negated: "Признак: доступ не меняется и роль остаётся на месте.",
 		},
 	}
 }
@@ -384,7 +383,12 @@ func TestNoTextClaimsFullRightsUsersAreRefused(t *testing.T) {
 // is the same defect wearing a condition.
 func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
 	// The retired instruction, in the shapes it was actually shipped in.
-	retired := []string{"вручную в конфигураторе", "назначьте ему роль", "назначьте ей роль"}
+	// «вручную» is the whole retired instruction in one word, and neither note
+	// contains it any more. Unlike the disavowal blacklist declared at the top of
+	// this file, THIS one is closed: it is not a sample of the ways to phrase an
+	// idea, it is a single word that must not appear at all, and checking for a
+	// word is exhaustive. The three longer shapes stay for the failure message.
+	retired := []string{"вручную", "вручную в конфигураторе", "назначьте ему роль", "назначьте ей роль"}
 
 	notes := map[string][]string{
 		"roleNoteLines":         roleNoteLines,
@@ -407,7 +411,10 @@ func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
 		}
 		// Both branches of the split have to be present, or the note is right
 		// about one kind of base and silent about the other.
-		for _, required := range []string{"управление доступом", "профиль групп доступа"} {
+		// Stems, not one grammatical case: Russian declines both of these and a
+		// guard pinned to the nominative would pass a note that never mentions
+		// them at all in any other form.
+		for _, required := range []string{"управление доступом", "групп доступа"} {
 			if !strings.Contains(joined, required) {
 				t.Errorf("%s never mentions %q, so it does not tell the reader which of the two "+
 					"configurations they are in or how access is delivered there", name, required)
@@ -416,6 +423,50 @@ func TestNoTextTellsTheCustomerToAssignTheRoleByHand(t *testing.T) {
 	}
 	if scanned < 10 {
 		t.Fatalf("only %d note lines were scanned; both notes are longer than that together", scanned)
+	}
+
+	// The POSITIVE half, and the one that does not depend on vocabulary at all.
+	//
+	// Every shape that got through the word list did so by APPENDING an
+	// imperative to a line that was true on its own, which preserves every must
+	// fragment and trips no mustNot. So: a line that tells the reader to grant
+	// access must also carry the condition under which that is the right thing to
+	// do. An unconditional imperative about granting access is the defect itself,
+	// whatever words it is spelled with.
+	imperatives := []string{"назначьте", "назначайте", "назначь", "выдайте", "выдавайте", "выдай"}
+	conditions := []string{"если", "иначе", "тогда"}
+	checked := 0
+	for name, lines := range notes {
+		for _, line := range lines {
+			low := strings.ToLower(line)
+			var found string
+			for _, imp := range imperatives {
+				if strings.Contains(low, imp) {
+					found = imp
+					break
+				}
+			}
+			if found == "" {
+				continue
+			}
+			checked++
+			conditioned := false
+			for _, c := range conditions {
+				if strings.Contains(low, c) {
+					conditioned = true
+					break
+				}
+			}
+			if !conditioned {
+				t.Errorf("%s gives an UNCONDITIONAL instruction to grant access (%q) with no condition "+
+					"on the line. Which route is right depends on the configuration, so an instruction "+
+					"without its condition is wrong on one of the two.\nline: %q", name, found, line)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no note line carries an imperative about granting access, so the rule above examined " +
+			"nothing and would not notice one being added")
 	}
 
 	// Positive control: the scan finds the retired instruction in the sentence
