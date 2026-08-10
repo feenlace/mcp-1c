@@ -55,7 +55,7 @@ func TestNoteIsAbsentWhenTheBaseRejectsExtensionsOutright(t *testing.T) {
 		newFakeDesigner(t, fakeModeRunModeAlways)
 		var err error
 		captureStdout(t, func() {
-			err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform)
+			err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform, false)
 		})
 		if err == nil {
 			t.Fatal("expected the apply to fail")
@@ -70,7 +70,7 @@ func TestNoteIsAbsentWhenTheBaseRejectsExtensionsOutright(t *testing.T) {
 		dir := newFakeDesigner(t, fakeModeCompatNotFound)
 		var err error
 		out := captureStdout(t, func() {
-			err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform)
+			err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform, false)
 		})
 		if err == nil {
 			t.Fatalf("expected the apply to fail\nstdout:\n%s", out)
@@ -105,7 +105,7 @@ func TestNoteDoesNotPromiseAVersionInstallJustDeleted(t *testing.T) {
 
 	var err error
 	out := captureStdout(t, func() {
-		err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform)
+		err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform, false)
 	})
 	if err == nil {
 		t.Fatalf("expected the apply to fail\nstdout:\n%s", out)

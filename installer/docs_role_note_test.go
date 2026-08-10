@@ -21,7 +21,14 @@ import (
 // route bare does not pass. The wording is not compared with roleNoteLines: the
 // documentation is prose for a reader with a mouse and the note is a line in a
 // terminal, and forcing them to be the same sentence would be pinning a
-// coincidence. What is compared is the three FACTS the note carries.
+// coincidence. What is compared is the FACTS a reader needs on either route.
+//
+// The facts changed once already. They used to include «Полные права» as the
+// users who need no further action, which the measurement then contradicted:
+// those users are served by the default-role declaration, and under
+// --strip-default-roles they are refused like everyone else. A fact list that
+// outlives the thing it describes is the defect this file exists to catch, so it
+// is now the flag, not a role name, that has to appear on both routes.
 // ---------------------------------------------------------------------------
 
 // roleDocFact is one thing the reader has to be told, and a fragment that says
@@ -33,9 +40,10 @@ type roleDocFact struct {
 }
 
 var roleDocFacts = []roleDocFact{
-	{"which role is installed", "MCP_ОсновнаяРоль"},
-	{"who needs no further action", "Полные права"},
-	{"the others must be given the role by hand", "вручную"},
+	{"which role is involved", "MCP_ОсновнаяРоль"},
+	{"that the role is assigned by hand, because the extension cannot assign it", "вручную"},
+	{"the flag that removes the automatic grant, and therefore when the role becomes mandatory",
+		"--strip-default-roles"},
 }
 
 // roleDocs are the documents that walk a reader through installing the
@@ -106,7 +114,7 @@ func TestRoleInstructionIsDocumentedOnBothInstallRoutes(t *testing.T) {
 // instruction on one route only, and requires a complaint about the other.
 func TestRoleInstructionSplitCanFail(t *testing.T) {
 	const oneSidedDoc = "Ставится командой mcp-1c --install, роль MCP_ОсновнаяРоль назначается вручную, " +
-		"кроме роли Полные права.\n" +
+		"а с флагом --strip-default-roles она нужна каждому.\n" +
 		"### Установка через Конфигуратор\nОткройте базу в Конфигураторе и нажмите F7.\n"
 
 	cut := strings.Index(oneSidedDoc, "### Установка через Конфигуратор")

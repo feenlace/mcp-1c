@@ -9,12 +9,17 @@ import (
 // ---------------------------------------------------------------------------
 // What the sentences SAY, not that some string was printed.
 //
-// Every guard on these two texts proved delivery: the note is attached to the
+// Every guard on these texts proved delivery: the note is attached to the
 // error, the role note is printed once per successful install. Delivery is not
-// truth. Replacing all three role-note lines and all three note claims with
-// their exact negations left the package green, and a lie is the only defect
-// this text can have: it is prose, it has no behaviour of its own, and the whole
-// reason both texts exist is that the installer was saying something false.
+// truth. Replacing every line of both texts with its exact negation left the
+// package green, and a lie is the only defect this text can have: it is prose,
+// it has no behaviour of its own, and the whole reason these texts exist is that
+// the installer was saying something false.
+//
+// Three texts are covered: the role note as installed by default, the role note
+// under --strip-default-roles, and the apply-failure note. The first two make
+// OPPOSITE promises about who reaches the service, so swapping them would be a
+// lie on both paths at once.
 //
 // So each sentence carries the fragments that make its claim, and the fragments
 // whose presence would invert it. The two are not symmetric on purpose:
@@ -58,26 +63,58 @@ func claimHolds(text string, c textClaim) string {
 func roleNoteClaims() []textClaim {
 	return []textClaim{
 		{
-			what: "the role IS installed and it carries rights to the HTTP service",
-			text: roleNoteLines[0],
-			must: []string{"MCP_ОсновнаяРоль", "установлена", "прав", "HTTP-сервис"},
-			mustNot: []string{"не установлена", "не установлен", "без прав", "не даёт",
-				"не создана", "не содержит"},
-			negated: "Примечание: роль MCP_ОсновнаяРоль не установлена и прав доступа к HTTP-сервису не даёт.",
+			what:    "the role IS installed and IS declared a default role of the extension",
+			text:    roleNoteLines[0],
+			must:    []string{"MCP_ОсновнаяРоль", "установлена", "объявлена основной ролью"},
+			mustNot: []string{"не установлена", "не объявлена", "не создана"},
+			negated: "Примечание: роль MCP_ОсновнаяРоль не установлена и не объявлена основной ролью расширения.",
 		},
 		{
-			what:    "a user holding Полные права has to do NOTHING further",
+			what:    "users who already hold roles of the configuration reach the service with NO further action",
 			text:    roleNoteLines[1],
-			must:    []string{"Полные права", "не требуется"},
-			mustNot: []string{"действия требуются", "также назначьте", "тоже нужно"},
-			negated: "Пользователям с ролью \"Полные права\" дополнительные действия требуются.",
+			must:    []string{"уже есть роли", "получают доступ", "без дополнительных действий"},
+			mustNot: []string{"не получают доступ", "требуются дополнительные", "получают отказ"},
+			negated: "Пользователи, у которых уже есть роли конфигурации, получают отказ и требуются дополнительные действия.",
 		},
 		{
-			what:    "everybody else must be given the role BY HAND, in the Конфигуратор",
+			what:    "a user with NO roles is refused and must be given the role BY HAND",
 			text:    roleNoteLines[2],
-			must:    []string{"MCP_ОсновнаяРоль", "назначьте", "вручную", "Конфигураторе"},
-			mustNot: []string{"не назначайте", "назначается автоматически", "назначать не нужно"},
-			negated: "Для остальных пользователей роль MCP_ОсновнаяРоль назначается автоматически.",
+			must:    []string{"нет ни одной роли", "отказом", "назначьте", "вручную", "Конфигураторе"},
+			mustNot: []string{"назначается автоматически", "назначать не нужно", "отвечает без отказа"},
+			negated: "Пользователю, у которого нет ни одной роли, роль MCP_ОсновнаяРоль назначается автоматически.",
+		},
+	}
+}
+
+func roleNoteStrippedClaims() []textClaim {
+	return []textClaim{
+		{
+			what:    "the declaration was REMOVED by the flag, and the automatic grant with it",
+			text:    roleNoteStrippedLines[0],
+			must:    []string{"снято флагом", "--strip-default-roles", "автоматический доступ"},
+			mustNot: []string{"сохранено", "не снято", "доступ сохранён"},
+			negated: "Примечание: объявление основной роли сохранено, автоматический доступ не снят.",
+		},
+		{
+			what:    "ONLY users given the role explicitly are served, Полные права included in the refusal",
+			text:    roleNoteStrippedLines[1],
+			must:    []string{"только тем пользователям", "назначена явно", "получают отказ", "Полные права"},
+			mustNot: []string{"всем пользователям", "получают доступ, включая", "отказ не"},
+			negated: "Сервис отвечает всем пользователям, включая тех, кому роль MCP_ОсновнаяРоль не назначена.",
+		},
+		{
+			what:    "the administrator must assign the role BY HAND to everyone using MCP",
+			text:    roleNoteStrippedLines[2],
+			must:    []string{"Назначьте", "MCP_ОсновнаяРоль", "вручную", "Конфигураторе", "каждому"},
+			mustNot: []string{"назначается автоматически", "назначать не нужно"},
+			negated: "Роль MCP_ОсновнаяРоль назначается каждому автоматически, вручную в Конфигураторе делать ничего не нужно.",
+		},
+		{
+			what:    "the extension CANNOT do it for them, because 1С forbids it",
+			text:    roleNoteStrippedLines[3],
+			must:    []string{"не может", "не разрешает", "администрировать пользователей"},
+			mustNot: []string{"расширение назначит", "сделает это за вас"},
+			negated: "Расширение сделает это за вас: 1С разрешает коду расширения администрировать пользователей информационной базы.",
 		},
 	}
 }
@@ -127,7 +164,8 @@ func TestCustomerFacingTextMakesTheClaimsItIsThereToMake(t *testing.T) {
 		name   string
 		claims []textClaim
 	}{
-		{"role note", roleNoteClaims()},
+		{"role note, default", roleNoteClaims()},
+		{"role note, --strip-default-roles", roleNoteStrippedClaims()},
 		{"apply-failure note", notAppliedClaims()},
 	}
 
@@ -165,14 +203,17 @@ func TestCustomerFacingTextMakesTheClaimsItIsThereToMake(t *testing.T) {
 // unpinned is exactly the state both texts were in.
 func TestEveryCustomerFacingSentenceIsPinned(t *testing.T) {
 	pinned := map[string]bool{}
-	for _, c := range append(roleNoteClaims(), notAppliedClaims()...) {
+	all := append(roleNoteClaims(), roleNoteStrippedClaims()...)
+	for _, c := range append(all, notAppliedClaims()...) {
 		pinned[c.text] = true
 	}
 
-	for _, line := range roleNoteLines {
-		if !pinned[line] {
-			t.Errorf("this role-note line makes no pinned claim, so it could be replaced by its "+
-				"negation without reddening anything: %q", line)
+	for _, set := range [][]string{roleNoteLines, roleNoteStrippedLines} {
+		for _, line := range set {
+			if !pinned[line] {
+				t.Errorf("this role-note line makes no pinned claim, so it could be replaced by its "+
+					"negation without reddening anything: %q", line)
+			}
 		}
 	}
 	// Both renderings, so the delete-path sentence is covered as well as the

@@ -92,9 +92,11 @@ func parsePlatformVersion(platformExe, overrideVersion string) (major, minor int
 // version cannot be detected from the platform path automatically.
 // When serverMode is true, the database is treated as a client-server infobase
 // (MS SQL, PostgreSQL) and DESIGNER is invoked with /S instead of /F.
+// When stripRoles is true, the default-role declaration is removed from the copy
+// being loaded (see --strip-default-roles).
 //
 //garble:ignore
-func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser, dbPassword, platformVersion string) error {
+func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser, dbPassword, platformVersion string, stripRoles bool) error {
 	if platformExe == "" {
 		var err error
 		platformExe, err = FindPlatform()
@@ -144,6 +146,16 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 			if stripErr := stripInheritedProperties(cfgPath); stripErr != nil {
 				return fmt.Errorf("pre-patching inherited properties: %w", stripErr)
 			}
+		}
+	}
+
+	// --strip-default-roles. Applied to the temp copy before the load, so the
+	// element never reaches the base. The shipped XML is untouched: the default
+	// keeps the declaration, because it is what grants the service to every user
+	// holding any role of the configuration.
+	if stripRoles {
+		if stripErr := stripDefaultRoles(cfgPath); stripErr != nil {
+			return fmt.Errorf("stripping default roles: %w", stripErr)
 		}
 	}
 
@@ -331,7 +343,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		}
 	}
 
-	printRoleNote()
+	printRoleNote(stripRoles)
 	return nil
 }
 
@@ -345,19 +357,43 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 // paths were the old platforms, which meant the customers who most needed the
 // instruction, on 8.3.14 and newer, never saw it.
 //
-//garble:ignore
-var roleNoteLines = []string{
-	"Примечание: роль MCP_ОсновнаяРоль установлена с правами доступа к HTTP-сервису.",
-	"Пользователям с ролью \"Полные права\" дополнительных действий не требуется.",
-	"Для остальных пользователей назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе.",
-}
-
-// printRoleNote prints roleNoteLines. It is called from exactly one place, the
-// single successful exit of Install, so no path can print the note twice.
+// Measured on two file bases differing only in the DefaultRoles element, five
+// users each, GET /hs/mcp-1c/version: ПолныеПрава 200 with, 403 without;
+// ОбычныйДоступ 200 with, 403 without; MCP_ОсновнаяРоль 200 either way; a user
+// with no roles at all 403 either way. Both notes below say what that measured,
+// and nothing more.
 //
 //garble:ignore
-func printRoleNote() {
-	for _, line := range roleNoteLines {
+var roleNoteLines = []string{
+	"Примечание: роль MCP_ОсновнаяРоль установлена и объявлена основной ролью расширения.",
+	"Пользователи, у которых уже есть роли конфигурации, получают доступ к сервису без дополнительных действий.",
+	"Пользователю, у которого нет ни одной роли, сервис отвечает отказом: назначьте ему роль MCP_ОсновнаяРоль вручную в Конфигураторе.",
+}
+
+// roleNoteStrippedLines replaces the note when --strip-default-roles was used.
+// There the instruction is not advice: without the declaration the service
+// answers only users who hold the role explicitly, so an unassigned user is
+// refused no matter which other roles they have.
+//
+//garble:ignore
+var roleNoteStrippedLines = []string{
+	"Внимание: объявление основной роли снято флагом --strip-default-roles, вместе с ним снят и автоматический доступ.",
+	"Сервис теперь отвечает только тем пользователям, кому роль MCP_ОсновнаяРоль назначена явно. Остальные получают отказ, включая пользователей с ролью \"Полные права\".",
+	"Назначьте роль MCP_ОсновнаяРоль вручную в Конфигураторе каждому, кто работает через MCP.",
+	"Сделать это за вас расширение не может: 1С не разрешает коду расширения администрировать пользователей информационной базы.",
+}
+
+// printRoleNote prints the note that matches how the extension was installed.
+// It is called from exactly one place, the single successful exit of Install, so
+// no path can print a note twice or print both.
+//
+//garble:ignore
+func printRoleNote(stripped bool) {
+	lines := roleNoteLines
+	if stripped {
+		lines = roleNoteStrippedLines
+	}
+	for _, line := range lines {
 		fmt.Println(line)
 	}
 }
@@ -775,6 +811,38 @@ func stripInheritedProperties(cfgPath string) error {
 	}
 	patched := inheritedPropertyRe.ReplaceAll(data, nil)
 	return os.WriteFile(cfgPath, patched, 0o644)
+}
+
+// defaultRolesRe matches the DefaultRoles element of the extension's
+// Configuration.xml, in both spellings: the populated form the extension ships,
+// and the empty self-closing form 1С writes when the property was set and then
+// cleared. The empty form is still a declaration and still grants nothing, so
+// both have to go.
+//
+//garble:ignore
+var defaultRolesRe = regexp.MustCompile(
+	`(?s)\s*<DefaultRoles>.*?</DefaultRoles>|\s*<DefaultRoles\s*/>`,
+)
+
+// stripDefaultRoles removes ONLY the DefaultRoles element, for customers whose
+// Standard Subsystems configuration refuses to start a session while our role is
+// in the configuration's effective ОсновныеРоли.
+//
+// This is not the default, and the reason is measured rather than reasoned. On
+// two file bases differing only in this element, a user holding ПолныеПрава or
+// ОбычныйДоступ gets 200 from the service with it and 403 without it, while a
+// user holding MCP_ОсновнаяРоль gets 200 either way. The declaration is what
+// grants the service to everyone who holds any role of the configuration, so
+// removing it costs the customer the automatic grant and makes an explicit
+// assignment of MCP_ОсновнаяРоль mandatory for every user.
+//
+//garble:ignore
+func stripDefaultRoles(cfgPath string) error {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfgPath, defaultRolesRe.ReplaceAll(data, nil), 0o644)
 }
 
 // stripDefaultRunMode removes ONLY the DefaultRunMode element from

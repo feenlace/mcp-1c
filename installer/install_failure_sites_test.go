@@ -129,7 +129,7 @@ func TestEveryApplyLegFailureSaysWhatItLeftBehind(t *testing.T) {
 
 			var err error
 			out := captureStdout(t, func() {
-				err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform)
+				err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform, false)
 			})
 			if err == nil {
 				t.Fatalf("expected Install to fail\nstdout:\n%s", out)

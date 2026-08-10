@@ -31,17 +31,17 @@ import (
 // already printed the note, so it is the case that reddens on a leftover.
 // ---------------------------------------------------------------------------
 
-// countRoleNote returns how many complete role notes the given output contains.
-// Every line is counted separately and the counts must agree, so a half-printed
-// note is not reported as a whole one.
-func countRoleNote(t *testing.T, out string) int {
+// countRoleNote returns how many complete copies of the given note the output
+// contains. Every line is counted separately and the counts must agree, so a
+// half-printed note is not reported as a whole one.
+func countRoleNote(t *testing.T, out string, lines []string) int {
 	t.Helper()
-	if len(roleNoteLines) < 3 {
-		t.Fatalf("the note is %d lines; it is meant to say what the role does, who needs no action "+
-			"and who must be given the role by hand", len(roleNoteLines))
+	if len(lines) < 3 {
+		t.Fatalf("the note is %d lines; it is meant to say what the role does, who reaches the "+
+			"service already, and who must be given the role by hand", len(lines))
 	}
-	counts := make([]int, 0, len(roleNoteLines))
-	for _, line := range roleNoteLines {
+	counts := make([]int, 0, len(lines))
+	for _, line := range lines {
 		counts = append(counts, strings.Count(out, line))
 	}
 	for i, c := range counts {
@@ -58,6 +58,7 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 		name            string
 		mode            string
 		platformVersion string
+		stripRoles      bool
 		wantErr         bool
 		wantNotes       int
 	}{
@@ -97,6 +98,16 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 			name: "load refused", mode: fakeModeLoadFails,
 			platformVersion: "8.3.27", wantErr: true, wantNotes: 0,
 		},
+		{
+			// Under the flag the note is the OTHER one, and it must print
+			// exactly once just the same.
+			name: "strip-default-roles", mode: fakeModeOK,
+			platformVersion: "8.3.27", stripRoles: true, wantNotes: 1,
+		},
+		{
+			name: "strip-default-roles on a failed install", mode: fakeModeRunModeAlways,
+			platformVersion: "8.3.27", stripRoles: true, wantErr: true, wantNotes: 0,
+		},
 	}
 
 	for _, tc := range cases {
@@ -106,7 +117,7 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 
 			var err error
 			out := captureStdout(t, func() {
-				err = Install(extension.Source, `C:\base`, false, exe, "", "", tc.platformVersion)
+				err = Install(extension.Source, `C:\base`, false, exe, "", "", tc.platformVersion, tc.stripRoles)
 			})
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected Install to fail in mode %q\nstdout:\n%s", tc.mode, out)
@@ -115,8 +126,21 @@ func TestInstallPrintsTheRoleNoteOnEverySuccessfulInstall(t *testing.T) {
 				t.Fatalf("Install failed: %v\nstdout:\n%s", err, out)
 			}
 
-			if got := countRoleNote(t, out); got != tc.wantNotes {
-				t.Errorf("the role note printed %d times, want %d\nstdout:\n%s", got, tc.wantNotes, out)
+			// The note that matches how the install ran, and ONLY that one.
+			printed, silent := roleNoteLines, roleNoteStrippedLines
+			printedName, silentName := "default", "stripped"
+			if tc.stripRoles {
+				printed, silent = roleNoteStrippedLines, roleNoteLines
+				printedName, silentName = "stripped", "default"
+			}
+			if got := countRoleNote(t, out, printed); got != tc.wantNotes {
+				t.Errorf("the %s role note printed %d times, want %d\nstdout:\n%s",
+					printedName, got, tc.wantNotes, out)
+			}
+			if got := countRoleNote(t, out, silent); got != 0 {
+				t.Errorf("the %s role note printed %d times on a run that must not use it. The two "+
+					"notes make opposite promises about who reaches the service\nstdout:\n%s",
+					silentName, got, out)
 			}
 		})
 	}
@@ -155,18 +179,30 @@ func TestRoleNoteHasOneCaller(t *testing.T) {
 			"structurally impossible", calls)
 	}
 
-	// The lines must be written once each, inside roleNoteLines, or a stray
-	// fmt.Println of the same text would slip past the call count above.
-	for i, line := range roleNoteLines {
-		got := 0
-		for _, lit := range literals {
-			if lit == line {
-				got++
-			}
+	// The lines of BOTH notes must be written once each, inside their slice, or
+	// a stray fmt.Println of the same text would slip past the call count above.
+	for _, set := range []struct {
+		name  string
+		lines []string
+	}{
+		{"roleNoteLines", roleNoteLines},
+		{"roleNoteStrippedLines", roleNoteStrippedLines},
+	} {
+		if len(set.lines) < 3 {
+			t.Errorf("%s has %d lines; an emptied set makes the loop below check nothing",
+				set.name, len(set.lines))
 		}
-		if got != 1 {
-			t.Errorf("line %d of the note is written %d times in the package, want 1 (in roleNoteLines): %q",
-				i+1, got, line)
+		for i, line := range set.lines {
+			got := 0
+			for _, lit := range literals {
+				if lit == line {
+					got++
+				}
+			}
+			if got != 1 {
+				t.Errorf("line %d of %s is written %d times in the package, want 1: %q",
+					i+1, set.name, got, line)
+			}
 		}
 	}
 }

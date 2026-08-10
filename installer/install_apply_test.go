@@ -56,7 +56,7 @@ func TestInstallRetriesTheApplyLegOnARunModeMismatch(t *testing.T) {
 
 	var err error
 	out := captureStdout(t, func() {
-		err = Install(extension.Source, `C:\base`, false, exe, "", "", shippedPlatform)
+		err = Install(extension.Source, `C:\base`, false, exe, "", "", shippedPlatform, false)
 	})
 	if err != nil {
 		t.Fatalf("Install must recover from a controlled-property mismatch on the apply leg, got: %v\n"+
@@ -220,7 +220,7 @@ func TestApplyLegTriesTheWiderStripFirst(t *testing.T) {
 
 	var err error
 	out := captureStdout(t, func() {
-		err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform)
+		err = Install(extension.Source, `C:\base`, false, fakePlatformExe(t), "", "", shippedPlatform, false)
 	})
 	if err != nil {
 		t.Fatalf("with both refusals in one log the wider strip clears the base and the install is "+
