@@ -20,15 +20,17 @@ func FormStructureTool() *mcp.Tool {
 		Name:  "get_form_structure",
 		Title: "Структура формы объекта",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-		Description: "Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, кнопки и обработчики событий. " +
+		Description: "Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, кнопки, обработчики событий и сводку динамических списков формы. " +
 			"Используй когда нужно понять как выглядит форма документа, справочника или обработки. " +
-			"ВАЖНО: полный состав формы читается из выгрузки, поэтому для элементов, команд и обработчиков запусти сервер с флагом --dump (выгрузка конфигурации в файлы), тогда они берутся из Form.xml. Без --dump возвращается только то, что отдал HTTP-сервис 1С, и на практике это имя и заголовок формы.",
+			"ВАЖНО: полный состав формы читается из выгрузки, поэтому для элементов, команд и обработчиков запусти сервер с флагом --dump (выгрузка конфигурации в файлы), тогда они берутся из Form.xml. Без --dump возвращается только то, что отдал HTTP-сервис 1С, и на практике это имя и заголовок формы. " +
+			"Общие формы (тип ОбщаяФорма или CommonForm) читаются только из выгрузки: HTTP-сервис 1С их не отдаёт. " +
+			"Сводка динамических списков перечисляет имя реквизита, признак произвольного запроса и основную таблицу; текст запроса в неё не входит.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"object_type": {
 					"type": "string",
-					"description": "Тип объекта: Document, Catalog, DataProcessor, Report и т.д. Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task."
+					"description": "Тип объекта: Document, Catalog, DataProcessor, Report и т.д. Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task. Общая форма: ОбщаяФорма или CommonForm, читается только из выгрузки, имя формы совпадает с именем объекта."
 				},
 				"object_name": {
 					"type": "string",
@@ -154,12 +156,16 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		serviceNamedForm := form.Name != ""
 		serviceCallFailed := false
 		var dumpRead dumpFormRead
+		// dynamicLists travels beside the wire type rather than on it, for the
+		// reason recorded on formFromDump: onec.FormStructure is the shape of the
+		// 1C service's JSON reply and the service has no such field.
+		var dynamicLists []dump.FormDynamicList
 		if dumpDir != "" {
-			dumpForm, readOutcome, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
+			dumpForm, readOutcome, dumpLists, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
 			switch {
 			case dumpErr == nil && dumpForm != nil:
-				namedFormWithoutStructure = input.FormName != "" && !suppliesStructure(dumpForm)
-				mergeDumpIntoForm(&form, dumpForm)
+				namedFormWithoutStructure = input.FormName != "" && !suppliesStructure(dumpForm, dumpLists)
+				dynamicLists = mergeDumpIntoForm(&form, dumpForm, dumpLists)
 				dumpRead = readOutcome
 				serviceCallFailed = httpErr != nil
 			case errors.Is(dumpErr, errFormNotInDump):
@@ -189,13 +195,15 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 			return nil, fmt.Errorf("fetching form structure from 1C: %w", httpErr)
 		}
 
-		text := formatFormStructure(&form)
+		text := formatFormStructure(&form, dynamicLists)
 		// bodyHasComposition is read off the SAME predicate formatFormStructure
-		// renders the three sections from, so a note about what is shown above
-		// cannot drift from what is actually printed. Every note below that says
+		// renders the sections from, so a note about what is shown above cannot
+		// drift from what is actually printed. Every note below that says
 		// anything about those sections is built from it rather than assuming a
-		// body exists.
-		bodyHasComposition := suppliesStructure(&form)
+		// body exists. The dynamic lists are part of that judgement because they
+		// are part of what is printed: a form whose only content is a list has a
+		// section above, and a note denying it would be refuted on screen.
+		bodyHasComposition := suppliesStructure(&form, dynamicLists)
 
 		if dumpDir == "" && input.FormName != "" {
 			text += formNameNeedsDumpNote
@@ -543,23 +551,24 @@ type dumpFormRead struct {
 
 // formFromDump loads form structure from a DumpConfigToFiles XML file.
 //
-// The middle return value reports how the Form.xml was read: parsed only up to a
-// syntax error, or read to the end but holding no form. It is a second return
-// value and not a field on onec.FormStructure because that type is the shape of
-// the 1C HTTP service's JSON reply, shared with the HTTP path, and a fact about
-// how a local file was read does not belong on the wire type. It is not folded
-// into the error either: an error here would be classified as a dump failure by
-// the caller's switch and would turn a dump that parses well enough today into a
-// degraded answer, which is exactly the tolerance this change must preserve.
-// The signature is unexported with a single call site, so widening it ripples
-// nowhere.
-func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormStructure, dumpFormRead, error) {
+// The second return value reports how the Form.xml was read: parsed only up to a
+// syntax error, or read to the end but holding no form. The third carries the
+// form's dynamic lists. NEITHER is a field on onec.FormStructure, and for the
+// same reason: that type is the shape of the 1C HTTP service's JSON reply,
+// shared with the HTTP path, and neither a fact about how a local file was read
+// nor a section only the dump can supply belongs on the wire type. The read
+// outcome is not folded into the error either: an error here would be classified
+// as a dump failure by the caller's switch and would turn a dump that parses
+// well enough today into a degraded answer, which is exactly the tolerance that
+// must be preserved. The signature is unexported with a single call site, so
+// widening it ripples nowhere.
+func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormStructure, dumpFormRead, []dump.FormDynamicList, error) {
 	formFiles, err := dump.FindFormFiles(dumpDir, objectType, objectName)
 	if err != nil {
-		return nil, dumpFormRead{}, fmt.Errorf("finding form files: %w", err)
+		return nil, dumpFormRead{}, nil, fmt.Errorf("finding form files: %w", err)
 	}
 	if len(formFiles) == 0 {
-		return nil, dumpFormRead{}, fmt.Errorf("no forms found in dump for %s.%s", objectType, objectName)
+		return nil, dumpFormRead{}, nil, fmt.Errorf("no forms found in dump for %s.%s", objectType, objectName)
 	}
 
 	// Select the requested form or pick the first one.
@@ -568,7 +577,7 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 	if formName != "" {
 		path, ok := formFiles[formName]
 		if !ok {
-			return nil, dumpFormRead{}, &formNotInDumpError{requested: formName, available: joinMapKeys(formFiles)}
+			return nil, dumpFormRead{}, nil, &formNotInDumpError{requested: formName, available: joinMapKeys(formFiles)}
 		}
 		selectedPath = path
 		selectedName = formName
@@ -585,13 +594,13 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 
 	parsed, err := dump.ParseFormXML(selectedPath)
 	if err != nil {
-		return nil, dumpFormRead{}, fmt.Errorf("parsing form XML %q: %w", selectedPath, err)
+		return nil, dumpFormRead{}, nil, fmt.Errorf("parsing form XML %q: %w", selectedPath, err)
 	}
 
 	return convertDumpForm(selectedName, parsed), dumpFormRead{
 		partial:    parsed.ParseIncomplete,
 		noFormRoot: parsed.NoFormRoot,
-	}, nil
+	}, parsed.DynamicLists, nil
 }
 
 // convertDumpForm converts dump.FormInfo to onec.FormStructure.
@@ -670,12 +679,21 @@ func convertDumpForm(formName string, info *dump.FormInfo) *onec.FormStructure {
 // When the dump supplied no structure at all, nothing in the body belongs to
 // the dump form, so Name and Title stay as HTTP returned them and the dump only
 // fills in what HTTP left empty.
-func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure) {
-	dumpSuppliedStructure := suppliesStructure(dumpForm)
-
-	if dumpSuppliedStructure && dumpForm.Name != "" && dumpForm.Name != form.Name {
+//
+// THE DYNAMIC LISTS DO NOT DECIDE THE TAKEOVER, AND THAT IS DELIBERATE. They are
+// merged, and they are returned, but the wholesale replace above stays keyed on
+// the three collections that travel with the identity. The reason is the one the
+// paragraphs above give: Title, Commands and Handlers describe the HTTP-named
+// form, so once the body belongs to another form the HTTP payload is foreign.
+// A dynamic list is not on the wire type and the service never sends one, so a
+// dump form supplying ONLY lists makes nothing above it foreign; letting it
+// trigger the replace would discard a real 1C Title, and its elements, in
+// exchange for a summary table. The lists themselves come from the dump either
+// way, which is why they can be merged on their own line without a branch.
+func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure, dumpLists []dump.FormDynamicList) []dump.FormDynamicList {
+	if suppliesNameBoundStructure(dumpForm) && dumpForm.Name != "" && dumpForm.Name != form.Name {
 		*form = *dumpForm
-		return
+		return dumpLists
 	}
 
 	if form.Name == "" {
@@ -693,20 +711,33 @@ func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure) {
 	if len(dumpForm.Handlers) > 0 {
 		form.Handlers = dumpForm.Handlers
 	}
+	return dumpLists
 }
 
-// suppliesStructure reports whether a form carries any composition at all.
+// suppliesStructure reports whether a form carries any composition at all, which
+// now means any of the FOUR sections the renderer can print.
 //
-// It is ONE function with two call sites on purpose. mergeDumpIntoForm decides
-// from it whether the dump's form takes over the response, and the handler
-// decides from it whether to tell a form_name caller that the dump contributed
-// nothing. Written twice, the two could drift apart, and the note would then
-// describe a merge that did something else.
-func suppliesStructure(f *onec.FormStructure) bool {
+// It is the predicate the response notes are built from, and it is read off the
+// same facts formatFormStructure renders from, so a note about what is shown
+// above cannot drift from what is actually printed. A form whose only content is
+// a dynamic list supplies composition: there is a section on screen.
+func suppliesStructure(f *onec.FormStructure, lists []dump.FormDynamicList) bool {
+	return suppliesNameBoundStructure(f) || len(lists) > 0
+}
+
+// suppliesNameBoundStructure reports whether a form carries any of the three
+// collections that travel with its NAME.
+//
+// It is the narrower question, and the two are separated rather than duplicated:
+// there is one definition of the three-collection test and one caller of each
+// question, so they cannot drift. mergeDumpIntoForm asks this one, because it is
+// deciding whether the HTTP payload has become foreign, and only these three
+// describe the HTTP-named form. Everything else asks suppliesStructure.
+func suppliesNameBoundStructure(f *onec.FormStructure) bool {
 	return len(f.Elements) > 0 || len(f.Commands) > 0 || len(f.Handlers) > 0
 }
 
-func formatFormStructure(f *onec.FormStructure) string {
+func formatFormStructure(f *onec.FormStructure, lists []dump.FormDynamicList) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# Форма: %s\n", f.Name)
@@ -756,7 +787,71 @@ func formatFormStructure(f *onec.FormStructure) string {
 		b.WriteByte('\n')
 	}
 
+	writeDynamicListSection(&b, lists)
+
 	return b.String()
+}
+
+// writeDynamicListSection prints the form's dynamic lists as a summary.
+//
+// It comes last because it is the section the other three do not imply: a
+// dynamic list is an ATTRIBUTE of the form, so a form can declare one and show
+// no element for it, and a form can be full of elements and declare none.
+//
+// THE QUERY TEXT IS NOT PRINTED HERE. This is a structure answer, and a query
+// can run to hundreds of lines: measured over the reference dump, the longest
+// single list text is 582 lines and one form carries eleven lists between them.
+// Pasting that into every form answer would bury the structure the caller asked
+// for. The summary says which lists exist, whether each one runs a query written
+// by hand, and what it reads.
+//
+// The count comes from len(lists), the same slice the rows are printed from, so
+// the number and the table cannot disagree.
+//
+// Cells go through inlineCode, which is the package's EXISTING containment: it
+// computes its delimiter from the longest backtick run in the payload and
+// neutralises the runes a markdown renderer treats as a mandatory line break. A
+// second implementation of that count is how one copy keeps a defect the other
+// one lost. escapePipe is applied on top because a pipe closes a table cell even
+// inside a code span, and that is the table's rule rather than the span's.
+//
+// Honest scope of the hostility: this is prevention, not a response to anything
+// seen. Measured across all 1918 dynamic lists in the reference dump, 0 of 1918
+// attribute names and 0 of 1764 non-empty main tables contain a line break, a
+// backtick, a pipe, a hash, a less-than or a greater-than. The values are 1C
+// identifiers and table names, and the fixtures exercising this are synthetic
+// because the corpus has no specimen to draw on.
+func writeDynamicListSection(b *strings.Builder, lists []dump.FormDynamicList) {
+	if len(lists) == 0 {
+		return
+	}
+
+	b.WriteString("## Динамические списки формы\n\n")
+	fmt.Fprintf(b, "Списков: %d. Текст запроса в этом разделе не приводится.\n\n", len(lists))
+	b.WriteString("| Имя реквизита | Произвольный запрос | Основная таблица |\n")
+	b.WriteString("|---------------|---------------------|------------------|\n")
+	for _, l := range lists {
+		fmt.Fprintf(b, "| %s | %s | %s |\n",
+			escapePipe(inlineCode(l.Name)),
+			manualQueryLabel(l.ManualQuery),
+			escapePipe(inlineCode(l.MainTable)))
+	}
+	b.WriteByte('\n')
+}
+
+// manualQueryLabel renders the ManualQuery flag for a reader rather than for a
+// parser.
+//
+// The distinction it carries is not cosmetic: with the flag off the platform
+// composes the query itself from the main table, so a text stored in the file is
+// left over from an earlier edit and is not what runs. Measured over the
+// reference dump, 5 lists of 1918 hold a complete query while the flag is off,
+// which is exactly the trap a bare listing would walk a reader into.
+func manualQueryLabel(manual bool) string {
+	if manual {
+		return "да"
+	}
+	return "нет"
 }
 
 // escapePipe escapes pipe characters so they do not break markdown tables.

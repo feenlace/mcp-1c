@@ -241,7 +241,13 @@ func residualSinks() []residualSite {
 			render:      func() string { return formatObjectStructure(hostileObject()) },
 		},
 		{
-			name:        "form structure: name, element table, element events, commands, handlers",
+			// THE DYNAMIC LIST SECTION ADDS NOTHING TO THIS NUMBER, and the
+			// payload below is planted in all three of its fields to show it. The
+			// count was 13 before that section existed and is 13 with it, because
+			// its cells go through inlineCode: the break the payload needs to
+			// reach column zero is neutralised, so the forged heading never
+			// starts a line. The whole-file residual is 64 on either side.
+			name:        "form structure: name, element table, element events, commands, handlers, dynamic lists",
 			mustContain: "## Элементы формы",
 			forged:      13,
 			render: func() string {
@@ -255,7 +261,9 @@ func residualSinks() []residualSite {
 					}},
 					Commands: []onec.FormCommand{{Name: forgeryPayload, Action: forgeryPayload}},
 					Handlers: []onec.FormHandler{{Event: forgeryPayload, Handler: forgeryPayload}},
-				})
+				}, []dump.FormDynamicList{{
+					Name: forgeryPayload, MainTable: forgeryPayload, QueryText: forgeryPayload,
+				}})
 			},
 		},
 		{
