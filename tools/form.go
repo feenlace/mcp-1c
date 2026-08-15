@@ -169,6 +169,10 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 				dumpRead = readOutcome
 				serviceCallFailed = httpErr != nil
 			case errors.Is(dumpErr, errFormNotInDump):
+				// The named-form failure keeps its own message, which lists the
+				// object's real form names and is the whole reason it is fatal.
+				// It carries no path: joinMapKeys prints the map's KEYS, which
+				// are form names, never its values.
 				// The caller named a form this object does not have. Returning
 				// a different form's structure under that request would be a
 				// confident wrong answer, so this single dump failure is fatal
@@ -178,17 +182,26 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 				// actionable even when the 1C service is unreachable.
 				return nil, dumpErr
 			case httpErr != nil:
-				// Both sources failed - return a combined error so the user
-				// can see why we have nothing to show.
-				return nil, fmt.Errorf("fetching form structure from 1C: %w (dump fallback: %v)", httpErr, dumpErr)
+				// Both sources failed. The HTTP error is wrapped so the renderer
+				// still classifies it with errors.As and answers about the 1C
+				// side as before; the dump side arrives as a CODE from a closed
+				// set rather than as its message, because that message belongs to
+				// a lower layer and used to carry an absolute path.
+				return nil, withDumpLegReason(
+					fmt.Errorf("fetching form structure from 1C: %w", httpErr),
+					classifyDumpLegFailure(dumpErr))
 			default:
 				// HTTP gave us at least Name+Title but the dump enrichment
 				// did not work. Log it so users notice missing details.
+				// The CODE goes to the log, not the lower layer's message. Under
+				// --debug this line is written to server.log, so a message
+				// carrying the dump root would put an absolute path in a file
+				// that outlives the call.
 				slog.Warn("Form dump enrichment failed",
 					"object_type", input.ObjectType,
 					"object_name", input.ObjectName,
 					"form_name", input.FormName,
-					"error", dumpErr)
+					"reason", classifyDumpLegFailure(dumpErr).code())
 				dumpStructureMissing = true
 			}
 		} else if httpErr != nil {
@@ -512,6 +525,106 @@ func formNoFormRootNote(bodyHasComposition bool) string {
 		"Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
 }
 
+// dumpLegReason names WHY the dump leg could not answer.
+//
+// IT IS A CLOSED SET AND THAT IS THE POINT. The alternative, forwarding the
+// lower layer's message, is what this replaces: those messages are built by the
+// dump package and one of them used to be wrapped around the absolute path it
+// failed on, so the field that told the caller what went wrong was also the
+// field that disclosed where the server keeps its files. A code from a fixed
+// vocabulary carries the first without the second.
+//
+// An int rather than a string so a reason cannot be invented at a call site.
+// dumpLegReasonText below is the whole set; a value outside it has no code and
+// no text, which is what the test asserts instead of an exhaustive switch that
+// Go cannot check.
+type dumpLegReason int
+
+const (
+	dumpReasonUnknownType dumpLegReason = iota
+	dumpReasonNotFound
+	dumpReasonNotRegular
+	dumpReasonUnreadable
+	dumpReasonTraversalRefused
+)
+
+// dumpLegReasonCode is the machine-readable half of the vocabulary.
+var dumpLegReasonCode = map[dumpLegReason]string{
+	dumpReasonUnknownType:      "unknown_type",
+	dumpReasonNotFound:         "not_found",
+	dumpReasonNotRegular:       "not_regular",
+	dumpReasonUnreadable:       "unreadable",
+	dumpReasonTraversalRefused: "traversal_refused",
+}
+
+// dumpLegReasonText is the reader's half, and it says what to do about each
+// cause rather than restating the code in Russian.
+//
+// Customer-facing RU: no тире.
+var dumpLegReasonText = map[dumpLegReason]string{
+	dumpReasonUnknownType: "вид объекта из выгрузки не читается. Проверьте значение object_type: " +
+		"формы читаются для прикладных видов и для общей формы.",
+	dumpReasonNotFound: "формы этого объекта в выгрузке нет. Проверьте имя объекта и полноту " +
+		"выгрузки конфигурации, указанной в `--dump`.",
+	dumpReasonNotRegular: "файл формы в выгрузке не является обычным файлом и прочитан не был. " +
+		"Проверьте, что выгрузка не содержит ссылок вместо файлов.",
+	dumpReasonUnreadable: "прочитать форму из выгрузки не удалось. Проверьте права на каталог " +
+		"выгрузки и её полноту.",
+	dumpReasonTraversalRefused: "имя объекта отклонено до обращения к файлам: в нём есть " +
+		"разделители пути или оно пустое.",
+}
+
+// code returns the closed-vocabulary code, empty for a value outside the set.
+func (r dumpLegReason) code() string { return dumpLegReasonCode[r] }
+
+// dumpLegFailure carries a classified dump-leg cause alongside another error.
+//
+// It wraps rather than replaces, so the HTTP side of a both-legs-failed answer
+// keeps its own typed error and reaches renderStatusError exactly as before.
+type dumpLegFailure struct {
+	err    error
+	reason dumpLegReason
+}
+
+func (e *dumpLegFailure) Error() string { return e.err.Error() }
+func (e *dumpLegFailure) Unwrap() error { return e.err }
+
+// withDumpLegReason attaches a classified dump-leg cause to err.
+func withDumpLegReason(err error, reason dumpLegReason) error {
+	return &dumpLegFailure{err: err, reason: reason}
+}
+
+// classifyDumpLegFailure maps a dump-leg error onto the closed vocabulary.
+//
+// CLASSIFIED WITH errors.Is AND NEVER BY MESSAGE, which is why the dump package
+// exports these sentinels at all. Matching text here would reintroduce the
+// coupling the codes exist to remove, and would break silently the first time a
+// message is reworded.
+//
+// The default is dumpReasonUnreadable rather than a sixth "unknown" value: every
+// remaining cause is a failure to read the form, the caller's next step is the
+// same, and an "unknown" code tells nobody anything while making the set open in
+// practice. The over-size refusal lands here too and deliberately: from the
+// caller's side a file too large to read is a file that was not read.
+func classifyDumpLegFailure(err error) dumpLegReason {
+	switch {
+	case errors.Is(err, dump.ErrFormUnknownObjectType):
+		return dumpReasonUnknownType
+	case errors.Is(err, dump.ErrFormObjectNameRejected):
+		return dumpReasonTraversalRefused
+	case errors.Is(err, dump.ErrFormXMLNotRegular):
+		return dumpReasonNotRegular
+	case errors.Is(err, errFormNotInDump), errors.Is(err, errNoFormsInDump):
+		return dumpReasonNotFound
+	default:
+		return dumpReasonUnreadable
+	}
+}
+
+// errNoFormsInDump marks the dump having no forms for the object at all, as
+// distinct from having them and not the one that was named.
+var errNoFormsInDump = errors.New("no forms for this object in the dump")
+
 // errFormNotInDump marks the one formFromDump failure that belongs to the
 // caller rather than to the dump: they named a form the object does not have.
 // It is matched with errors.Is so that the remaining failures (no forms at all,
@@ -568,7 +681,7 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 		return nil, dumpFormRead{}, nil, fmt.Errorf("finding form files: %w", err)
 	}
 	if len(formFiles) == 0 {
-		return nil, dumpFormRead{}, nil, fmt.Errorf("no forms found in dump for %s.%s", objectType, objectName)
+		return nil, dumpFormRead{}, nil, fmt.Errorf("%w: %s.%s", errNoFormsInDump, objectType, objectName)
 	}
 
 	// Select the requested form or pick the first one.
@@ -594,7 +707,15 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 
 	parsed, err := dump.ParseFormXML(selectedPath)
 	if err != nil {
-		return nil, dumpFormRead{}, nil, fmt.Errorf("parsing form XML %q: %w", selectedPath, err)
+		// THE PATH IS NOT IN THE MESSAGE, and its removal is the point of this
+		// line rather than tidying. selectedPath is an absolute path into the
+		// operator's filesystem: it names the dump root, and through it the OS
+		// account the server runs under. It used to be quoted here, and from
+		// here it travelled into the both-legs-failed error the caller reads and
+		// into the WARN written to server.log under --debug. What the caller
+		// needs is the CLASS of the failure, which classifyDumpLegFailure reads
+		// off the sentinel underneath.
+		return nil, dumpFormRead{}, nil, fmt.Errorf("parsing form XML: %w", err)
 	}
 
 	return convertDumpForm(selectedName, parsed), dumpFormRead{

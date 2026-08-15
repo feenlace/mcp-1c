@@ -182,7 +182,7 @@ func TestFindFormFiles_CommonFormPathTraversalIsRefused(t *testing.T) {
 			// before this branch existed at all, because an unrecognised type is
 			// also an error, so a bare err != nil check could not tell a working
 			// guard from a missing feature.
-			if !errors.Is(err, errFormObjectNameRejected) {
+			if !errors.Is(err, ErrFormObjectNameRejected) {
 				t.Errorf("refusal for %q is not the name guard: %v", objectName, err)
 			}
 			if forms != nil {
@@ -208,7 +208,7 @@ func TestFindFormFiles_NameGuardRunsBeforeAnyFilesystemAccess(t *testing.T) {
 
 	for _, objectName := range []string{"..", "../Catalogs/Валюты/Forms/ФормаСписка", ""} {
 		_, err := FindFormFiles(missing, "CommonForm", objectName)
-		if !errors.Is(err, errFormObjectNameRejected) {
+		if !errors.Is(err, ErrFormObjectNameRejected) {
 			t.Errorf("name %q against a non-existent dump answered %v, want the lexical "+
 				"refusal, which would prove nothing reached the filesystem first", objectName, err)
 		}
@@ -217,7 +217,7 @@ func TestFindFormFiles_NameGuardRunsBeforeAnyFilesystemAccess(t *testing.T) {
 	// POSITIVE CONTROL: a well-formed name against the same non-existent dump
 	// does reach the filesystem, and answers about the dump rather than the name.
 	forms, err := FindFormFiles(missing, "CommonForm", "ФайлыВТоме")
-	if errors.Is(err, errFormObjectNameRejected) {
+	if errors.Is(err, ErrFormObjectNameRejected) {
 		t.Error("control failed: a valid name was rejected by the name guard, so the " +
 			"assertions above cannot be measuring the guard's position")
 	}
@@ -238,7 +238,7 @@ func TestFindFormFiles_EmptyObjectNameIsRefused(t *testing.T) {
 			if err == nil {
 				t.Fatalf("an empty object name must be refused, got %v", forms)
 			}
-			if !errors.Is(err, errFormObjectNameRejected) {
+			if !errors.Is(err, ErrFormObjectNameRejected) {
 				t.Errorf("refusal is not the name guard: %v", err)
 			}
 			if forms != nil {
@@ -327,8 +327,65 @@ func TestFindFormFiles_CommonFormUsesTheSameRootAsObjectForms(t *testing.T) {
 			t.Errorf("a path outside the dump was returned: %q", p)
 		}
 	}
-	if err != nil && !errors.Is(err, errFormsDirUnreadable) {
+	if err != nil && !errors.Is(err, ErrFormsDirUnreadable) {
 		t.Errorf("a containment refusal must be the named path-free one, got %v", err)
 	}
 	t.Logf("escaping CommonForms answered with forms=%v err=%v", forms, err)
+}
+
+// TestParseFormXML_RefusalsCarryNoAbsolutePath closes the channel the package
+// already closed once for the forms DIRECTORY and had left open for the form
+// FILE.
+//
+// ErrFormsDirUnreadable exists, in this file's own words, because the OS error
+// it replaces "carries the absolute path it failed on, which must never reach
+// the caller". The three read failures inside ParseFormXML were still wrapping
+// that same OS error, so an unreadable Form.xml reported the dump root, and with
+// it the operator's account name, into an answer a model reads and into
+// server.log under --debug.
+//
+// The path is not a detail of the message here: it is the only part of it that
+// says anything the caller cannot already see, and it is the part they must not.
+func TestParseFormXML_RefusalsCarryNoAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	ext := filepath.Join(dir, "CommonForms", "ФайлыВТоме", "Ext")
+	if err := os.MkdirAll(ext, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	unreadable := filepath.Join(ext, "Form.xml")
+	if err := os.WriteFile(unreadable, []byte("<Form/>"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(unreadable); err == nil {
+		t.Skip("this filesystem or user ignores mode 000, so there is no unreadable file to test")
+	}
+
+	cases := map[string]string{
+		"unreadable file":        unreadable,
+		"file that is not there": filepath.Join(ext, "НетТакого.xml"),
+	}
+	for name, path := range cases {
+		t.Run(name, func(t *testing.T) {
+			form, err := ParseFormXML(path)
+			if err == nil {
+				t.Fatalf("expected a refusal, got a form: %+v", form)
+			}
+			if strings.Contains(err.Error(), dir) {
+				t.Errorf("the refusal carries the absolute path it failed on: %v", err)
+			}
+			if !errors.Is(err, ErrFormXMLUnreadable) {
+				t.Errorf("the refusal is not the named path-free one: %v", err)
+			}
+		})
+	}
+
+	// POSITIVE CONTROL over the detector. It has to be able to see the path,
+	// or every assertion above is measuring a scan that never fires.
+	planted := "reading form XML: open " + filepath.Join(dir, "CommonForms", "Ф", "Ext", "Form.xml") +
+		": permission denied"
+	if !strings.Contains(planted, dir) {
+		t.Fatal("control failed: the detector did not see the dump root in a message built " +
+			"around it, so the checks above prove nothing")
+	}
 }

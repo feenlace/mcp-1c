@@ -152,33 +152,61 @@ type FormHandlerInfo struct {
 // form does not have the object-form path shape. See findCommonFormFile.
 const commonFormsDumpDir = "CommonForms"
 
-// errFormsDirUnreadable is the path-free RU refusal returned when an object's
+// ErrFormsDirUnreadable is the path-free RU refusal returned when an object's
 // Forms directory cannot be read through the dump root: a symlink that escapes
 // the dump at any path component (refused by os.Root), a non-directory standing
 // in for a directory position, or a permission error. It replaces a wrapped OS
 // error because that error carries the absolute path it failed on, which must
 // never reach the caller. Customer-facing RU: no тире, no absolute path.
-var errFormsDirUnreadable = errors.New("каталог форм объекта недоступен")
+var ErrFormsDirUnreadable = errors.New("каталог форм объекта недоступен")
 
-// errFormXMLNotRegular is the path-free RU refusal returned when a form file is
+// ErrFormXMLNotRegular is the path-free RU refusal returned when a form file is
 // not a plain regular file: a symlink, FIFO, socket, device or directory.
 // Customer-facing RU: no тире, no absolute path.
-var errFormXMLNotRegular = errors.New("файл формы имеет неверный тип")
+var ErrFormXMLNotRegular = errors.New("файл формы имеет неверный тип")
 
-// errFormObjectNameRejected classifies every refusal of objectName made on the
+// ErrFormObjectNameRejected classifies every refusal of objectName made on the
 // name alone, before the filesystem is touched at all.
 //
 // It is a sentinel so callers and tests can tell this refusal from the others
 // with errors.Is instead of reading the message. That distinction is not
 // cosmetic: an unrecognised object type is ALSO an error, so a test asserting
 // only that something came back was green before the lookup existed.
-var errFormObjectNameRejected = errors.New("object name rejected before any filesystem access")
+var ErrFormObjectNameRejected = errors.New("object name rejected before any filesystem access")
 
-// errFormXMLTooLarge is the path-free RU refusal returned when a form file is
+// ErrFormUnknownObjectType classifies a lookup for a kind this package does not
+// serve forms for.
+//
+// THE FOUR SENTINELS ABOVE AND THIS ONE ARE EXPORTED SO THE CALLER CAN CLASSIFY
+// WITHOUT READING A MESSAGE. That is not a convenience: the only other way to
+// tell these apart from outside the package is to match the text, and the text
+// is precisely what may not be forwarded, because one of these failures used to
+// be reported wrapped around the absolute path it happened on. A caller that has
+// to choose between leaking the message and guessing the cause will leak the
+// message.
+var ErrFormUnknownObjectType = errors.New("unknown object type for dump lookup")
+
+// ErrFormXMLUnreadable is the path-free RU refusal returned when the form file
+// cannot be opened or read at all: it is missing, permission was refused, or the
+// read failed part way.
+//
+// IT REPLACES A WRAPPED OS ERROR FOR THE REASON ErrFormsDirUnreadable ALREADY
+// RECORDS: that error carries the absolute path it failed on, and the path names
+// the dump root and through it the OS account the server runs under. This end of
+// the same channel stayed open after the directory end was closed, so an
+// unreadable Form.xml still reported the operator's layout into an answer a model
+// reads and into server.log under --debug. The cause is not lost, only the path:
+// what a caller can act on is the CLASS of the failure, and the sentinel is what
+// carries it.
+//
+// Customer-facing RU: no тире, no absolute path.
+var ErrFormXMLUnreadable = errors.New("файл формы не удалось прочитать")
+
+// ErrFormXMLTooLarge is the path-free RU refusal returned when a form file is
 // larger than maxFormFileBytes. Nothing partial comes back with it: half a
 // Form.xml parses into a form that looks complete, and answering from it would
 // be worse than refusing. Customer-facing RU: no тире, no absolute path.
-var errFormXMLTooLarge = errors.New("файл формы слишком велик и не прочитан")
+var ErrFormXMLTooLarge = errors.New("файл формы слишком велик и не прочитан")
 
 // maxFormFileBytes caps how many bytes one Form.xml may contribute before it is
 // refused. Declared as a var, not a const, so a test can tighten it and exercise
@@ -212,7 +240,8 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 	dirName, known := objectTypeToDumpDir[objectType]
 	commonForm := isCommonFormType(objectType)
 	if !known && !commonForm {
-		return nil, fmt.Errorf("unknown object type %q for dump lookup", objectType)
+		return nil, fmt.Errorf("%w: unknown object type %q for dump lookup",
+			ErrFormUnknownObjectType, objectType)
 	}
 
 	// An empty name is refused rather than joined. Joined, it collapses its own
@@ -221,13 +250,13 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 	// directory's own Forms. Neither is the form anybody asked about, and both
 	// answer without saying they are answering about something else.
 	if objectName == "" {
-		return nil, fmt.Errorf("%w: object name is empty", errFormObjectNameRejected)
+		return nil, fmt.Errorf("%w: object name is empty", ErrFormObjectNameRejected)
 	}
 	if strings.Contains(objectName, "..") ||
 		strings.Contains(objectName, "/") ||
 		strings.Contains(objectName, "\\") {
 		return nil, fmt.Errorf("%w: invalid object name %q: contains path traversal characters",
-			errFormObjectNameRejected, objectName)
+			ErrFormObjectNameRejected, objectName)
 	}
 
 	// A dumpDir that exists but is not a directory (FIFO, socket, device, plain
@@ -242,7 +271,7 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil // Absent dump - no forms, not an error.
 		}
-		return nil, errFormsDirUnreadable
+		return nil, ErrFormsDirUnreadable
 	}
 	defer func() { _ = root.Close() }()
 
@@ -258,7 +287,7 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 		}
 		// Containment refusal, non-directory position, or unreadable: never
 		// silent, but named without disclosing the path it failed on.
-		return nil, errFormsDirUnreadable
+		return nil, ErrFormsDirUnreadable
 	}
 
 	result := make(map[string]string)
@@ -319,7 +348,7 @@ func findCommonFormFile(root *os.Root, dumpDir, objectName string) (map[string]s
 		}
 		// Containment refusal, a non-directory in the path, or an unreadable
 		// component: never silent, and never naming the path it failed on.
-		return nil, errFormsDirUnreadable
+		return nil, ErrFormsDirUnreadable
 	}
 	if !st.Mode().IsRegular() {
 		return nil, nil // Symlink, FIFO, directory: dropped exactly as for an object form.
@@ -344,10 +373,10 @@ func findCommonFormFile(root *os.Root, dumpDir, objectName string) (map[string]s
 func ParseFormXML(path string) (*FormInfo, error) {
 	st, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading form XML: %w", err)
+		return nil, ErrFormXMLUnreadable
 	}
 	if !st.Mode().IsRegular() {
-		return nil, errFormXMLNotRegular
+		return nil, ErrFormXMLNotRegular
 	}
 
 	// Bounded read rather than os.ReadFile: the size is taken from the bytes
@@ -356,16 +385,16 @@ func ParseFormXML(path string) (*FormInfo, error) {
 	// the two cases apart, which is why the reader is given limit+1.
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading form XML: %w", err)
+		return nil, ErrFormXMLUnreadable
 	}
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, maxFormFileBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("reading form XML: %w", err)
+		return nil, ErrFormXMLUnreadable
 	}
 	if int64(len(data)) > maxFormFileBytes {
-		return nil, errFormXMLTooLarge
+		return nil, ErrFormXMLTooLarge
 	}
 
 	return parseFormXMLData(data)
