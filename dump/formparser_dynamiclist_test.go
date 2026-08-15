@@ -606,7 +606,11 @@ func TestParseFormXML_MissingMainTableKeepsTheList(t *testing.T) {
 	if !got.ManualQuery {
 		t.Errorf("ManualQuery: got false, want true")
 	}
-	if b, r, l := querySizes(got.QueryText); r != 642 || l != 27 {
+	// All three measures, including the byte count the message names. It named
+	// 1136 while checking only the runes and the lines, so the one figure a lost
+	// or gained Cyrillic character would move was the one nobody compared. The
+	// three are re-derived from the file: 1136 bytes = 642 runes = 27 lines.
+	if b, r, l := querySizes(got.QueryText); b != 1136 || r != 642 || l != 27 {
 		t.Errorf("query text size: got %d bytes = %d runes = %d lines, "+
 			"want 1136 bytes = 642 runes = 27 lines", b, r, l)
 	}
