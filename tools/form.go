@@ -625,6 +625,7 @@ const (
 	dumpReasonNotRegular
 	dumpReasonUnreadable
 	dumpReasonTraversalRefused
+	dumpReasonTooLarge
 )
 
 // dumpLegReasonCode is the machine-readable half of the vocabulary.
@@ -634,10 +635,20 @@ var dumpLegReasonCode = map[dumpLegReason]string{
 	dumpReasonNotRegular:       "not_regular",
 	dumpReasonUnreadable:       "unreadable",
 	dumpReasonTraversalRefused: "traversal_refused",
+	dumpReasonTooLarge:         "too_large",
 }
 
 // dumpLegReasonText is the reader's half, and it says what to do about each
 // cause rather than restating the code in Russian.
+//
+// A REMEDY THAT SENDS THE READER TO THE WRONG PLACE IS WORSE THAN NO REMEDY, and
+// two causes used to be sent there. The `unreadable` text advises checking
+// directory permissions and the completeness of the dump; that is right for a
+// read that failed and wrong for both of the causes that used to land beside it.
+// A file over the size ceiling is present, permitted and complete, and it is now
+// `too_large` with its own text. A name the guard refused before any filesystem
+// access is not a permission problem either, and its own text now names all
+// three ways a name gets refused rather than only two.
 //
 // Customer-facing RU: no тире.
 var dumpLegReasonText = map[dumpLegReason]string{
@@ -649,8 +660,15 @@ var dumpLegReasonText = map[dumpLegReason]string{
 		"Проверьте, что выгрузка не содержит ссылок вместо файлов.",
 	dumpReasonUnreadable: "прочитать форму из выгрузки не удалось. Проверьте права на каталог " +
 		"выгрузки и её полноту.",
-	dumpReasonTraversalRefused: "имя объекта отклонено до обращения к файлам: в нём есть " +
-		"разделители пути или оно пустое.",
+	dumpReasonTraversalRefused: "имя объекта отклонено до обращения к файлам: оно пустое, либо " +
+		"содержит разделители пути, либо содержит символ, недопустимый в имени файла. Проверьте " +
+		"значение object_name: это имя одного объекта метаданных, без пути и без служебных " +
+		"символов.",
+	dumpReasonTooLarge: "файл формы в выгрузке превышает допустимый размер и поэтому не прочитан " +
+		"ни целиком, ни частично: половина Form.xml разбирается в форму, которая выглядит целой, " +
+		"и ответ по ней был бы хуже отказа. Права и полнота выгрузки тут ни при чём, файл на " +
+		"месте и доступен. Проверьте сам файл: у обычной формы такого размера не бывает, так " +
+		"выглядит либо повреждённая выгрузка, либо посторонний файл на месте формы.",
 }
 
 // code returns the closed-vocabulary code, empty for a value outside the set.
@@ -680,11 +698,17 @@ func withDumpLegReason(err error, reason dumpLegReason) error {
 // coupling the codes exist to remove, and would break silently the first time a
 // message is reworded.
 //
-// The default is dumpReasonUnreadable rather than a sixth "unknown" value: every
+// The default is dumpReasonUnreadable rather than an "unknown" value: every
 // remaining cause is a failure to read the form, the caller's next step is the
 // same, and an "unknown" code tells nobody anything while making the set open in
-// practice. The over-size refusal lands here too and deliberately: from the
-// caller's side a file too large to read is a file that was not read.
+// practice.
+//
+// THE OVER-SIZE REFUSAL USED TO FALL INTO THAT DEFAULT, on the ground that «from
+// the caller's side a file too large to read is a file that was not read». The
+// ground does not hold, and the remedy is where it shows: `unreadable` sends the
+// reader to check permissions on the dump directory and the completeness of the
+// dump, and an over-size file is present, permitted and complete. It gets its
+// own code and its own text.
 func classifyDumpLegFailure(err error) dumpLegReason {
 	switch {
 	case errors.Is(err, dump.ErrFormUnknownObjectType):
@@ -693,6 +717,8 @@ func classifyDumpLegFailure(err error) dumpLegReason {
 		return dumpReasonTraversalRefused
 	case errors.Is(err, dump.ErrFormXMLNotRegular):
 		return dumpReasonNotRegular
+	case errors.Is(err, dump.ErrFormXMLTooLarge):
+		return dumpReasonTooLarge
 	case errors.Is(err, errFormNotInDump), errors.Is(err, errNoFormsInDump):
 		return dumpReasonNotFound
 	default:

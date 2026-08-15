@@ -283,6 +283,23 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 	if objectName == "" {
 		return nil, fmt.Errorf("%w: object name is empty", ErrFormObjectNameRejected)
 	}
+	// A NUL is refused HERE, on the name, and not left to the filesystem.
+	//
+	// It reaches this function: object_name is decoded from JSON, and JSON spells
+	// the byte as an escape, so a perfectly well formed request decodes to a Go
+	// string carrying it, which no lexical check below notices. What happened then was decided by the OS and differed by branch,
+	// measured on this tree: an object form came back as ErrFormsDirUnreadable,
+	// which the caller renders as advice to check directory permissions, and a
+	// COMMON form came back as no error at all and an empty map, which the caller
+	// renders as "this object has no forms". Both are wrong about a name that no
+	// filesystem can hold in the first place.
+	//
+	// The name is NOT interpolated into the message, unlike the traversal case
+	// below: the whole point is that the value carries a control byte, and the
+	// one place this message can end up is an operator's log line.
+	if strings.ContainsRune(objectName, 0) {
+		return nil, fmt.Errorf("%w: object name contains a NUL byte", ErrFormObjectNameRejected)
+	}
 	if strings.Contains(objectName, "..") ||
 		strings.Contains(objectName, "/") ||
 		strings.Contains(objectName, "\\") {

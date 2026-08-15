@@ -171,6 +171,7 @@ func TestDumpLegReasonsAreAClosedSet(t *testing.T) {
 		dumpReasonNotRegular:       "not_regular",
 		dumpReasonUnreadable:       "unreadable",
 		dumpReasonTraversalRefused: "traversal_refused",
+		dumpReasonTooLarge:         "too_large",
 	}
 	if len(dumpLegReasonText) != len(want) {
 		t.Fatalf("the reason set holds %d values, want %d. It is closed by design: "+
@@ -206,7 +207,15 @@ func TestClassifyDumpLegFailure_MapsEveryCause(t *testing.T) {
 		{"name guard", fmt.Errorf("wrapped: %w", dump.ErrFormObjectNameRejected), dumpReasonTraversalRefused},
 		{"forms directory unreadable", fmt.Errorf("wrapped: %w", dump.ErrFormsDirUnreadable), dumpReasonUnreadable},
 		{"form file is not regular", fmt.Errorf("wrapped: %w", dump.ErrFormXMLNotRegular), dumpReasonNotRegular},
-		{"form file over the read limit", fmt.Errorf("wrapped: %w", dump.ErrFormXMLTooLarge), dumpReasonUnreadable},
+		// NOT dumpReasonUnreadable, which is where it used to land. That code's
+		// text advises checking permissions on the dump directory and the
+		// completeness of the dump, and an over-size file is present, permitted
+		// and complete: the advice was wrong on every clause.
+		{"form file over the read limit", fmt.Errorf("wrapped: %w", dump.ErrFormXMLTooLarge), dumpReasonTooLarge},
+		// A name the guard refuses before any filesystem access, whatever made it
+		// refuse. It is the same sentinel and the same code for all three ways in,
+		// which is why that code's text names all three.
+		{"a name carrying a NUL", fmt.Errorf("wrapped: %w", dump.ErrFormObjectNameRejected), dumpReasonTraversalRefused},
 		{"form not present in the dump", &formNotInDumpError{requested: "Ф", available: "А, Б"}, dumpReasonNotFound},
 		{"anything else", errors.New("что то ещё"), dumpReasonUnreadable},
 	}
