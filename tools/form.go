@@ -187,6 +187,17 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 				// side as before; the dump side arrives as a CODE from a closed
 				// set rather than as its message, because that message belongs to
 				// a lower layer and used to carry an absolute path.
+				//
+				// THIS IS THE READING END OF THAT CHANNEL. dumpErr is deliberately
+				// passed only to the classifier and never into a format verb: a
+				// %v here is what turned the wrap in formFromDump from a latent
+				// leak into a printed one. The generic default branch of
+				// renderFailure quotes the whole error chain verbatim, so anything
+				// folded into this error is read by the model.
+				// TestNewFormStructureHandler_BothLegsFailedCarriesNoAbsolutePath
+				// drives exactly that branch, with a 1C failure typed so it lands
+				// there, and TestOnecDecodeErrorFallsToTheGenericRenderBranch pins
+				// the premise so the drive cannot quietly stop reaching it.
 				return nil, withDumpLegReason(
 					fmt.Errorf("fetching form structure from 1C: %w", httpErr),
 					classifyDumpLegFailure(dumpErr))
@@ -715,6 +726,17 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 		// into the WARN written to server.log under --debug. What the caller
 		// needs is the CLASS of the failure, which classifyDumpLegFailure reads
 		// off the sentinel underneath.
+		//
+		// PINNED HERE, not only where the answer is rendered, and the distinction
+		// is what the first attempt got wrong. Putting the %q back is invisible to
+		// every test about a rendered answer, because on its own it fills an error
+		// nothing prints: the path only becomes readable when the both-legs-failed
+		// branch also forwards this error's TEXT. The two sites are one defect and
+		// they are pinned at both ends, in tools/form_path_leak_test.go:
+		// TestFormFromDump_ParseFailureCarriesNoPath fires on this line alone, and
+		// TestNewFormStructureHandler_BothLegsFailedCarriesNoAbsolutePath fires on
+		// the pair. Restoring only the %q reddens the first and leaves the second
+		// green, which is exactly the state that shipped before they existed.
 		return nil, dumpFormRead{}, nil, fmt.Errorf("parsing form XML: %w", err)
 	}
 
