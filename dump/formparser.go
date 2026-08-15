@@ -42,9 +42,18 @@ type FormInfo struct {
 	// NoFormRoot reports that the decoder consumed the whole document to its
 	// normal end without the parser ever entering a <Form> element, so the file
 	// was read in full and simply does not describe a form. Everything this
-	// parser records (Title, Elements, Commands, Handlers) is only ever read
-	// inside <Form>, so when this is set all four are guaranteed empty, and a
-	// caller may say so without checking them.
+	// parser records is only ever read inside <Form>, so when this is set every
+	// recorded field is guaranteed empty and a caller may say so without
+	// checking them.
+	//
+	// THE FIELDS ARE NOT COUNTED HERE, and the reason is that they were. This
+	// sentence used to name Title, Elements, Commands and Handlers and conclude
+	// «all four are guaranteed empty»; DynamicLists then joined them, read in the
+	// same place under the same condition, and the enumeration went stale without
+	// a single test noticing, because the claim it made about the four was still
+	// true. The property is derived from the TYPE instead, in
+	// TestParseFormXML_NoFormRootLeavesEveryRecordedFieldEmpty, which walks
+	// FormInfo by reflection and covers a field nobody has added yet.
 	//
 	// It closes the class ParseIncomplete cannot see: an empty Form.xml, a file
 	// of plain text, whitespace or an XML comment alone, and a well formed
@@ -85,14 +94,26 @@ type FormInfo struct {
 // about what the list reads, and carrying it would put an unbounded stretch of
 // foreign markup into every answer about a form.
 //
-// What is measured about it, and how far the measurement goes: the child is
-// present on 1918 lists of 1918, and the largest single block belongs to
-// DataProcessors/ДокументооборотСКонтролирующимиОрганами, form
-// Документ_ЗаявлениеАбонентаСпецоператораСвязи_ФормаСписка. Presence and the
-// holder of the record reproduce; the SIZE does not, because it moves with the
-// counting convention (re-serialising the block gives 12607 bytes, slicing the
-// source text between its tags gives another figure), so no byte count is stated
-// here as if it were one number.
+// What is measured about it, WITH THE CONVENTION IT IS MEASURED UNDER, because
+// the figure means nothing without one and stating it without one is what went
+// wrong here before. The child is present on 1918 lists of 1918, and the largest
+// single block is 13681 BYTES OF THE FILE'S OWN TEXT, counted from the `<` of
+// <ListSettings> through the `>` of its closing tag, the tags included. It
+// belongs to DataProcessors/ДокументооборотСКонтролирующимиОрганами, form
+// Документ_ЗаявлениеАбонентаСпецоператораСвязи_ФормаСписка, attribute Список.
+//
+// ANOTHER CONVENTION IS ANOTHER NUMBER AND BOTH ARE RIGHT. The same block
+// measured BETWEEN the tags instead of across them is 13652 bytes, and
+// re-serialised through an XML writer it is smaller again and moves with the
+// writer, which is why no re-serialised figure is quoted here at all: it is a
+// fact about a writer, not about the dump.
+//
+// WHAT DOES NOT REPRODUCE IS THE CORPUS TOTAL, and it is the total that was
+// mistaken for the size. Four runs produced four sums for it while the maximum
+// and the holder of the record came out identical every time, so the total is
+// stated nowhere and pinned nowhere. Presence, the maximum and the holder are
+// pinned, in TestParseFormXML_CorpusCensus, which prints the convention in the
+// same line as the numbers it refuses on.
 type FormDynamicList struct {
 	// Name is the "name" attribute of the owning <Attribute>, which is the
 	// identifier the form's own module uses (Список.ТекстЗапроса and so on).
@@ -177,13 +198,23 @@ var ErrFormObjectNameRejected = errors.New("object name rejected before any file
 // ErrFormUnknownObjectType classifies a lookup for a kind this package does not
 // serve forms for.
 //
-// THE FOUR SENTINELS ABOVE AND THIS ONE ARE EXPORTED SO THE CALLER CAN CLASSIFY
+// EVERY ErrForm SENTINEL IN THIS FILE IS EXPORTED SO THE CALLER CAN CLASSIFY
 // WITHOUT READING A MESSAGE. That is not a convenience: the only other way to
 // tell these apart from outside the package is to match the text, and the text
 // is precisely what may not be forwarded, because one of these failures used to
 // be reported wrapped around the absolute path it happened on. A caller that has
 // to choose between leaking the message and guessing the cause will leak the
 // message.
+//
+// THEY ARE ENUMERATED AND NOT COUNTED: ErrFormsDirUnreadable,
+// ErrFormXMLNotRegular, ErrFormObjectNameRejected, ErrFormUnknownObjectType,
+// ErrFormXMLUnreadable, ErrFormXMLTooLarge. This paragraph used to open with
+// «THE FOUR SENTINELS ABOVE AND THIS ONE», which was wrong in both halves at
+// once: three stood above it, and the file held six. A numeral over a set that
+// grows is a claim nobody re-reads, so the membership is derived rather than
+// written down, in TestFormSentinelsAreEnumeratedWhereTheyAreClaimed, which
+// reads the declarations back out of this file and fails on any this list does
+// not name.
 var ErrFormUnknownObjectType = errors.New("unknown object type for dump lookup")
 
 // ErrFormXMLUnreadable is the path-free RU refusal returned when the form file
