@@ -750,6 +750,11 @@ func TestParseFormXML_RefusesAFileOverTheReadLimit(t *testing.T) {
 	if overForm != nil {
 		t.Errorf("a refused read must return no form at all, got %+v", overForm)
 	}
+	// WHICH refusal, and not merely that there was one. Asserting non-nil left
+	// this sentinel swappable for any other with the whole suite green, and the
+	// caller classifies on it: tools/form.go classifyDumpLegFailure reads it with
+	// errors.Is to choose what the answer tells the user to do.
+	assertFormSentinel(t, err, "ErrFormXMLTooLarge")
 	if strings.Contains(err.Error(), marker) {
 		t.Errorf("the refusal carries content from the file it refused: %v", err)
 	}

@@ -460,6 +460,13 @@ func TestFindFormFiles_NoFormsDir(t *testing.T) {
 	}
 }
 
+// TestFindFormFiles_UnknownType classifies with errors.Is and NOT on the text.
+//
+// It used to match strings.Contains(err.Error(), "unknown object type"), which
+// is exactly the coupling the exported sentinels exist to remove: the message is
+// what may not be forwarded out of this package, so a test that depends on it
+// pins the one thing callers are told not to read, and it would keep passing
+// while the sentinel underneath was swapped for another.
 func TestFindFormFiles_UnknownType(t *testing.T) {
 	dir := t.TempDir()
 
@@ -467,9 +474,7 @@ func TestFindFormFiles_UnknownType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown object type")
 	}
-	if !strings.Contains(err.Error(), "unknown object type") {
-		t.Errorf("expected 'unknown object type' in error, got: %v", err)
-	}
+	assertFormSentinel(t, err, "ErrFormUnknownObjectType")
 }
 
 func TestFindFormFiles_PathTraversal(t *testing.T) {
