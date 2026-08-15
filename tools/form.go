@@ -246,6 +246,13 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 				text += formNameDumpUnreadableNote
 			}
 		}
+		// Before the parse notes, because those describe the file that was read
+		// and this one says WHICH file that was. A reader who learns second that
+		// the answer is about a form they did not choose has already read the
+		// sections as if they were about the one they meant.
+		if dumpRead.autoChosenForm != "" {
+			text += formAutoChosenNote(dumpRead.autoChosenForm, dumpRead.otherForms)
+		}
 		// Two independent ifs rather than an if/else. The parser guarantees the
 		// two are mutually exclusive, so at most one fires; writing it as a chain
 		// would additionally SWALLOW one of them if that guarantee ever broke,
@@ -353,6 +360,67 @@ func formNameNoStructureNote(serviceNamedForm bool) string {
 			"своего имени формы HTTP-сервис 1С не вернул. "
 	}
 	return note + "Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
+}
+
+// maxOtherFormNames caps how many of the object's remaining form names the note
+// below prints.
+//
+// A CAP IS REQUIRED AND THE CORPUS SAYS SO. Measured on the reference dump, over
+// the object kinds this tool can address: one object carries 243 forms, and 53
+// objects of 1537 carry more than ten. Printing every name would put a
+// multi-kilobyte line of identifiers into an answer whose subject is one form.
+// The count of the remainder is stated instead, so nothing is hidden, only
+// unlisted.
+const maxOtherFormNames = 10
+
+// formAutoChosenNote is appended when the caller named no form and the object
+// has more than one in the dump, so the dump leg picked one by itself: the first
+// in order.
+//
+// THE PICK IS OLDER THAN THIS NOTE AND SO IS THE SILENCE; WHAT CHANGED IS THE
+// COST. A form the caller did not ask for used to mean the element list might
+// belong to another form, which a reader takes as incompleteness. Now the answer
+// also carries a dynamic-list section, and a section that is ABSENT reads as a
+// finding: this form declares no dynamic list. That reading is wrong twice over
+// when the form was chosen by this code and another form of the same object
+// carries lists. Measured over the object kinds this tool can address: 542
+// objects of 1537 are in exactly that state and 874 lists sit in the forms not
+// looked at.
+//
+// THE FIGURES DO NOT GO INTO THE ANSWER. They are the reason for the note, not
+// content for the caller: a number about a reference dump says nothing about the
+// dump in front of this server, and quoting it would invite the model to reason
+// from it.
+//
+// THE NAMES ARE THE DUMP'S AND ARE CONTAINED AS SUCH. They are directory names
+// read off the filesystem, so they go through inlineCode, which computes its
+// delimiter from the payload's own longest backtick run and neutralises the runes
+// a markdown renderer treats as a mandatory line break. A blockquote is a LINE
+// construct: one break in a name would end the quote and turn the rest into free
+// markdown in an answer the model reads as this server's own words.
+//
+// Customer-facing RU: no тире.
+func formAutoChosenNote(chosen string, others []string) string {
+	shown := others
+	extra := 0
+	if len(shown) > maxOtherFormNames {
+		extra = len(shown) - maxOtherFormNames
+		shown = shown[:maxOtherFormNames]
+	}
+	quoted := make([]string, 0, len(shown))
+	for _, name := range shown {
+		quoted = append(quoted, inlineCode(name))
+	}
+
+	note := "> Имя формы не задано, поэтому из выгрузки прочитана первая по порядку: " +
+		inlineCode(chosen) + ". У объекта в выгрузке есть и другие формы: " +
+		strings.Join(quoted, ", ")
+	if extra > 0 {
+		note += fmt.Sprintf(" и ещё %d", extra)
+	}
+	return note + ". Их состав и динамические списки в ответ выше не попали, " +
+		"поэтому отсутствие раздела не означает, что списков нет у объекта. " +
+		"Чтобы получить любую из них, укажите её имя в параметре `form_name`.\n"
 }
 
 // formServiceCallFailedNote is appended when the dump answered and the call to
@@ -658,19 +726,42 @@ func (e *formNotInDumpError) Error() string {
 
 func (e *formNotInDumpError) Unwrap() error { return errFormNotInDump }
 
-// dumpFormRead reports how the dump's Form.xml was read, for the response notes.
-// Both fields describe a parse that SUCCEEDED, which is the whole point: these
-// are the outcomes that never reach an error and would otherwise be invisible.
+// dumpFormRead reports WHICH form the dump leg read and HOW it read it, for the
+// response notes. Every field describes a read that SUCCEEDED, which is the whole
+// point: these are the outcomes that never reach an error and would otherwise be
+// invisible.
 //
-// They are mutually exclusive at the source (dump.FormInfo sets NoFormRoot only
-// on a clean end of document), so at most one is ever true. Grouped in a struct
-// rather than returned as two bare bools so a call site cannot silently swap
-// them, which for two adjacent same-typed values is a matter of time.
+// Grouped in a struct rather than returned as bare values so a call site cannot
+// silently swap them, which for adjacent same-typed values is a matter of time.
 type dumpFormRead struct {
 	// partial: the decoder stopped on a syntax error before the end of the file.
 	partial bool
 	// noFormRoot: the file was read whole and contained no <Form> at all.
 	noFormRoot bool
+
+	// The two flags above are mutually exclusive at the source (dump.FormInfo
+	// sets NoFormRoot only on a clean end of document), so at most one is true.
+
+	// autoChosenForm is the form the dump leg picked BY ITSELF, set only when the
+	// caller named none and the object has more than one form. otherForms lists
+	// the rest, in the same order the pick was made from, and is never empty when
+	// autoChosenForm is set.
+	//
+	// WHY THIS IS RECORDED AT ALL, when the picking is older than this file's
+	// dynamic lists: the pick used to be invisible and harmless, and it is now
+	// invisible and misleading. A form the caller did not ask for used to mean a
+	// possibly incomplete element list, which reads as incomplete. Since the
+	// answer gained a dynamic-list section, the ABSENCE of that section reads as
+	// a positive claim that the form declares no dynamic list, and that claim is
+	// about a form nobody chose.
+	//
+	// The scale is measured on the reference dump, over the object kinds this
+	// tool can address: 542 objects of 1537 have a first-by-order form with zero
+	// dynamic lists while another form of the same object carries some, and 874
+	// lists sit in those other forms. The figures do not go into the answer;
+	// they are why the note exists.
+	autoChosenForm string
+	otherForms     []string
 }
 
 // formFromDump loads form structure from a DumpConfigToFiles XML file.
@@ -698,6 +789,8 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 	// Select the requested form or pick the first one.
 	var selectedPath string
 	var selectedName string
+	var autoChosen string
+	var otherForms []string
 	if formName != "" {
 		path, ok := formFiles[formName]
 		if !ok {
@@ -714,6 +807,14 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 		slices.Sort(keys)
 		selectedName = keys[0]
 		selectedPath = formFiles[selectedName]
+		// Recorded only when there WAS a choice. One form is not a pick, and a
+		// note saying which of one form was taken is noise on every object that
+		// has exactly one. Measured: 372 of the 1537 objects with forms have
+		// exactly one, so this stays quiet for those and speaks for the rest.
+		if len(keys) > 1 {
+			autoChosen = selectedName
+			otherForms = keys[1:]
+		}
 	}
 
 	parsed, err := dump.ParseFormXML(selectedPath)
@@ -741,8 +842,10 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 	}
 
 	return convertDumpForm(selectedName, parsed), dumpFormRead{
-		partial:    parsed.ParseIncomplete,
-		noFormRoot: parsed.NoFormRoot,
+		partial:        parsed.ParseIncomplete,
+		noFormRoot:     parsed.NoFormRoot,
+		autoChosenForm: autoChosen,
+		otherForms:     otherForms,
 	}, parsed.DynamicLists, nil
 }
 
