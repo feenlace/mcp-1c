@@ -2,6 +2,7 @@ package dump
 
 import (
 	"bytes"
+	"encoding/xml"
 	"os"
 	"path/filepath"
 	"strings"
@@ -322,28 +323,153 @@ func TestParseFormXML_EveryDynamicListIsKeptInFileOrder(t *testing.T) {
 	}
 }
 
-// TestParseFormXML_QueryTextSurvivesEntityBreaks covers the decoder splitting one
-// text node into several CharData tokens. Every entity reference starts a new
-// token, so a reader keeping the first one loses everything after the first
-// ampersand, and 1C query texts are full of them.
-func TestParseFormXML_QueryTextSurvivesEntityBreaks(t *testing.T) {
-	doc := dynamicListDoc(`    <Attribute name="Список" id="1">
+// charDataTokens reports how many xml.CharData tokens the Go decoder produces
+// inside the first <QueryText> of doc, and what the FIRST of them holds.
+//
+// It is a SECOND reader over the same bytes, built straight on encoding/xml and
+// not on the parser under test, and it exists so that "this fixture really does
+// split" is a measurement instead of a sentence. The sentence is what went
+// wrong: the test this replaces asserted that four entity references arrive in
+// five pieces, which the decoder does not do, so the fixture never split, and a
+// reader keeping only the first token passed it.
+func charDataTokens(t *testing.T, doc string) (n int, first string) {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(doc))
+	inside := false
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch tv := tok.(type) {
+		case xml.StartElement:
+			if tv.Name.Local == "QueryText" {
+				inside = true
+			}
+		case xml.EndElement:
+			if tv.Name.Local == "QueryText" && inside {
+				return n, first
+			}
+		case xml.CharData:
+			if inside {
+				if n == 0 {
+					first = string(tv)
+				}
+				n++
+			}
+		}
+	}
+	return n, first
+}
+
+// TestParseFormXML_QueryTextIsAccumulatedAcrossEveryCharDataToken pins FR-DL-006:
+// the reader keeps the WHOLE text of <QueryText>, not the first token of it.
+//
+// WHAT THE DECODER ACTUALLY DOES, measured with charDataTokens below rather than
+// assumed. An entity reference does NOT end a CharData token: Go resolves it in
+// place and the surrounding text arrives as one token, four references and all.
+// What ends a token is a NODE between the characters, and there are three of
+// them: a comment, a child element and a CDATA section.
+//
+// THE SPLITTING FIXTURES ARE SYNTHETIC AND THE CORPUS SAYS WHY. Measured over the
+// reference dump: 991 <QueryText> elements, and the source body of 0 of them
+// carries a raw `<` of any kind, so not one real query text splits. The entity
+// references are there in quantity (2449 of them, 1664 &amp; + 418 &gt; +
+// 367 &lt;) and every one of them arrives inside a single token. So on this whole
+// dump a reader that kept only the first token would lose NOTHING, which is
+// exactly why the test this replaces could not fail. The rule being pinned is the
+// READER's, and a reader's rule is not conditional on what one dump happens to
+// contain.
+func TestParseFormXML_QueryTextIsAccumulatedAcrossEveryCharDataToken(t *testing.T) {
+	cases := []struct {
+		name       string
+		queryText  string
+		wantTokens int
+		want       string
+	}{
+		{
+			// The fixture the old test used, with its real token count. It is
+			// kept because entity DECODING is worth pinning; what it cannot do is
+			// tell an accumulating reader from a first-token one.
+			name:       "four entity references, which do NOT split the text",
+			queryText:  "ВЫБРАТЬ 1 ГДЕ &amp;Параметр &lt; 5 И &#1057;умма &gt; 0",
+			wantTokens: 1,
+			want:       "ВЫБРАТЬ 1 ГДЕ &Параметр < 5 И Сумма > 0",
+		},
+		{
+			name:       "an XML comment between the characters",
+			queryText:  "ВЫБРАТЬ 1\n<!-- комментарий -->ГДЕ 2",
+			wantTokens: 2,
+			want:       "ВЫБРАТЬ 1\nГДЕ 2",
+		},
+		{
+			// The child element's OWN text is dropped, not kept: readCharData
+			// skips the subtree. That is deliberate and is asserted by the
+			// expected value, which does not contain it.
+			name:       "a child element between the characters",
+			queryText:  "ВЫБРАТЬ 1\n<Чужое>текст чужого элемента</Чужое>ГДЕ 2",
+			wantTokens: 3,
+			want:       "ВЫБРАТЬ 1\nГДЕ 2",
+		},
+		{
+			// CDATA content is NOT entity-decoded: it arrives exactly as written,
+			// which is why the expected value keeps the bare `<`.
+			name:       "a CDATA section between the characters",
+			queryText:  "ВЫБРАТЬ 1\n<![CDATA[ГДЕ &Параметр < 5]]>\nИ 2",
+			wantTokens: 3,
+			want:       "ВЫБРАТЬ 1\nГДЕ &Параметр < 5\nИ 2",
+		},
+	}
+
+	splitting := 0
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := dynamicListDoc(`    <Attribute name="Список" id="1">
       <Settings xsi:type="DynamicList"><ManualQuery>true</ManualQuery>
-        <QueryText>ВЫБРАТЬ 1 ГДЕ &amp;Параметр &lt; 5 И &#1057;умма &gt; 0</QueryText>
+        <QueryText>` + tc.queryText + `</QueryText>
         <MainTable>Catalog.А</MainTable></Settings>
     </Attribute>`)
 
-	form, err := parseFormXMLData([]byte(doc))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+			// The token count is MEASURED, and it is measured before anything is
+			// asserted about the text. A fixture that does not split cannot tell
+			// the two readers apart no matter what the text comes out as.
+			got, first := charDataTokens(t, doc)
+			if got != tc.wantTokens {
+				t.Errorf("the decoder produced %d CharData tokens inside <QueryText>, "+
+					"expected %d. The expectation is about Go's tokenisation, not about "+
+					"this parser: fix the number, not the reader", got, tc.wantTokens)
+			}
+			if got > 1 {
+				splitting++
+				// The discriminating power of this case, measured rather than
+				// claimed: a reader keeping only the first token would answer
+				// something ELSE here.
+				if strings.TrimSpace(first) == tc.want {
+					t.Errorf("the first token alone already equals the expected text %q, so "+
+						"this case cannot tell an accumulating reader from a first-token one",
+						tc.want)
+				}
+			}
+
+			form, err := parseFormXMLData([]byte(doc))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if len(form.DynamicLists) != 1 {
+				t.Fatalf("expected 1 dynamic list, got %d", len(form.DynamicLists))
+			}
+			if got := form.DynamicLists[0].QueryText; got != tc.want {
+				t.Errorf("query text: got %q, want %q", got, tc.want)
+			}
+		})
 	}
-	if len(form.DynamicLists) != 1 {
-		t.Fatalf("expected 1 dynamic list, got %d", len(form.DynamicLists))
-	}
-	const want = "ВЫБРАТЬ 1 ГДЕ &Параметр < 5 И Сумма > 0"
-	if got := form.DynamicLists[0].QueryText; got != want {
-		t.Errorf("query text: got %q, want %q. The decoder ends a CharData token at every "+
-			"entity reference, so this text arrives in five pieces", got, want)
+
+	// CONTROL OVER THE TABLE, and the one the replaced test did not have: at
+	// least one case has to split, or every row is green on a reader that keeps
+	// the first token and throws the rest away.
+	if splitting == 0 {
+		t.Errorf("control failed: not one case produced more than one CharData token, so this " +
+			"table cannot fail on a reader that keeps only the first")
 	}
 }
 
