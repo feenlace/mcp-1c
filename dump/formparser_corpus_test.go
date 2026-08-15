@@ -2,6 +2,7 @@ package dump
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,6 +19,54 @@ import (
 // shape as MCP_TOCTOU_STRESS in this package, which gates the other check that
 // cannot run everywhere.
 const corpusEnv = "MCP_DUMP_CORPUS"
+
+// corpusSkipNotice and corpusSkipReason are the two halves of the announcement
+// the census makes when it does not run: what did NOT happen, and what to do
+// about it. They are functions rather than literals at the call site so the one
+// property this side controls can be checked, in
+// TestCorpusSkipAnnouncementsNameTheVariable: whoever sees either line learns the
+// name of the variable to set.
+//
+// They cannot make the skip visible in a non-verbose run; see the measurement in
+// TestParseFormXML_CorpusCensus for why nothing can.
+func corpusSkipNotice() string {
+	return fmt.Sprintf("SKIPPING the corpus census: %s is not set, so no dump was walked "+
+		"and none of the figures below were checked", corpusEnv)
+}
+
+func corpusSkipReason() string {
+	return fmt.Sprintf("set %s to a DumpConfigToFiles root to run the corpus census", corpusEnv)
+}
+
+// TestCorpusSkipAnnouncementsNameTheVariable pins the half of the skip that this
+// repository decides.
+//
+// It cannot pin visibility, which belongs to the go tool and was measured
+// instead. What it can pin is that a reader who DOES see either line, which on
+// CI is every reader because CI runs with -v, is told the name to set and told
+// that the census did not run. A notice naming no variable is a notice that
+// leaves its reader exactly where they were.
+func TestCorpusSkipAnnouncementsNameTheVariable(t *testing.T) {
+	for name, text := range map[string]string{
+		"the notice": corpusSkipNotice(),
+		"the reason": corpusSkipReason(),
+	} {
+		if !strings.Contains(text, corpusEnv) {
+			t.Errorf("%s does not name %s, so a reader of it cannot act on it: %q",
+				name, corpusEnv, text)
+		}
+	}
+	if !strings.Contains(corpusSkipNotice(), "no dump was walked") {
+		t.Errorf("the notice does not say that nothing was measured: %q", corpusSkipNotice())
+	}
+
+	// POSITIVE CONTROL over the scan: it fires on a sentence that names no
+	// variable, so the two passes above are not a check that cannot fail.
+	if strings.Contains("census skipped", corpusEnv) {
+		t.Fatal("control failed: the scan found the variable in a sentence that does not " +
+			"carry it, so the assertions above prove nothing")
+	}
+}
 
 // ---------------------------------------------------------------------------
 // The <ListSettings> measurement, and the convention it is meaningless without.
@@ -103,13 +152,37 @@ func listSettingsSpans(raw []byte) (spans []int, selfClosing int) {
 func TestParseFormXML_CorpusCensus(t *testing.T) {
 	root := os.Getenv(corpusEnv)
 	if root == "" {
-		// VISIBLE, because a non-verbose `go test` prints no skip line at all and
-		// a silent skip is indistinguishable from a pass. Both the log and the
-		// skip message name the variable, so a reader of either knows the census
-		// did not run.
-		t.Logf("SKIPPING the corpus census: %s is not set, so no dump was walked "+
-			"and none of the figures below were checked", corpusEnv)
-		t.Skipf("set %s to a DumpConfigToFiles root to run the corpus census", corpusEnv)
+		// NOT VISIBLE IN A PLAIN `go test ./dump`, AND THAT IS A MEASUREMENT.
+		// This comment used to open with «VISIBLE», which was false of every
+		// non-verbose run: `go test` discards a skipped test's t.Log without -v,
+		// so the sentence asserted the opposite of what shipped.
+		//
+		// Measured on this package with the variable unset:
+		//
+		//	go test ./dump -run TestParseFormXML_CorpusCensus -count=1
+		//	   44 bytes of output, and corpusEnv appears 0 times in it
+		//	the same command with -v
+		//	  401 bytes of output, and corpusEnv appears 2 times in it
+		//
+		// AND NO CHANNEL CHANGES THE FIRST LINE, which is why this is a corrected
+		// comment and not a louder notice. `go test` buffers everything the test
+		// binary writes and prints it only when the package FAILS. Measured with
+		// a probe that wrote to t.Log, to os.Stdout and to os.Stderr from a
+		// PASSING test: output stayed at 44 bytes and not one of the three
+		// appeared. The same three writes from a FAILING test all appeared, at
+		// 229 bytes, so the probe was not blind. The only way to make this skip
+		// visible in a non-verbose run is to fail the package, and failing
+		// everywhere the 2.9 GB reference tree is absent is exactly what the
+		// opt-in exists to avoid.
+		//
+		// WHAT A READER MAY RELY ON. CI runs `go test ./... -v -race`
+		// (.github/workflows/release.yml), so on the one run that gates a release
+		// the skip and its reason are both printed and both name the variable,
+		// which TestCorpusSkipAnnouncementsNameTheVariable pins. Locally a plain
+		// run says nothing at all, and an «ok» from it is not evidence that the
+		// census ran.
+		t.Log(corpusSkipNotice())
+		t.Skip(corpusSkipReason())
 	}
 	if st, err := os.Stat(root); err != nil || !st.IsDir() {
 		t.Fatalf("%s=%q is not a readable directory: %v", corpusEnv, root, err)
