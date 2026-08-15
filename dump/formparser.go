@@ -146,6 +146,12 @@ type FormHandlerInfo struct {
 // objectTypeToDumpDir is defined in metadata_types.go and maps 1C object type
 // names (as used in the tool input) to dump directory names.
 
+// commonFormsDumpDir is the dump directory holding common forms.
+//
+// It is a separate constant and NOT an entry in metadataTypes, because a common
+// form does not have the object-form path shape. See findCommonFormFile.
+const commonFormsDumpDir = "CommonForms"
+
 // errFormsDirUnreadable is the path-free RU refusal returned when an object's
 // Forms directory cannot be read through the dump root: a symlink that escapes
 // the dump at any path component (refused by os.Root), a non-directory standing
@@ -158,6 +164,15 @@ var errFormsDirUnreadable = errors.New("каталог форм объекта �
 // not a plain regular file: a symlink, FIFO, socket, device or directory.
 // Customer-facing RU: no тире, no absolute path.
 var errFormXMLNotRegular = errors.New("файл формы имеет неверный тип")
+
+// errFormObjectNameRejected classifies every refusal of objectName made on the
+// name alone, before the filesystem is touched at all.
+//
+// It is a sentinel so callers and tests can tell this refusal from the others
+// with errors.Is instead of reading the message. That distinction is not
+// cosmetic: an unrecognised object type is ALSO an error, so a test asserting
+// only that something came back was green before the lookup existed.
+var errFormObjectNameRejected = errors.New("object name rejected before any filesystem access")
 
 // errFormXMLTooLarge is the path-free RU refusal returned when a form file is
 // larger than maxFormFileBytes. Nothing partial comes back with it: half a
@@ -194,15 +209,25 @@ var maxFormFileBytes int64 = 16 << 20
 // symlinked Form.xml is neither read NOR listed, so the return value cannot serve
 // as an existence oracle for paths outside the dump.
 func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, error) {
-	dirName, ok := objectTypeToDumpDir[objectType]
-	if !ok {
+	dirName, known := objectTypeToDumpDir[objectType]
+	commonForm := isCommonFormType(objectType)
+	if !known && !commonForm {
 		return nil, fmt.Errorf("unknown object type %q for dump lookup", objectType)
 	}
 
+	// An empty name is refused rather than joined. Joined, it collapses its own
+	// segment and the lookup then addresses the PARENT directory: for a common
+	// form that is CommonForms/Ext/Form.xml, for an object form it is the type
+	// directory's own Forms. Neither is the form anybody asked about, and both
+	// answer without saying they are answering about something else.
+	if objectName == "" {
+		return nil, fmt.Errorf("%w: object name is empty", errFormObjectNameRejected)
+	}
 	if strings.Contains(objectName, "..") ||
 		strings.Contains(objectName, "/") ||
 		strings.Contains(objectName, "\\") {
-		return nil, fmt.Errorf("invalid object name %q: contains path traversal characters", objectName)
+		return nil, fmt.Errorf("%w: invalid object name %q: contains path traversal characters",
+			errFormObjectNameRejected, objectName)
 	}
 
 	// A dumpDir that exists but is not a directory (FIFO, socket, device, plain
@@ -220,6 +245,10 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 		return nil, errFormsDirUnreadable
 	}
 	defer func() { _ = root.Close() }()
+
+	if commonForm {
+		return findCommonFormFile(root, dumpDir, objectName)
+	}
 
 	relForms := filepath.Join(dirName, objectName, "Forms")
 	entries, err := readDirInRoot(root, relForms)
@@ -244,6 +273,59 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 	}
 
 	return result, nil
+}
+
+// isCommonFormType reports whether objectType names the common-form kind.
+//
+// Both spellings are accepted because both reach this package from tool input:
+// the English name is what the schema advertises and the Russian one is what the
+// metadata tree shows, and they name the same kind.
+func isCommonFormType(objectType string) bool {
+	return objectType == "CommonForm" || objectType == dumpDirNames[commonFormsDumpDir]
+}
+
+// findCommonFormFile resolves the single Form.xml of a common form.
+//
+// THE PATH SHAPE IS DIFFERENT AND THAT IS THE WHOLE REASON THIS BRANCH EXISTS:
+//
+//	object form   <Вид>/<Объект>/Forms/<Форма>/Ext/Form.xml    six segments
+//	common form   CommonForms/<Имя>/Ext/Form.xml               four segments
+//
+// There is no "Forms" directory and no directory named after the form, because
+// the form IS the metadata object: its name is the object's name, which is why
+// the returned map is keyed by objectName. Measured on the reference dump: 386
+// CommonForms directories, none of them holding a Forms segment, 22 of them
+// carrying 42 dynamic lists between them.
+//
+// Registering the kind in metadataTypes instead would have been the smaller
+// diff and the worse fix: the walk would then build <...>/Forms, fail to find
+// it, and take the "No forms directory, not an error" exit, turning a loud
+// unknown-type refusal into a silent empty answer.
+//
+// Containment is the object-form branch's, unchanged and deliberately shared.
+// The value is joined onto dumpDir exactly as the object-form branch joins it,
+// because the one consumer of this map hands the value straight to ParseFormXML,
+// whose contract states it performs no containment of its own. root.Lstat does
+// not follow the final component, so a symlinked Form.xml is neither read nor
+// listed and the map cannot serve as an existence oracle for anything outside
+// the dump.
+func findCommonFormFile(root *os.Root, dumpDir, objectName string) (map[string]string, error) {
+	relXML := filepath.Join(commonFormsDumpDir, objectName, "Ext", "Form.xml")
+
+	st, err := root.Lstat(relXML)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil // No such common form - not an error, same as an object with no forms.
+		}
+		// Containment refusal, a non-directory in the path, or an unreadable
+		// component: never silent, and never naming the path it failed on.
+		return nil, errFormsDirUnreadable
+	}
+	if !st.Mode().IsRegular() {
+		return nil, nil // Symlink, FIFO, directory: dropped exactly as for an object form.
+	}
+
+	return map[string]string{objectName: filepath.Join(dumpDir, relXML)}, nil
 }
 
 // ParseFormXML parses a 1C form XML file and extracts elements, commands, and handlers.
