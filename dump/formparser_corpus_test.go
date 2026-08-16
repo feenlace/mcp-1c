@@ -217,16 +217,23 @@ func TestParseFormXML_CorpusCensus(t *testing.T) {
 
 		// ENG-XML-15. <ListSettings> is the block this reader drops, and what
 		// justifies dropping it is its REACH and its SIZE. Three quantities are
-		// pinned and one is refused:
+		// pinned and one is refused, though not because it fails to reproduce:
 		//
 		//   pinned   presence, which is what makes the channel universal;
 		//   pinned   the maximum, under listSettingsConvention;
 		//   pinned   the holder of the record, which is what makes the maximum
 		//            traceable to a file somebody can open;
-		//   refused  the corpus TOTAL. Four runs produced four sums for it
-		//            (2082412 / 2081854 / 2130530 / 2026754) while the maximum
-		//            and the holder came out identical every time, so the total
-		//            measures the convention and the run, not the dump.
+		//   refused  the corpus TOTAL. Under listSettingsConvention, applied by
+		//            a from-scratch byte scan against this tree, it IS stable:
+		//            2082124 on three separate runs, with the same maximum and
+		//            the same holder as pinned above. None of the four figures
+		//            recorded here earlier (2082412 / 2081854 / 2130530 /
+		//            2026754) matches it, and since those four do not match EACH
+		//            OTHER either, they cannot all have been this same
+		//            convention applied to an unchanged tree. It stays unpinned
+		//            anyway: nothing in this package reads the total, so pinning
+		//            it would only hand the next reader a number with no
+		//            consumer to explain what moved if it ever did.
 		listSettings      int
 		listSettingsEmpty int
 		// pairingMismatch counts files where the number of <ListSettings>
@@ -423,7 +430,9 @@ func TestParseFormXML_CorpusCensus(t *testing.T) {
 		t.Errorf("holder of the <ListSettings> record: got %q, want %q (%s)",
 			maxListSettingsAt, wantMaxHolder, listSettingsConvention)
 	}
-	// The corpus TOTAL is deliberately absent from every assertion above. It is
-	// the quantity that produced four values for one measurement, and it is
-	// logged nowhere either, so nobody can quote it back as a fact.
+	// The corpus TOTAL is deliberately absent from every assertion above - not
+	// because it fails to reproduce under listSettingsConvention (see the
+	// field comment above: it does), but because nothing in this package
+	// consumes it. It is logged nowhere either, so nobody can quote it back as
+	// a pinned fact for a quantity this test does not actually assert.
 }
