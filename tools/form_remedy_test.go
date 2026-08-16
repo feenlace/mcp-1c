@@ -3,11 +3,14 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/feenlace/mcp-1c/dump"
 	"github.com/feenlace/mcp-1c/onec"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // A 404 under the form heading used to render as a bare «Object not found» with
@@ -283,6 +286,77 @@ func TestFormFailure_HasNoAbsolutePathFromTheDumpLeg(t *testing.T) {
 	if !strings.Contains(fmt.Sprintf("прочитан %s/Ext/Form.xml", dumpDir), dumpDir) {
 		t.Fatal("control failed: the detector cannot see the dump path in a string built " +
 			"around it, so the assertion above proves nothing")
+	}
+}
+
+// TestNewFormStructureHandler_DumpFailureReasonReachesTheAnswer covers the
+// OTHER half of the reason-reaches-the-reader fix. The both-legs-failed path
+// already carries the classified reason into the render (lineDumpLegReason,
+// pinned by TestFormFailure_CarriesTheReasonCodeAndNotTheLowerText); this is
+// the case where the 1C leg ANSWERS and only the dump leg fails, which used to
+// fall back to the generic formDumpUnreadableNote regardless of cause.
+//
+// too_large is the sharpest case to prove it with: that reason's OWN text
+// says explicitly that permissions and dump completeness are not the cause
+// ("Права и полнота выгрузки тут ни при чём, файл на месте и доступен"),
+// which is the exact opposite of the generic note's advice to check the
+// `--dump` path and the completeness of the dump. A caller reading the
+// generic note here is sent to check something the accurate reason already
+// rules out.
+func TestNewFormStructureHandler_DumpFailureReasonReachesTheAnswer(t *testing.T) {
+	srv := formHTTPServer(t, "ФормаСписка", "Список валют")
+	dumpDir := t.TempDir()
+
+	// A real Form.xml over the 16 MiB shipped ceiling. maxFormFileBytes is
+	// unexported in package dump and this test cannot tighten it from here
+	// (unlike the dump package's own boundary tests), so the fixture is built
+	// at the shipped size instead.
+	formDir := filepath.Join(dumpDir, "Catalogs", "Валюты", "Forms", "ФормаСписка", "Ext")
+	if err := os.MkdirAll(formDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const head = `<?xml version="1.0" encoding="UTF-8"?>` + "\n" +
+		`<Form xmlns="http://v8.1c.ru/8.3/xcf/logform"><!--`
+	const tail = `--></Form>`
+	const wantSize = (16 << 20) + 1
+	pad := wantSize - len(head) - len(tail)
+	body := head + strings.Repeat("x", pad) + tail
+	if len(body) != wantSize {
+		t.Fatalf("control failed: built %d bytes, want %d", len(body), wantSize)
+	}
+	if err := os.WriteFile(filepath.Join(formDir, "Form.xml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Catalog", "Валюты", "")
+	if err != nil {
+		t.Fatalf("unexpected protocol error: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected a normal result (the 1C leg answered), got an error result: %v",
+			result.Content)
+	}
+	tc, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content is %T, not text", result.Content[0])
+	}
+	text := tc.Text
+
+	// POSITIVE CONTROL: this really is the too_large case and not some other
+	// dump failure the fixture accidentally exercises.
+	if !strings.Contains(text, dumpReasonTooLarge.code()) {
+		t.Fatalf("control failed: the answer does not carry the too_large code at all:\n%s", text)
+	}
+
+	const accurateClause = "Права и полнота выгрузки тут ни при чём"
+	if !strings.Contains(text, accurateClause) {
+		t.Errorf("the answer does not carry the accurate too_large reason "+
+			"(%q); the precise cause is not reaching the customer:\n%s", accurateClause, text)
+	}
+	const wrongAdvice = "Проверьте путь, указанный в `--dump`, и полноту выгрузки конфигурации"
+	if strings.Contains(text, wrongAdvice) {
+		t.Errorf("the answer still carries the generic path/completeness advice, which the "+
+			"too_large reason text explicitly contradicts:\n%s", text)
 	}
 }
 

@@ -152,6 +152,15 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		// the response came out reading as one 1C had taken part in even when the
 		// connection was refused.
 		dumpStructureMissing := false
+		// dumpFailureReason is the classified cause behind dumpStructureMissing,
+		// set only alongside it. It exists because the classification used to
+		// reach only slog.Warn: the CODE went to server.log, invisible at the
+		// default stdio level, while the rendered answer carried the generic
+		// formDumpUnreadableNote regardless of cause - the same generic advice
+		// that dumpLegReasonText's own too_large text explicitly contradicts
+		// ("Права и полнота выгрузки тут ни при чём, файл на месте и
+		// доступен"). See TestNewFormStructureHandler_DumpFailureReasonReachesTheAnswer.
+		var dumpFailureReason dumpLegReason
 		namedFormWithoutStructure := false
 		serviceNamedForm := form.Name != ""
 		serviceCallFailed := false
@@ -208,11 +217,12 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 				// --debug this line is written to server.log, so a message
 				// carrying the dump root would put an absolute path in a file
 				// that outlives the call.
+				dumpFailureReason = classifyDumpLegFailure(dumpErr)
 				slog.Warn("Form dump enrichment failed",
 					"object_type", input.ObjectType,
 					"object_name", input.ObjectName,
 					"form_name", input.FormName,
-					"reason", classifyDumpLegFailure(dumpErr).code())
+					"reason", dumpFailureReason.code())
 				dumpStructureMissing = true
 			}
 		} else if httpErr != nil {
@@ -239,7 +249,7 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 			text += formServiceCallFailedNote(httpErr)
 		}
 		if dumpStructureMissing {
-			text += formDumpUnreadableNote
+			text += formDumpUnreadableNote(dumpFailureReason)
 			if input.FormName != "" {
 				// The name lookup lives inside formFromDump, so a dump that
 				// yielded no form never got to honour form_name either.
@@ -285,23 +295,33 @@ const formNameNeedsDumpNote = "> Параметр `form_name` не примен�
 	"по имени в выгрузке конфигурации, откуда читаются также состав элементов, команды и обработчики.\n"
 
 // formDumpUnreadableNote is appended when --dump is configured and the 1C
-// service answered, but the dump could not supply the form structure: the
-// object has no forms in the dump, its forms directory is unreadable or is not
-// a directory, or the form file itself could not be read. The response stays a
-// normal result because the HTTP part of it is valid, but without this note the
-// caller sees a name and a title and takes that for the whole form. The WARN
-// logged alongside cannot do the job: the default stdio logger runs at
-// slog.LevelError (cmd/mcp-1c/main.go).
+// service answered, but the dump could not supply the form structure. The
+// response stays a normal result because the HTTP part of it is valid, but
+// without this note the caller sees a name and a title and takes that for the
+// whole form. The WARN logged alongside cannot do the job on its own: the
+// default stdio logger runs at slog.LevelError (cmd/mcp-1c/main.go), so under
+// that log level the code that reaches slog.Warn is not seen by anyone.
+//
+// THE REASON IS NOW IN THE TEXT, not only in the log. A prior version of this
+// note was one fixed sentence for every cause, ending in generic advice to
+// check the `--dump` path and the completeness of the dump. That is right for
+// `unreadable` and wrong for `too_large`, whose own text in dumpLegReasonText
+// says explicitly that permissions and completeness are NOT the cause; the
+// generic sentence stayed in the ANSWER even after the accurate, per-reason
+// text was built and wired into the both-legs-failed render
+// (lineDumpLegReason). This is the other call site that text belongs at. See
+// TestNewFormStructureHandler_DumpFailureReasonReachesTheAnswer.
 //
 // The wording deliberately does not claim that the elements, commands and
 // handlers sections are missing. Whether the HTTP endpoint fills them is not
 // established anywhere in this repository (see NewFormStructureHandler), and a
 // note asserting they are absent is falsified the moment the body above it
 // lists them.
-const formDumpUnreadableNote = "> Состав формы не прочитан из выгрузки: выше только то, что вернул " +
-	"HTTP-сервис 1С, поэтому элементы, команды и обработчики могут быть неполными или отсутствовать. " +
-	"Возможные причины: форм этого объекта нет в выгрузке, каталог форм недоступен или файл Form.xml " +
-	"не удалось прочитать. Проверьте путь, указанный в `--dump`, и полноту выгрузки конфигурации.\n"
+func formDumpUnreadableNote(reason dumpLegReason) string {
+	return "> Состав формы не прочитан из выгрузки: выше только то, что вернул " +
+		"HTTP-сервис 1С, поэтому элементы, команды и обработчики могут быть неполными или отсутствовать. " +
+		"Причина `" + reason.code() + "`: " + dumpLegReasonText[reason] + "\n"
+}
 
 // formNameDumpUnreadableNote extends the note above for the caller who also
 // passed form_name. The name lookup happens inside formFromDump, so a dump that
@@ -309,13 +329,12 @@ const formDumpUnreadableNote = "> Состав формы не прочитан 
 // whichever one the HTTP service picked.
 //
 // The wording states only that the dump did not yield a form under that name,
-// and leaves the reason to the note above, which already lists all three. That
-// is deliberate: exactly one of the three paths reaching this note is a failed
-// read of a form file, and the other two are not. The object having no forms in
-// the dump at all is the common case, and describing it as "the form could not
-// be read" sends the user hunting for a corrupt file that was never there.
+// and leaves the reason to the note above, which now states the one accurate
+// cause rather than listing several possibilities. The object having no forms
+// in the dump at all is the common case, and describing it as "the form could
+// not be read" sends the user hunting for a corrupt file that was never there.
 const formNameDumpUnreadableNote = "> Параметр `form_name` при этом не применялся: форма с таким именем " +
-	"ищется в выгрузке, а выгрузка её не дала по причинам выше. Форму выбрал сам HTTP-сервис 1С, " +
+	"ищется в выгрузке, а выгрузка её не дала по причине выше. Форму выбрал сам HTTP-сервис 1С, " +
 	"и выше возвращена именно она.\n"
 
 // formNameNoStructureNote is appended when --dump is configured, the caller
