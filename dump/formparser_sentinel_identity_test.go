@@ -154,6 +154,35 @@ func TestFormRefusalsCarryTheirOwnSentinel(t *testing.T) {
 			},
 		},
 		{
+			// Forms/ itself is readable and lists the entry; what fails is the
+			// PER-ENTRY Lstat into that entry's own Ext/, which needs execute
+			// permission on Ext/ to even resolve Form.xml inside it. Before the
+			// fix this was silently skipped exactly like an entry with no
+			// Ext/Form.xml at all, so the object came back with an EMPTY map and
+			// a nil error - the same shape as "this object has no forms" - which
+			// is the live instance of the class the NUL-byte guard was written
+			// against: an unreadable entry reported as an absent one.
+			name:     "a form entry whose Ext directory cannot be read, Forms/ itself readable",
+			want:     "ErrFormsDirUnreadable",
+			skipRoot: true,
+			produce: func(t *testing.T) error {
+				dumpDir := t.TempDir()
+				ext := filepath.Join(dumpDir, "Catalogs", "Валюты", "Forms", "ФормаСписка", "Ext")
+				if err := os.MkdirAll(ext, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(ext, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(ext, 0o755) })
+				if _, err := os.Stat(filepath.Join(ext, "Form.xml")); err == nil {
+					t.Skip("this filesystem or user ignores mode 000, so the entry is readable")
+				}
+				_, err := FindFormFiles(dumpDir, "Catalog", "Валюты")
+				return err
+			},
+		},
+		{
 			name: "a form path that is a directory rather than a file",
 			want: "ErrFormXMLNotRegular",
 			produce: func(t *testing.T) error {

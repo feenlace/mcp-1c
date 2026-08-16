@@ -360,7 +360,23 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 			continue
 		}
 		relXML := filepath.Join(relForms, entry.Name(), "Ext", "Form.xml")
-		if st, statErr := root.Lstat(relXML); statErr == nil && st.Mode().IsRegular() {
+		st, statErr := root.Lstat(relXML)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue // This entry has no Ext/Form.xml - not an error.
+			}
+			// A mode-000 Ext/ directory (or any other permission or containment
+			// refusal) used to fall through this same continue, indistinguishable
+			// from an entry that genuinely has no Ext/Form.xml. That collapsed an
+			// unreadable entry into an absent one: with no other form, the object
+			// came back with an empty map and a nil error, which the caller reads
+			// as "this object has no forms" rather than "this entry could not be
+			// read" - the live instance of the class the NUL-byte guard above was
+			// written against. Mirrors the readDirInRoot handling just above:
+			// never silent, but named without disclosing the path it failed on.
+			return nil, ErrFormsDirUnreadable
+		}
+		if st.Mode().IsRegular() {
 			result[entry.Name()] = filepath.Join(dumpDir, relXML)
 		}
 	}
