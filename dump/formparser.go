@@ -355,6 +355,7 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 	}
 
 	result := make(map[string]string)
+	unreadable := false
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -372,15 +373,25 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 			// came back with an empty map and a nil error, which the caller reads
 			// as "this object has no forms" rather than "this entry could not be
 			// read" - the live instance of the class the NUL-byte guard above was
-			// written against. Mirrors the readDirInRoot handling just above:
-			// never silent, but named without disclosing the path it failed on.
-			return nil, ErrFormsDirUnreadable
+			// written against.
+			//
+			// Recorded and skipped here rather than returned immediately: a
+			// SIBLING form that DID read is real, answerable data, and one
+			// unreadable entry must not erase it for a multi-form object. Only
+			// surfaced as ErrFormsDirUnreadable once every entry has been seen
+			// and none of them produced a readable form, mirroring the
+			// readDirInRoot handling just above and never silent even then.
+			unreadable = true
+			continue
 		}
 		if st.Mode().IsRegular() {
 			result[entry.Name()] = filepath.Join(dumpDir, relXML)
 		}
 	}
 
+	if len(result) == 0 && unreadable {
+		return nil, ErrFormsDirUnreadable
+	}
 	return result, nil
 }
 
