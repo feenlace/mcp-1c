@@ -360,6 +360,65 @@ func TestNewFormStructureHandler_DumpFailureReasonReachesTheAnswer(t *testing.T)
 	}
 }
 
+// TestDumpReasonTraversalRefusedNamesOnlyReachableCauses pins that the text
+// does not offer a cause the caller of THIS tool can never trigger.
+//
+// dumpReasonTraversalRefused classifies dump.ErrFormObjectNameRejected, which
+// the dump package returns for three reasons at ITS level: an empty name, a
+// NUL byte, or path-traversal characters. But NewFormStructureHandler rejects
+// an empty object_name itself, before formFromDump - the only caller of
+// dump.FindFormFiles - is ever reached, so the "empty" cause can never be why
+// a caller of this tool sees this text.
+func TestDumpReasonTraversalRefusedNamesOnlyReachableCauses(t *testing.T) {
+	text := dumpLegReasonText[dumpReasonTraversalRefused]
+
+	// "пустое" and NOT the shorter "пуст": "недопустимый" (a word this text is
+	// expected to carry, for the invalid-character cause) contains "пуст" as a
+	// bare substring, which made an earlier draft of this scan fire on the
+	// text this fix produces. Caught by running this test BEFORE trusting it.
+	const emptyClaim = "пустое"
+
+	// POSITIVE CONTROL over the scan: it fires on a sentence that does claim
+	// emptiness, so the assertion below is not a check that cannot fail.
+	planted := text + " оно пустое."
+	if !strings.Contains(planted, emptyClaim) {
+		t.Fatal("control failed: the substring scan does not find the emptiness claim in a " +
+			"sentence that carries it, so the assertion below proves nothing")
+	}
+	// NEGATIVE CONTROL: "недопустимый", which the text legitimately carries for
+	// the invalid-character cause, must NOT itself trip the scan.
+	if strings.Contains("недопустимый", emptyClaim) {
+		t.Fatal("control failed: the marker matches inside \"недопустимый\", so the assertion " +
+			"below would false-positive on the text's own invalid-character clause")
+	}
+	if strings.Contains(text, emptyClaim) {
+		t.Errorf("dumpReasonTraversalRefused's text still claims the name can be empty, "+
+			"which is unreachable through this tool: %q", text)
+	}
+
+	// GROUNDING: drive the actual handler with a configured dump directory and
+	// an empty object_name, and confirm the top-level guard fires - not the
+	// dump-leg classification this text belongs to. The table in
+	// TestToolWiring_OperationalSitesAreToolResults already pins the message
+	// for dumpDir=="", which fires the same unconditional check; this covers
+	// the dumpDir!="" configuration the traversal_refused text is about.
+	srv := formHTTPServer(t, "ФормаСписка", "Список валют")
+	dumpDir := t.TempDir()
+	writeDumpForm(t, dumpDir, "Catalogs", "Валюты", "ФормаСписка", listsOnlyFormXML)
+
+	result, err := callFormHandler(t, srv.URL, dumpDir, "Catalog", "", "")
+	got := failureText(t, result, err)
+
+	if !strings.Contains(got, "object_type and object_name are required") {
+		t.Errorf("an empty object_name with a configured dump did not hit the top-level "+
+			"guard, so the unreachability claim above does not hold:\n%s", got)
+	}
+	if strings.Contains(got, dumpReasonTraversalRefused.code()) {
+		t.Errorf("an empty object_name reached the dump-leg classification and produced "+
+			"traversal_refused, contradicting the unreachability this fix relies on:\n%s", got)
+	}
+}
+
 // remedyFormNotFoundMarker is the first line of the remedy, used to detect it
 // without pinning the whole text.
 func remedyFormNotFoundMarker() string {

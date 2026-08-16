@@ -156,10 +156,17 @@ func TestDumpLegReasonTexts_AdviseTheirOwnCause(t *testing.T) {
 		}
 	}
 
-	// The name refusal reaches this code by THREE routes and the text names all
-	// three, because a reader whose name was refused for the third reason must not
-	// be told it was one of the other two.
-	for _, want := range []string{"пустое", "разделител", "недопустимый в имени файла", "object_name"} {
+	// dump.ErrFormObjectNameRejected classifies THREE routes at the dump
+	// package's own level (empty, a NUL byte, path-traversal characters), but
+	// this text names only the TWO reachable from this tool: an empty
+	// object_name is rejected by NewFormStructureHandler itself, before
+	// formFromDump - the only caller of dump.FindFormFiles - is ever reached,
+	// so "empty" can never be why a caller of this tool sees this text. A
+	// prior version of this test asserted "пустое" here on the premise that
+	// all three routes reach this code; TestDumpReasonTraversalRefusedNamesOnlyReachableCauses
+	// in form_remedy_test.go grounds why that premise is false and asserts
+	// the negative this positive list now implies.
+	for _, want := range []string{"разделител", "недопустимый в имени файла", "object_name"} {
 		if !strings.Contains(nameRefused, want) {
 			t.Errorf("the name refusal text does not cover %q:\n%s", want, nameRefused)
 		}

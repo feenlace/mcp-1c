@@ -666,8 +666,16 @@ var dumpLegReasonCode = map[dumpLegReason]string{
 // read that failed and wrong for both of the causes that used to land beside it.
 // A file over the size ceiling is present, permitted and complete, and it is now
 // `too_large` with its own text. A name the guard refused before any filesystem
-// access is not a permission problem either, and its own text now names all
-// three ways a name gets refused rather than only two.
+// access is not a permission problem either, and its own text names the two
+// ways a name is refused that are REACHABLE FROM THIS TOOL.
+//
+// NOT THREE. dump.ErrFormObjectNameRejected classifies three causes at the
+// dump package's own level (empty, a NUL byte, path-traversal characters),
+// but NewFormStructureHandler rejects an empty object_name itself, before
+// formFromDump - the only caller of dump.FindFormFiles - is ever reached. The
+// text used to list "оно пустое" as a possible cause of THIS refusal, which
+// could never be true of anything this tool's caller can trigger. See
+// TestDumpReasonTraversalRefusedNamesOnlyReachableCauses.
 //
 // Customer-facing RU: no тире.
 var dumpLegReasonText = map[dumpLegReason]string{
@@ -679,10 +687,9 @@ var dumpLegReasonText = map[dumpLegReason]string{
 		"Проверьте, что выгрузка не содержит ссылок вместо файлов.",
 	dumpReasonUnreadable: "прочитать форму из выгрузки не удалось. Проверьте права на каталог " +
 		"выгрузки и её полноту.",
-	dumpReasonTraversalRefused: "имя объекта отклонено до обращения к файлам: оно пустое, либо " +
-		"содержит разделители пути, либо содержит символ, недопустимый в имени файла. Проверьте " +
-		"значение object_name: это имя одного объекта метаданных, без пути и без служебных " +
-		"символов.",
+	dumpReasonTraversalRefused: "имя объекта отклонено до обращения к файлам: оно содержит " +
+		"разделители пути либо символ, недопустимый в имени файла. Проверьте значение " +
+		"object_name: это имя одного объекта метаданных, без пути и без служебных символов.",
 	dumpReasonTooLarge: "файл формы в выгрузке превышает допустимый размер и поэтому не прочитан " +
 		"ни целиком, ни частично: половина Form.xml разбирается в форму, которая выглядит целой, " +
 		"и ответ по ней был бы хуже отказа. Права и полнота выгрузки тут ни при чём, файл на " +
