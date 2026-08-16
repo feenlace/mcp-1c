@@ -112,14 +112,23 @@ func TestParseFormXML_CommonFormPasswordHasAttributesButNoDynamicList(t *testing
 // EVERY namespace URI below was read out of the reference dump, not invented: a
 // synthetic fixture bound to a made-up URI still exercises "some other
 // namespace", but it stops being evidence about the namespaces this parser will
-// actually meet. Measured over all 5665 Form.xml files, counting declarations:
+// actually meet. Measured over all 5665 Form.xml files:
 //
-//	default  http://v8.1c.ru/8.3/xcf/logform         5665
-//	v8       http://v8.1c.ru/8.1/data/core           5665
-//	xsi      http://www.w3.org/2001/XMLSchema-instance 5665
-//	mxl      http://v8.1c.ru/8.2/data/spreadsheet      31
-//	d4p1     http://v8.1c.ru/8.2/data/chart            23
-//	pl       http://v8.1c.ru/8.3/data/planner           3 files carry pl:Planner
+//	default  http://v8.1c.ru/8.3/xcf/logform          declared in 5665 files
+//	v8       http://v8.1c.ru/8.1/data/core            declared in 5665 files
+//	xsi      http://www.w3.org/2001/XMLSchema-instance declared in 5665 files
+//	mxl      http://v8.1c.ru/8.2/data/spreadsheet      types an Attribute's Settings 31x
+//	d4p1     http://v8.1c.ru/8.2/data/chart            types an Attribute's Settings 23x
+//	pl       http://v8.1c.ru/8.3/data/planner          types an Attribute's Settings 3x
+//
+// The last three are DECLARED far more often than that (387, 14 and 3 files
+// respectively; pl happens to coincide): this schema reuses mxl and d4p1 for
+// spreadsheet and chart form items that have nothing to do with attributes.
+// An earlier version of this comment labelled all six rows "declarations",
+// which was true of the first three and false of the next two: 31 and 23 are
+// how often the namespace types an Attribute's Settings, not how many files
+// declare it. That is also the number that matters here, because typing an
+// Attribute's Settings is the position this fixture exercises.
 func dynamicListDoc(attributes string) string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <Form xmlns="http://v8.1c.ru/8.3/xcf/logform"

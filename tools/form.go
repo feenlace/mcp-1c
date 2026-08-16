@@ -1072,10 +1072,12 @@ func formatFormStructure(f *onec.FormStructure, lists []dump.FormDynamicList) st
 //
 // THE QUERY TEXT IS NOT PRINTED HERE. This is a structure answer, and a query
 // can run to hundreds of lines: measured over the reference dump, the longest
-// single list text is 582 lines and one form carries eleven lists between them.
-// Pasting that into every form answer would bury the structure the caller asked
-// for. The summary says which lists exist, whether each one runs a query written
-// by hand, and what it reads.
+// single list text is 582 lines and one form carries 35 lists between them.
+// An earlier version of this comment said "eleven", which this package's own
+// dump/formparser_dynamiclist_test.go already contradicted with the correct
+// figure. Pasting the query text into every form answer would bury the
+// structure the caller asked for. The summary says which lists exist,
+// whether each one runs a query written by hand, and what it reads.
 //
 // The count comes from len(lists), the same slice the rows are printed from, so
 // the number and the table cannot disagree.

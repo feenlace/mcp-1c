@@ -36,7 +36,7 @@ import (
 // It is kept in step with the declarations by
 // TestFormSentinelsAreEnumeratedWhereTheyAreClaimed, which reads the exported
 // sentinels out of formparser.go; a sentinel added there and forgotten here
-// would leave this set checking identity against five values out of seven.
+// would leave this set checking identity against six values out of seven.
 func formSentinelSet() []struct {
 	name string
 	err  error

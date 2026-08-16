@@ -13,6 +13,11 @@ import (
 
 // FormInfo holds parsed form structure from a dump XML file.
 type FormInfo struct {
+	// Name is filled by no branch of this parser, ever: a form's identity
+	// comes from the directory it was found in, not from its own XML (see
+	// tools/form.go convertDumpForm, which takes the name as a separate
+	// parameter and never reads this field). Kept because it is an exported
+	// field of a published module.
 	Name     string
 	Title    string
 	Elements []FormElementInfo
