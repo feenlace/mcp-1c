@@ -368,8 +368,12 @@ func charDataTokens(t *testing.T, doc string) (n int, first string) {
 // WHAT THE DECODER ACTUALLY DOES, measured with charDataTokens below rather than
 // assumed. An entity reference does NOT end a CharData token: Go resolves it in
 // place and the surrounding text arrives as one token, four references and all.
-// What ends a token is a NODE between the characters, and there are three of
-// them: a comment, a child element and a CDATA section.
+// What ends a token is a NODE between the characters, and there are FIVE of
+// them, not three as an earlier version of this comment said: a comment, a
+// child element, a CDATA section, a processing instruction and a directive
+// (xml.Directive, the `<!...>` shape a DOCTYPE also uses). The two missed the
+// first time round are pinned in the table below rather than only named here,
+// so the count cannot go stale silently a second time.
 //
 // THE SPLITTING FIXTURES ARE SYNTHETIC AND THE CORPUS SAYS WHY. Measured over the
 // reference dump: 991 <QueryText> elements, and the source body of 0 of them
@@ -418,6 +422,23 @@ func TestParseFormXML_QueryTextIsAccumulatedAcrossEveryCharDataToken(t *testing.
 			queryText:  "ВЫБРАТЬ 1\n<![CDATA[ГДЕ &Параметр < 5]]>\nИ 2",
 			wantTokens: 3,
 			want:       "ВЫБРАТЬ 1\nГДЕ &Параметр < 5\nИ 2",
+		},
+		{
+			// A processing instruction is dropped the same way a comment is:
+			// readCharData's switch has no case for xml.ProcInst, so it falls
+			// through and is silently skipped.
+			name:       "a processing instruction between the characters",
+			queryText:  "ВЫБРАТЬ 1\n<?pi target?>ГДЕ 2",
+			wantTokens: 2,
+			want:       "ВЫБРАТЬ 1\nГДЕ 2",
+		},
+		{
+			// A directive - xml.Directive, the `<!...>` shape a DOCTYPE also
+			// uses - is dropped the same way: no case in readCharData's switch.
+			name:       "a directive between the characters",
+			queryText:  "ВЫБРАТЬ 1\n<!FOO bar>ГДЕ 2",
+			wantTokens: 2,
+			want:       "ВЫБРАТЬ 1\nГДЕ 2",
 		},
 	}
 
