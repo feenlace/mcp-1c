@@ -121,9 +121,14 @@ func TestParseFormXML_CommonFormPasswordHasAttributesButNoDynamicList(t *testing
 //	d4p1     http://v8.1c.ru/8.2/data/chart            types an Attribute's Settings 23x
 //	pl       http://v8.1c.ru/8.3/data/planner          types an Attribute's Settings 3x
 //
-// The last three are DECLARED far more often than that (387, 14 and 3 files
-// respectively; pl happens to coincide): this schema reuses mxl and d4p1 for
-// spreadsheet and chart form items that have nothing to do with attributes.
+// Declared-in-files and types-an-Attribute's-Settings are different units
+// and do not move together. mxl: declared in 387 files against 31 typing
+// occurrences - more files than occurrences. d4p1: declared in 14 files
+// against 23 typing occurrences - FEWER files than occurrences, the opposite
+// of mxl, because those 23 occurrences land in only 10 of the 14 files.
+// Compared in the SAME unit instead, across those 14 files the d4p1 URI is
+// itself declared 65 times, not 14: one file can declare a namespace more
+// than once. pl: 3 files against 3 occurrences, coinciding.
 // An earlier version of this comment labelled all six rows "declarations",
 // which was true of the first three and false of the next two: 31 and 23 are
 // how often the namespace types an Attribute's Settings, not how many files
