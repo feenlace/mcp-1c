@@ -287,12 +287,23 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 	//
 	// It reaches this function: object_name is decoded from JSON, and JSON spells
 	// the byte as an escape, so a perfectly well formed request decodes to a Go
-	// string carrying it, which no lexical check below notices. What happened then was decided by the OS and differed by branch,
-	// measured on this tree: an object form came back as ErrFormsDirUnreadable,
-	// which the caller renders as advice to check directory permissions, and a
-	// COMMON form came back as no error at all and an empty map, which the caller
-	// renders as "this object has no forms". Both are wrong about a name that no
-	// filesystem can hold in the first place.
+	// string carrying it, which no lexical check below notices.
+	//
+	// WITHOUT THIS GUARD THE OUTCOME IS NOT DECIDED BY OBJECT FORM VERSUS COMMON
+	// FORM, it is decided by whether the kind's OWN top-level directory exists.
+	// Re-run over all four combinations of Catalogs/ and CommonForms/ presence:
+	// the two branches behave IDENTICALLY, each returning ErrFormsDirUnreadable
+	// once its own top-level directory exists (the walk reaches the component
+	// carrying the NUL byte and the OS refuses it) and "no forms" (nil, nil)
+	// when it does not (the walk fails on the missing top-level directory first
+	// and never reaches the NUL byte at all). A prior version of this comment
+	// reported an object form as ErrFormsDirUnreadable against a common form's
+	// "no error at all and an empty map" - true only of the fixture it was
+	// measured on, which built Catalogs/ and no CommonForms/. The reference
+	// dump carries 386 CommonForms directories, so on it the pre-guard
+	// common-form case would ALSO have come back ErrFormsDirUnreadable, which
+	// the caller renders as advice to check directory permissions: wrong either
+	// way, for a name no filesystem can hold in the first place.
 	//
 	// The name is NOT interpolated into the message, unlike the traversal case
 	// below: the whole point is that the value carries a control byte, and the

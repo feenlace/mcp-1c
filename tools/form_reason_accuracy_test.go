@@ -50,11 +50,20 @@ func TestObjectNameWithNulArrivesFromToolInput(t *testing.T) {
 // layer, on BOTH path shapes, because before it the two behaved differently and
 // both behaved wrongly.
 //
-// Measured before the guard, on this tree: an object form came back as
+// Measured before the guard existed, by calling the pre-guard code path
+// directly, on the fixture THIS TEST builds: an object form came back as
 // ErrFormsDirUnreadable, which the caller renders as advice about directory
 // permissions; a COMMON form came back as no error and an empty map, which the
-// caller renders as «this object has no forms in the dump». The second is the
-// worse of the two, because it is not an error at all.
+// caller renders as «this object has no forms in the dump».
+//
+// THAT ASYMMETRY IS NOT OBJECT FORM VERSUS COMMON FORM, it is an artefact of
+// this fixture, which builds Catalogs/ and never creates CommonForms/ at all:
+// the walk fails on whichever top-level directory is missing BEFORE it ever
+// reaches the NUL-carrying component, and it is CommonForms/ that is missing
+// here. On the reference dump, which carries 386 CommonForms directories, the
+// pre-guard common-form case would ALSO have come back ErrFormsDirUnreadable.
+// Neither outcome is right for a name no filesystem can hold in the first
+// place; the guard below removes both.
 func TestNulObjectNameIsRefusedOnTheNameForBothFormShapes(t *testing.T) {
 	dumpDir := t.TempDir()
 	writeDumpForm(t, dumpDir, "Catalogs", "Валюты", "ФормаСписка", listsOnlyFormXML)
