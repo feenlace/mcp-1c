@@ -67,7 +67,8 @@ func TestFormatFormStructure(t *testing.T) {
 		},
 	}
 
-	text := formatFormStructure(f)
+	// nil: this fixture declares no dynamic list.
+	text := formatFormStructure(f, nil)
 
 	for _, want := range []string{
 		"# Форма: ФормаДокумента",
@@ -103,7 +104,8 @@ func TestFormatFormStructure_NoElementEvents(t *testing.T) {
 		},
 	}
 
-	text := formatFormStructure(f)
+	// nil: this fixture declares no dynamic list.
+	text := formatFormStructure(f, nil)
 
 	if !strings.Contains(text, "## Элементы формы") {
 		t.Errorf("expected elements section, got:\n%s", text)
@@ -118,7 +120,8 @@ func TestFormatFormStructure_Empty(t *testing.T) {
 		Name: "ПустаяФорма",
 	}
 
-	text := formatFormStructure(f)
+	// nil: this fixture declares no dynamic list.
+	text := formatFormStructure(f, nil)
 
 	if !strings.Contains(text, "# Форма: ПустаяФорма") {
 		t.Errorf("expected form name in text, got:\n%s", text)

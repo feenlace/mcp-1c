@@ -20,15 +20,19 @@ func FormStructureTool() *mcp.Tool {
 		Name:  "get_form_structure",
 		Title: "Структура формы объекта",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-		Description: "Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, кнопки и обработчики событий. " +
+		Description: "Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, кнопки, обработчики событий и сводку динамических списков формы. " +
 			"Используй когда нужно понять как выглядит форма документа, справочника или обработки. " +
-			"ВАЖНО: полный состав формы читается из выгрузки, поэтому для элементов, команд и обработчиков запусти сервер с флагом --dump (выгрузка конфигурации в файлы), тогда они берутся из Form.xml. Без --dump возвращается только то, что отдал HTTP-сервис 1С, и на практике это имя и заголовок формы.",
+			"ВАЖНО: полный состав формы читается из выгрузки, поэтому для элементов, команд и обработчиков запусти сервер с флагом --dump (выгрузка конфигурации в файлы), тогда они берутся из Form.xml. Без --dump возвращается только то, что отдал HTTP-сервис 1С, и на практике это имя и заголовок формы. " +
+			"Общие формы (тип ОбщаяФорма или CommonForm) читаются только из выгрузки: HTTP-сервис 1С их не отдаёт. " +
+			"Сводка динамических списков перечисляет имя реквизита, признак произвольного запроса и основную таблицу. " +
+			"Текст запроса в неё не входит намеренно: это ответ о структуре, а один такой запрос бывает и в несколько сотен строк. " +
+			"Повторный вызов текста не добавит.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"object_type": {
 					"type": "string",
-					"description": "Тип объекта: Document, Catalog, DataProcessor, Report и т.д. Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task."
+					"description": "Тип объекта: Document, Catalog, DataProcessor, Report и т.д. Соответствие категориям из get_metadata_tree (мн. число рус. -> ед. число англ.): Справочники->Catalog, Документы->Document, Перечисления->Enum, Обработки->DataProcessor, Отчеты->Report, РегистрыСведений->InformationRegister, РегистрыНакопления->AccumulationRegister, РегистрыБухгалтерии->AccountingRegister, РегистрыРасчета->CalculationRegister, ПланыСчетов->ChartOfAccounts, ПланыВидовХарактеристик->ChartOfCharacteristicTypes, ПланыВидовРасчета->ChartOfCalculationTypes, ПланыОбмена->ExchangePlan, БизнесПроцессы->BusinessProcess, Задачи->Task. Общая форма: ОбщаяФорма или CommonForm, читается только из выгрузки, имя формы совпадает с именем объекта."
 				},
 				"object_name": {
 					"type": "string",
@@ -150,19 +154,36 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		// the response came out reading as one 1C had taken part in even when the
 		// connection was refused.
 		dumpStructureMissing := false
+		// dumpFailureReason is the classified cause behind dumpStructureMissing,
+		// set only alongside it. It exists because the classification used to
+		// reach only slog.Warn: the CODE went to server.log, invisible at the
+		// default stdio level, while the rendered answer carried the generic
+		// formDumpUnreadableNote regardless of cause - the same generic advice
+		// that dumpLegReasonText's own too_large text explicitly contradicts
+		// ("Права и полнота выгрузки тут ни при чём, файл на месте и
+		// доступен"). See TestNewFormStructureHandler_DumpFailureReasonReachesTheAnswer.
+		var dumpFailureReason dumpLegReason
 		namedFormWithoutStructure := false
 		serviceNamedForm := form.Name != ""
 		serviceCallFailed := false
 		var dumpRead dumpFormRead
+		// dynamicLists travels beside the wire type rather than on it, for the
+		// reason recorded on formFromDump: onec.FormStructure is the shape of the
+		// 1C service's JSON reply and the service has no such field.
+		var dynamicLists []dump.FormDynamicList
 		if dumpDir != "" {
-			dumpForm, readOutcome, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
+			dumpForm, readOutcome, dumpLists, dumpErr := formFromDump(dumpDir, input.ObjectType, input.ObjectName, input.FormName)
 			switch {
 			case dumpErr == nil && dumpForm != nil:
-				namedFormWithoutStructure = input.FormName != "" && !suppliesStructure(dumpForm)
-				mergeDumpIntoForm(&form, dumpForm)
+				namedFormWithoutStructure = input.FormName != "" && !suppliesStructure(dumpForm, dumpLists)
+				dynamicLists = mergeDumpIntoForm(&form, dumpForm, dumpLists)
 				dumpRead = readOutcome
 				serviceCallFailed = httpErr != nil
 			case errors.Is(dumpErr, errFormNotInDump):
+				// The named-form failure keeps its own message, which lists the
+				// object's real form names and is the whole reason it is fatal.
+				// It carries no path: joinMapKeys prints the map's KEYS, which
+				// are form names, never its values.
 				// The caller named a form this object does not have. Returning
 				// a different form's structure under that request would be a
 				// confident wrong answer, so this single dump failure is fatal
@@ -172,30 +193,53 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 				// actionable even when the 1C service is unreachable.
 				return nil, dumpErr
 			case httpErr != nil:
-				// Both sources failed - return a combined error so the user
-				// can see why we have nothing to show.
-				return nil, fmt.Errorf("fetching form structure from 1C: %w (dump fallback: %v)", httpErr, dumpErr)
+				// Both sources failed. The HTTP error is wrapped so the renderer
+				// still classifies it with errors.As and answers about the 1C
+				// side as before; the dump side arrives as a CODE from a closed
+				// set rather than as its message, because that message belongs to
+				// a lower layer and used to carry an absolute path.
+				//
+				// THIS IS THE READING END OF THAT CHANNEL. dumpErr is deliberately
+				// passed only to the classifier and never into a format verb: a
+				// %v here is what turned the wrap in formFromDump from a latent
+				// leak into a printed one. The generic default branch of
+				// renderFailure quotes the whole error chain verbatim, so anything
+				// folded into this error is read by the model.
+				// TestNewFormStructureHandler_BothLegsFailedCarriesNoAbsolutePath
+				// drives exactly that branch, with a 1C failure typed so it lands
+				// there, and TestOnecDecodeErrorFallsToTheGenericRenderBranch pins
+				// the premise so the drive cannot quietly stop reaching it.
+				return nil, withDumpLegReason(
+					fmt.Errorf("fetching form structure from 1C: %w", httpErr),
+					classifyDumpLegFailure(dumpErr))
 			default:
 				// HTTP gave us at least Name+Title but the dump enrichment
 				// did not work. Log it so users notice missing details.
+				// The CODE goes to the log, not the lower layer's message. Under
+				// --debug this line is written to server.log, so a message
+				// carrying the dump root would put an absolute path in a file
+				// that outlives the call.
+				dumpFailureReason = classifyDumpLegFailure(dumpErr)
 				slog.Warn("Form dump enrichment failed",
 					"object_type", input.ObjectType,
 					"object_name", input.ObjectName,
 					"form_name", input.FormName,
-					"error", dumpErr)
+					"reason", dumpFailureReason.code())
 				dumpStructureMissing = true
 			}
 		} else if httpErr != nil {
 			return nil, fmt.Errorf("fetching form structure from 1C: %w", httpErr)
 		}
 
-		text := formatFormStructure(&form)
+		text := formatFormStructure(&form, dynamicLists)
 		// bodyHasComposition is read off the SAME predicate formatFormStructure
-		// renders the three sections from, so a note about what is shown above
-		// cannot drift from what is actually printed. Every note below that says
+		// renders the sections from, so a note about what is shown above cannot
+		// drift from what is actually printed. Every note below that says
 		// anything about those sections is built from it rather than assuming a
-		// body exists.
-		bodyHasComposition := suppliesStructure(&form)
+		// body exists. The dynamic lists are part of that judgement because they
+		// are part of what is printed: a form whose only content is a list has a
+		// section above, and a note denying it would be refuted on screen.
+		bodyHasComposition := suppliesStructure(&form, dynamicLists)
 
 		if dumpDir == "" && input.FormName != "" {
 			text += formNameNeedsDumpNote
@@ -207,12 +251,19 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 			text += formServiceCallFailedNote(httpErr)
 		}
 		if dumpStructureMissing {
-			text += formDumpUnreadableNote
+			text += formDumpUnreadableNote(dumpFailureReason)
 			if input.FormName != "" {
 				// The name lookup lives inside formFromDump, so a dump that
 				// yielded no form never got to honour form_name either.
 				text += formNameDumpUnreadableNote
 			}
+		}
+		// Before the parse notes, because those describe the file that was read
+		// and this one says WHICH file that was. A reader who learns second that
+		// the answer is about a form they did not choose has already read the
+		// sections as if they were about the one they meant.
+		if dumpRead.autoChosenForm != "" {
+			text += formAutoChosenNote(dumpRead.autoChosenForm, dumpRead.otherForms)
 		}
 		// Two independent ifs rather than an if/else. The parser guarantees the
 		// two are mutually exclusive, so at most one fires; writing it as a chain
@@ -246,23 +297,33 @@ const formNameNeedsDumpNote = "> Параметр `form_name` не примен�
 	"по имени в выгрузке конфигурации, откуда читаются также состав элементов, команды и обработчики.\n"
 
 // formDumpUnreadableNote is appended when --dump is configured and the 1C
-// service answered, but the dump could not supply the form structure: the
-// object has no forms in the dump, its forms directory is unreadable or is not
-// a directory, or the form file itself could not be read. The response stays a
-// normal result because the HTTP part of it is valid, but without this note the
-// caller sees a name and a title and takes that for the whole form. The WARN
-// logged alongside cannot do the job: the default stdio logger runs at
-// slog.LevelError (cmd/mcp-1c/main.go).
+// service answered, but the dump could not supply the form structure. The
+// response stays a normal result because the HTTP part of it is valid, but
+// without this note the caller sees a name and a title and takes that for the
+// whole form. The WARN logged alongside cannot do the job on its own: the
+// default stdio logger runs at slog.LevelError (cmd/mcp-1c/main.go), so under
+// that log level the code that reaches slog.Warn is not seen by anyone.
+//
+// THE REASON IS NOW IN THE TEXT, not only in the log. A prior version of this
+// note was one fixed sentence for every cause, ending in generic advice to
+// check the `--dump` path and the completeness of the dump. That is right for
+// `unreadable` and wrong for `too_large`, whose own text in dumpLegReasonText
+// says explicitly that permissions and completeness are NOT the cause; the
+// generic sentence stayed in the ANSWER even after the accurate, per-reason
+// text was built and wired into the both-legs-failed render
+// (lineDumpLegReason). This is the other call site that text belongs at. See
+// TestNewFormStructureHandler_DumpFailureReasonReachesTheAnswer.
 //
 // The wording deliberately does not claim that the elements, commands and
 // handlers sections are missing. Whether the HTTP endpoint fills them is not
 // established anywhere in this repository (see NewFormStructureHandler), and a
 // note asserting they are absent is falsified the moment the body above it
 // lists them.
-const formDumpUnreadableNote = "> Состав формы не прочитан из выгрузки: выше только то, что вернул " +
-	"HTTP-сервис 1С, поэтому элементы, команды и обработчики могут быть неполными или отсутствовать. " +
-	"Возможные причины: форм этого объекта нет в выгрузке, каталог форм недоступен или файл Form.xml " +
-	"не удалось прочитать. Проверьте путь, указанный в `--dump`, и полноту выгрузки конфигурации.\n"
+func formDumpUnreadableNote(reason dumpLegReason) string {
+	return "> Состав формы не прочитан из выгрузки: выше только то, что вернул " +
+		"HTTP-сервис 1С, поэтому элементы, команды и обработчики могут быть неполными или отсутствовать. " +
+		"Причина `" + reason.code() + "`: " + dumpLegReasonText[reason] + "\n"
+}
 
 // formNameDumpUnreadableNote extends the note above for the caller who also
 // passed form_name. The name lookup happens inside formFromDump, so a dump that
@@ -270,13 +331,12 @@ const formDumpUnreadableNote = "> Состав формы не прочитан 
 // whichever one the HTTP service picked.
 //
 // The wording states only that the dump did not yield a form under that name,
-// and leaves the reason to the note above, which already lists all three. That
-// is deliberate: exactly one of the three paths reaching this note is a failed
-// read of a form file, and the other two are not. The object having no forms in
-// the dump at all is the common case, and describing it as "the form could not
-// be read" sends the user hunting for a corrupt file that was never there.
+// and leaves the reason to the note above, which now states the one accurate
+// cause rather than listing several possibilities. The object having no forms
+// in the dump at all is the common case, and describing it as "the form could
+// not be read" sends the user hunting for a corrupt file that was never there.
 const formNameDumpUnreadableNote = "> Параметр `form_name` при этом не применялся: форма с таким именем " +
-	"ищется в выгрузке, а выгрузка её не дала по причинам выше. Форму выбрал сам HTTP-сервис 1С, " +
+	"ищется в выгрузке, а выгрузка её не дала по причине выше. Форму выбрал сам HTTP-сервис 1С, " +
 	"и выше возвращена именно она.\n"
 
 // formNameNoStructureNote is appended when --dump is configured, the caller
@@ -321,6 +381,67 @@ func formNameNoStructureNote(serviceNamedForm bool) string {
 			"своего имени формы HTTP-сервис 1С не вернул. "
 	}
 	return note + "Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
+}
+
+// maxOtherFormNames caps how many of the object's remaining form names the note
+// below prints.
+//
+// A CAP IS REQUIRED AND THE CORPUS SAYS SO. Measured on the reference dump, over
+// the object kinds this tool can address: one object carries 243 forms, and 53
+// objects of 1537 carry more than ten. Printing every name would put a
+// multi-kilobyte line of identifiers into an answer whose subject is one form.
+// The count of the remainder is stated instead, so nothing is hidden, only
+// unlisted.
+const maxOtherFormNames = 10
+
+// formAutoChosenNote is appended when the caller named no form and the object
+// has more than one in the dump, so the dump leg picked one by itself: the first
+// in order.
+//
+// THE PICK IS OLDER THAN THIS NOTE AND SO IS THE SILENCE; WHAT CHANGED IS THE
+// COST. A form the caller did not ask for used to mean the element list might
+// belong to another form, which a reader takes as incompleteness. Now the answer
+// also carries a dynamic-list section, and a section that is ABSENT reads as a
+// finding: this form declares no dynamic list. That reading is wrong twice over
+// when the form was chosen by this code and another form of the same object
+// carries lists. Measured over the object kinds this tool can address: 542
+// objects of 1537 are in exactly that state and 874 lists sit in the forms not
+// looked at.
+//
+// THE FIGURES DO NOT GO INTO THE ANSWER. They are the reason for the note, not
+// content for the caller: a number about a reference dump says nothing about the
+// dump in front of this server, and quoting it would invite the model to reason
+// from it.
+//
+// THE NAMES ARE THE DUMP'S AND ARE CONTAINED AS SUCH. They are directory names
+// read off the filesystem, so they go through inlineCode, which computes its
+// delimiter from the payload's own longest backtick run and neutralises the runes
+// a markdown renderer treats as a mandatory line break. A blockquote is a LINE
+// construct: one break in a name would end the quote and turn the rest into free
+// markdown in an answer the model reads as this server's own words.
+//
+// Customer-facing RU: no тире.
+func formAutoChosenNote(chosen string, others []string) string {
+	shown := others
+	extra := 0
+	if len(shown) > maxOtherFormNames {
+		extra = len(shown) - maxOtherFormNames
+		shown = shown[:maxOtherFormNames]
+	}
+	quoted := make([]string, 0, len(shown))
+	for _, name := range shown {
+		quoted = append(quoted, inlineCode(name))
+	}
+
+	note := "> Имя формы не задано, поэтому из выгрузки прочитана первая по порядку: " +
+		inlineCode(chosen) + ". У объекта в выгрузке есть и другие формы: " +
+		strings.Join(quoted, ", ")
+	if extra > 0 {
+		note += fmt.Sprintf(" и ещё %d", extra)
+	}
+	return note + ". Их состав и динамические списки в ответ выше не попали, " +
+		"поэтому отсутствие раздела не означает, что списков нет у объекта. " +
+		"Чтобы получить любую из них, укажите её имя в параметре `form_name`.\n"
 }
 
 // formServiceCallFailedNote is appended when the dump answered and the call to
@@ -504,6 +625,139 @@ func formNoFormRootNote(bodyHasComposition bool) string {
 		"Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
 }
 
+// dumpLegReason names WHY the dump leg could not answer.
+//
+// IT IS A CLOSED SET AND THAT IS THE POINT. The alternative, forwarding the
+// lower layer's message, is what this replaces: those messages are built by the
+// dump package and one of them used to be wrapped around the absolute path it
+// failed on, so the field that told the caller what went wrong was also the
+// field that disclosed where the server keeps its files. A code from a fixed
+// vocabulary carries the first without the second.
+//
+// An int rather than a string so a reason cannot be invented at a call site.
+// dumpLegReasonText below is the whole set; a value outside it has no code and
+// no text, which is what the test asserts instead of an exhaustive switch that
+// Go cannot check.
+type dumpLegReason int
+
+const (
+	dumpReasonUnknownType dumpLegReason = iota
+	dumpReasonNotFound
+	dumpReasonNotRegular
+	dumpReasonUnreadable
+	dumpReasonTraversalRefused
+	dumpReasonTooLarge
+)
+
+// dumpLegReasonCode is the machine-readable half of the vocabulary.
+var dumpLegReasonCode = map[dumpLegReason]string{
+	dumpReasonUnknownType:      "unknown_type",
+	dumpReasonNotFound:         "not_found",
+	dumpReasonNotRegular:       "not_regular",
+	dumpReasonUnreadable:       "unreadable",
+	dumpReasonTraversalRefused: "traversal_refused",
+	dumpReasonTooLarge:         "too_large",
+}
+
+// dumpLegReasonText is the reader's half, and it says what to do about each
+// cause rather than restating the code in Russian.
+//
+// A REMEDY THAT SENDS THE READER TO THE WRONG PLACE IS WORSE THAN NO REMEDY, and
+// two causes used to be sent there. The `unreadable` text advises checking
+// directory permissions and the completeness of the dump; that is right for a
+// read that failed and wrong for both of the causes that used to land beside it.
+// A file over the size ceiling is present, permitted and complete, and it is now
+// `too_large` with its own text. A name the guard refused before any filesystem
+// access is not a permission problem either, and its own text names the two
+// ways a name is refused that are REACHABLE FROM THIS TOOL.
+//
+// NOT THREE. dump.ErrFormObjectNameRejected classifies three causes at the
+// dump package's own level (empty, a NUL byte, path-traversal characters),
+// but NewFormStructureHandler rejects an empty object_name itself, before
+// formFromDump - the only caller of dump.FindFormFiles - is ever reached. The
+// text used to list "оно пустое" as a possible cause of THIS refusal, which
+// could never be true of anything this tool's caller can trigger. See
+// TestDumpReasonTraversalRefusedNamesOnlyReachableCauses.
+//
+// Customer-facing RU: no тире.
+var dumpLegReasonText = map[dumpLegReason]string{
+	dumpReasonUnknownType: "вид объекта из выгрузки не читается. Проверьте значение object_type: " +
+		"формы читаются для прикладных видов и для общей формы.",
+	dumpReasonNotFound: "формы этого объекта в выгрузке нет. Проверьте имя объекта и полноту " +
+		"выгрузки конфигурации, указанной в `--dump`.",
+	dumpReasonNotRegular: "файл формы в выгрузке не является обычным файлом и прочитан не был. " +
+		"Проверьте, что выгрузка не содержит ссылок вместо файлов.",
+	dumpReasonUnreadable: "прочитать форму из выгрузки не удалось. Проверьте права на каталог " +
+		"выгрузки и её полноту.",
+	dumpReasonTraversalRefused: "имя объекта отклонено до обращения к файлам: оно содержит " +
+		"разделители пути либо символ, недопустимый в имени файла. Проверьте значение " +
+		"object_name: это имя одного объекта метаданных, без пути и без служебных символов.",
+	dumpReasonTooLarge: "файл формы в выгрузке превышает допустимый размер и поэтому не прочитан " +
+		"ни целиком, ни частично: половина Form.xml разбирается в форму, которая выглядит целой, " +
+		"и ответ по ней был бы хуже отказа. Права и полнота выгрузки тут ни при чём, файл на " +
+		"месте и доступен. Проверьте сам файл: у обычной формы такого размера не бывает, так " +
+		"выглядит либо повреждённая выгрузка, либо посторонний файл на месте формы.",
+}
+
+// code returns the closed-vocabulary code, empty for a value outside the set.
+func (r dumpLegReason) code() string { return dumpLegReasonCode[r] }
+
+// dumpLegFailure carries a classified dump-leg cause alongside another error.
+//
+// It wraps rather than replaces, so the HTTP side of a both-legs-failed answer
+// keeps its own typed error and reaches renderStatusError exactly as before.
+type dumpLegFailure struct {
+	err    error
+	reason dumpLegReason
+}
+
+func (e *dumpLegFailure) Error() string { return e.err.Error() }
+func (e *dumpLegFailure) Unwrap() error { return e.err }
+
+// withDumpLegReason attaches a classified dump-leg cause to err.
+func withDumpLegReason(err error, reason dumpLegReason) error {
+	return &dumpLegFailure{err: err, reason: reason}
+}
+
+// classifyDumpLegFailure maps a dump-leg error onto the closed vocabulary.
+//
+// CLASSIFIED WITH errors.Is AND NEVER BY MESSAGE, which is why the dump package
+// exports these sentinels at all. Matching text here would reintroduce the
+// coupling the codes exist to remove, and would break silently the first time a
+// message is reworded.
+//
+// The default is dumpReasonUnreadable rather than an "unknown" value: every
+// remaining cause is a failure to read the form, the caller's next step is the
+// same, and an "unknown" code tells nobody anything while making the set open in
+// practice.
+//
+// THE OVER-SIZE REFUSAL USED TO FALL INTO THAT DEFAULT, on the ground that «from
+// the caller's side a file too large to read is a file that was not read». The
+// ground does not hold, and the remedy is where it shows: `unreadable` sends the
+// reader to check permissions on the dump directory and the completeness of the
+// dump, and an over-size file is present, permitted and complete. It gets its
+// own code and its own text.
+func classifyDumpLegFailure(err error) dumpLegReason {
+	switch {
+	case errors.Is(err, dump.ErrFormUnknownObjectType):
+		return dumpReasonUnknownType
+	case errors.Is(err, dump.ErrFormObjectNameRejected):
+		return dumpReasonTraversalRefused
+	case errors.Is(err, dump.ErrFormXMLNotRegular):
+		return dumpReasonNotRegular
+	case errors.Is(err, dump.ErrFormXMLTooLarge):
+		return dumpReasonTooLarge
+	case errors.Is(err, errFormNotInDump), errors.Is(err, errNoFormsInDump):
+		return dumpReasonNotFound
+	default:
+		return dumpReasonUnreadable
+	}
+}
+
+// errNoFormsInDump marks the dump having no forms for the object at all, as
+// distinct from having them and not the one that was named.
+var errNoFormsInDump = errors.New("no forms for this object in the dump")
+
 // errFormNotInDump marks the one formFromDump failure that belongs to the
 // caller rather than to the dump: they named a form the object does not have.
 // It is matched with errors.Is so that the remaining failures (no forms at all,
@@ -526,49 +780,75 @@ func (e *formNotInDumpError) Error() string {
 
 func (e *formNotInDumpError) Unwrap() error { return errFormNotInDump }
 
-// dumpFormRead reports how the dump's Form.xml was read, for the response notes.
-// Both fields describe a parse that SUCCEEDED, which is the whole point: these
-// are the outcomes that never reach an error and would otherwise be invisible.
+// dumpFormRead reports WHICH form the dump leg read and HOW it read it, for the
+// response notes. Every field describes a read that SUCCEEDED, which is the whole
+// point: these are the outcomes that never reach an error and would otherwise be
+// invisible.
 //
-// They are mutually exclusive at the source (dump.FormInfo sets NoFormRoot only
-// on a clean end of document), so at most one is ever true. Grouped in a struct
-// rather than returned as two bare bools so a call site cannot silently swap
-// them, which for two adjacent same-typed values is a matter of time.
+// Grouped in a struct rather than returned as bare values so a call site cannot
+// silently swap them, which for adjacent same-typed values is a matter of time.
 type dumpFormRead struct {
 	// partial: the decoder stopped on a syntax error before the end of the file.
 	partial bool
 	// noFormRoot: the file was read whole and contained no <Form> at all.
 	noFormRoot bool
+
+	// The two flags above are mutually exclusive at the source (dump.FormInfo
+	// sets NoFormRoot only on a clean end of document), so at most one is true.
+
+	// autoChosenForm is the form the dump leg picked BY ITSELF, set only when the
+	// caller named none and the object has more than one form. otherForms lists
+	// the rest, in the same order the pick was made from, and is never empty when
+	// autoChosenForm is set.
+	//
+	// WHY THIS IS RECORDED AT ALL, when the picking is older than this file's
+	// dynamic lists: the pick used to be invisible and harmless, and it is now
+	// invisible and misleading. A form the caller did not ask for used to mean a
+	// possibly incomplete element list, which reads as incomplete. Since the
+	// answer gained a dynamic-list section, the ABSENCE of that section reads as
+	// a positive claim that the form declares no dynamic list, and that claim is
+	// about a form nobody chose.
+	//
+	// The scale is measured on the reference dump, over the object kinds this
+	// tool can address: 542 objects of 1537 have a first-by-order form with zero
+	// dynamic lists while another form of the same object carries some, and 874
+	// lists sit in those other forms. The figures do not go into the answer;
+	// they are why the note exists.
+	autoChosenForm string
+	otherForms     []string
 }
 
 // formFromDump loads form structure from a DumpConfigToFiles XML file.
 //
-// The middle return value reports how the Form.xml was read: parsed only up to a
-// syntax error, or read to the end but holding no form. It is a second return
-// value and not a field on onec.FormStructure because that type is the shape of
-// the 1C HTTP service's JSON reply, shared with the HTTP path, and a fact about
-// how a local file was read does not belong on the wire type. It is not folded
-// into the error either: an error here would be classified as a dump failure by
-// the caller's switch and would turn a dump that parses well enough today into a
-// degraded answer, which is exactly the tolerance this change must preserve.
-// The signature is unexported with a single call site, so widening it ripples
-// nowhere.
-func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormStructure, dumpFormRead, error) {
+// The second return value reports how the Form.xml was read: parsed only up to a
+// syntax error, or read to the end but holding no form. The third carries the
+// form's dynamic lists. NEITHER is a field on onec.FormStructure, and for the
+// same reason: that type is the shape of the 1C HTTP service's JSON reply,
+// shared with the HTTP path, and neither a fact about how a local file was read
+// nor a section only the dump can supply belongs on the wire type. The read
+// outcome is not folded into the error either: an error here would be classified
+// as a dump failure by the caller's switch and would turn a dump that parses
+// well enough today into a degraded answer, which is exactly the tolerance that
+// must be preserved. The signature is unexported with a single call site, so
+// widening it ripples nowhere.
+func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormStructure, dumpFormRead, []dump.FormDynamicList, error) {
 	formFiles, err := dump.FindFormFiles(dumpDir, objectType, objectName)
 	if err != nil {
-		return nil, dumpFormRead{}, fmt.Errorf("finding form files: %w", err)
+		return nil, dumpFormRead{}, nil, fmt.Errorf("finding form files: %w", err)
 	}
 	if len(formFiles) == 0 {
-		return nil, dumpFormRead{}, fmt.Errorf("no forms found in dump for %s.%s", objectType, objectName)
+		return nil, dumpFormRead{}, nil, fmt.Errorf("%w: %s.%s", errNoFormsInDump, objectType, objectName)
 	}
 
 	// Select the requested form or pick the first one.
 	var selectedPath string
 	var selectedName string
+	var autoChosen string
+	var otherForms []string
 	if formName != "" {
 		path, ok := formFiles[formName]
 		if !ok {
-			return nil, dumpFormRead{}, &formNotInDumpError{requested: formName, available: joinMapKeys(formFiles)}
+			return nil, dumpFormRead{}, nil, &formNotInDumpError{requested: formName, available: joinMapKeys(formFiles)}
 		}
 		selectedPath = path
 		selectedName = formName
@@ -581,17 +861,46 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 		slices.Sort(keys)
 		selectedName = keys[0]
 		selectedPath = formFiles[selectedName]
+		// Recorded only when there WAS a choice. One form is not a pick, and a
+		// note saying which of one form was taken is noise on every object that
+		// has exactly one. Measured: 372 of the 1537 objects with forms have
+		// exactly one, so this stays quiet for those and speaks for the rest.
+		if len(keys) > 1 {
+			autoChosen = selectedName
+			otherForms = keys[1:]
+		}
 	}
 
 	parsed, err := dump.ParseFormXML(selectedPath)
 	if err != nil {
-		return nil, dumpFormRead{}, fmt.Errorf("parsing form XML %q: %w", selectedPath, err)
+		// THE PATH IS NOT IN THE MESSAGE, and its removal is the point of this
+		// line rather than tidying. selectedPath is an absolute path into the
+		// operator's filesystem: it names the dump root, and through it the OS
+		// account the server runs under. It used to be quoted here, and from
+		// here it travelled into the both-legs-failed error the caller reads and
+		// into the WARN written to server.log under --debug. What the caller
+		// needs is the CLASS of the failure, which classifyDumpLegFailure reads
+		// off the sentinel underneath.
+		//
+		// PINNED HERE, not only where the answer is rendered, and the distinction
+		// is what the first attempt got wrong. Putting the %q back is invisible to
+		// every test about a rendered answer, because on its own it fills an error
+		// nothing prints: the path only becomes readable when the both-legs-failed
+		// branch also forwards this error's TEXT. The two sites are one defect and
+		// they are pinned at both ends, in tools/form_path_leak_test.go:
+		// TestFormFromDump_ParseFailureCarriesNoPath fires on this line alone, and
+		// TestNewFormStructureHandler_BothLegsFailedCarriesNoAbsolutePath fires on
+		// the pair. Restoring only the %q reddens the first and leaves the second
+		// green, which is exactly the state that shipped before they existed.
+		return nil, dumpFormRead{}, nil, fmt.Errorf("parsing form XML: %w", err)
 	}
 
 	return convertDumpForm(selectedName, parsed), dumpFormRead{
-		partial:    parsed.ParseIncomplete,
-		noFormRoot: parsed.NoFormRoot,
-	}, nil
+		partial:        parsed.ParseIncomplete,
+		noFormRoot:     parsed.NoFormRoot,
+		autoChosenForm: autoChosen,
+		otherForms:     otherForms,
+	}, parsed.DynamicLists, nil
 }
 
 // convertDumpForm converts dump.FormInfo to onec.FormStructure.
@@ -670,12 +979,21 @@ func convertDumpForm(formName string, info *dump.FormInfo) *onec.FormStructure {
 // When the dump supplied no structure at all, nothing in the body belongs to
 // the dump form, so Name and Title stay as HTTP returned them and the dump only
 // fills in what HTTP left empty.
-func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure) {
-	dumpSuppliedStructure := suppliesStructure(dumpForm)
-
-	if dumpSuppliedStructure && dumpForm.Name != "" && dumpForm.Name != form.Name {
+//
+// THE DYNAMIC LISTS DO NOT DECIDE THE TAKEOVER, AND THAT IS DELIBERATE. They are
+// merged, and they are returned, but the wholesale replace above stays keyed on
+// the three collections that travel with the identity. The reason is the one the
+// paragraphs above give: Title, Commands and Handlers describe the HTTP-named
+// form, so once the body belongs to another form the HTTP payload is foreign.
+// A dynamic list is not on the wire type and the service never sends one, so a
+// dump form supplying ONLY lists makes nothing above it foreign; letting it
+// trigger the replace would discard a real 1C Title, and its elements, in
+// exchange for a summary table. The lists themselves come from the dump either
+// way, which is why they can be merged on their own line without a branch.
+func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure, dumpLists []dump.FormDynamicList) []dump.FormDynamicList {
+	if suppliesNameBoundStructure(dumpForm) && dumpForm.Name != "" && dumpForm.Name != form.Name {
 		*form = *dumpForm
-		return
+		return dumpLists
 	}
 
 	if form.Name == "" {
@@ -693,20 +1011,33 @@ func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure) {
 	if len(dumpForm.Handlers) > 0 {
 		form.Handlers = dumpForm.Handlers
 	}
+	return dumpLists
 }
 
-// suppliesStructure reports whether a form carries any composition at all.
+// suppliesStructure reports whether a form carries any composition at all, which
+// now means any of the FOUR sections the renderer can print.
 //
-// It is ONE function with two call sites on purpose. mergeDumpIntoForm decides
-// from it whether the dump's form takes over the response, and the handler
-// decides from it whether to tell a form_name caller that the dump contributed
-// nothing. Written twice, the two could drift apart, and the note would then
-// describe a merge that did something else.
-func suppliesStructure(f *onec.FormStructure) bool {
+// It is the predicate the response notes are built from, and it is read off the
+// same facts formatFormStructure renders from, so a note about what is shown
+// above cannot drift from what is actually printed. A form whose only content is
+// a dynamic list supplies composition: there is a section on screen.
+func suppliesStructure(f *onec.FormStructure, lists []dump.FormDynamicList) bool {
+	return suppliesNameBoundStructure(f) || len(lists) > 0
+}
+
+// suppliesNameBoundStructure reports whether a form carries any of the three
+// collections that travel with its NAME.
+//
+// It is the narrower question, and the two are separated rather than duplicated:
+// there is one definition of the three-collection test and one caller of each
+// question, so they cannot drift. mergeDumpIntoForm asks this one, because it is
+// deciding whether the HTTP payload has become foreign, and only these three
+// describe the HTTP-named form. Everything else asks suppliesStructure.
+func suppliesNameBoundStructure(f *onec.FormStructure) bool {
 	return len(f.Elements) > 0 || len(f.Commands) > 0 || len(f.Handlers) > 0
 }
 
-func formatFormStructure(f *onec.FormStructure) string {
+func formatFormStructure(f *onec.FormStructure, lists []dump.FormDynamicList) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "# Форма: %s\n", f.Name)
@@ -756,7 +1087,73 @@ func formatFormStructure(f *onec.FormStructure) string {
 		b.WriteByte('\n')
 	}
 
+	writeDynamicListSection(&b, lists)
+
 	return b.String()
+}
+
+// writeDynamicListSection prints the form's dynamic lists as a summary.
+//
+// It comes last because it is the section the other three do not imply: a
+// dynamic list is an ATTRIBUTE of the form, so a form can declare one and show
+// no element for it, and a form can be full of elements and declare none.
+//
+// THE QUERY TEXT IS NOT PRINTED HERE. This is a structure answer, and a query
+// can run to hundreds of lines: measured over the reference dump, the longest
+// single list text is 582 lines and one form carries 35 lists between them.
+// An earlier version of this comment said "eleven", which this package's own
+// dump/formparser_dynamiclist_test.go already contradicted with the correct
+// figure. Pasting the query text into every form answer would bury the
+// structure the caller asked for. The summary says which lists exist,
+// whether each one runs a query written by hand, and what it reads.
+//
+// The count comes from len(lists), the same slice the rows are printed from, so
+// the number and the table cannot disagree.
+//
+// Cells go through inlineCode, which is the package's EXISTING containment: it
+// computes its delimiter from the longest backtick run in the payload and
+// neutralises the runes a markdown renderer treats as a mandatory line break. A
+// second implementation of that count is how one copy keeps a defect the other
+// one lost. escapePipe is applied on top because a pipe closes a table cell even
+// inside a code span, and that is the table's rule rather than the span's.
+//
+// Honest scope of the hostility: this is prevention, not a response to anything
+// seen. Measured across all 1918 dynamic lists in the reference dump, 0 of 1918
+// attribute names and 0 of 1764 non-empty main tables contain a line break, a
+// backtick, a pipe, a hash, a less-than or a greater-than. The values are 1C
+// identifiers and table names, and the fixtures exercising this are synthetic
+// because the corpus has no specimen to draw on.
+func writeDynamicListSection(b *strings.Builder, lists []dump.FormDynamicList) {
+	if len(lists) == 0 {
+		return
+	}
+
+	b.WriteString("## Динамические списки формы\n\n")
+	fmt.Fprintf(b, "Списков: %d. Текст запроса в этом разделе не приводится.\n\n", len(lists))
+	b.WriteString("| Имя реквизита | Произвольный запрос | Основная таблица |\n")
+	b.WriteString("|---------------|---------------------|------------------|\n")
+	for _, l := range lists {
+		fmt.Fprintf(b, "| %s | %s | %s |\n",
+			escapePipe(inlineCode(l.Name)),
+			manualQueryLabel(l.ManualQuery),
+			escapePipe(inlineCode(l.MainTable)))
+	}
+	b.WriteByte('\n')
+}
+
+// manualQueryLabel renders the ManualQuery flag for a reader rather than for a
+// parser.
+//
+// The distinction it carries is not cosmetic: with the flag off the platform
+// composes the query itself from the main table, so a text stored in the file is
+// left over from an earlier edit and is not what runs. Measured over the
+// reference dump, 5 lists of 1918 hold a complete query while the flag is off,
+// which is exactly the trap a bare listing would walk a reader into.
+func manualQueryLabel(manual bool) string {
+	if manual {
+		return "да"
+	}
+	return "нет"
 }
 
 // escapePipe escapes pipe characters so they do not break markdown tables.

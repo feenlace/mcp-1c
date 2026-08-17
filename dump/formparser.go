@@ -13,6 +13,11 @@ import (
 
 // FormInfo holds parsed form structure from a dump XML file.
 type FormInfo struct {
+	// Name is filled by no branch of this parser, ever: a form's identity
+	// comes from the directory it was found in, not from its own XML (see
+	// tools/form.go convertDumpForm, which takes the name as a separate
+	// parameter and never reads this field). Kept because it is an exported
+	// field of a published module.
 	Name     string
 	Title    string
 	Elements []FormElementInfo
@@ -42,9 +47,18 @@ type FormInfo struct {
 	// NoFormRoot reports that the decoder consumed the whole document to its
 	// normal end without the parser ever entering a <Form> element, so the file
 	// was read in full and simply does not describe a form. Everything this
-	// parser records (Title, Elements, Commands, Handlers) is only ever read
-	// inside <Form>, so when this is set all four are guaranteed empty, and a
-	// caller may say so without checking them.
+	// parser records is only ever read inside <Form>, so when this is set every
+	// recorded field is guaranteed empty and a caller may say so without
+	// checking them.
+	//
+	// THE FIELDS ARE NOT COUNTED HERE, and the reason is that they were. This
+	// sentence used to name Title, Elements, Commands and Handlers and conclude
+	// «all four are guaranteed empty»; DynamicLists then joined them, read in the
+	// same place under the same condition, and the enumeration went stale without
+	// a single test noticing, because the claim it made about the four was still
+	// true. The property is derived from the TYPE instead, in
+	// TestParseFormXML_NoFormRootLeavesEveryRecordedFieldEmpty, which walks
+	// FormInfo by reflection and covers a field nobody has added yet.
 	//
 	// It closes the class ParseIncomplete cannot see: an empty Form.xml, a file
 	// of plain text, whitespace or an XML comment alone, and a well formed
@@ -64,6 +78,70 @@ type FormInfo struct {
 	// still entered by the loop below (measured), and such a file is therefore
 	// not flagged.
 	NoFormRoot bool
+
+	// DynamicLists holds the form's dynamic-list attributes, in the order the
+	// file declares them. A dynamic list is not a form ELEMENT and is not in
+	// Elements above: it is an attribute of the form, declared in <Attributes>,
+	// and a table on the screen merely displays it.
+	//
+	// EMPTY IS THE ORDINARY ANSWER. Measured on a 2.9 GB reference dump: 1918
+	// lists live in 1628 of 5665 Form.xml files, so more than two thirds of all
+	// forms have none, and an empty slice here says the form declares no dynamic
+	// list rather than that the section went unread.
+	DynamicLists []FormDynamicList
+}
+
+// FormDynamicList describes one dynamic list declared as a form attribute.
+//
+// The four fields are everything the section is read for and everything that is
+// kept. The <Settings> block also carries a <ListSettings> child, and none of it
+// is recorded: it is the designer's saved filters and ordering, it says nothing
+// about what the list reads, and carrying it would put an unbounded stretch of
+// foreign markup into every answer about a form.
+//
+// What is measured about it, WITH THE CONVENTION IT IS MEASURED UNDER, because
+// the figure means nothing without one and stating it without one is what went
+// wrong here before. The child is present on 1918 lists of 1918, and the largest
+// single block is 13681 BYTES OF THE FILE'S OWN TEXT, counted from the `<` of
+// <ListSettings> through the `>` of its closing tag, the tags included. It
+// belongs to DataProcessors/ДокументооборотСКонтролирующимиОрганами, form
+// Документ_ЗаявлениеАбонентаСпецоператораСвязи_ФормаСписка, attribute Список.
+//
+// ANOTHER CONVENTION IS ANOTHER NUMBER AND BOTH ARE RIGHT. The same block
+// measured BETWEEN the tags instead of across them is 13652 bytes, and
+// re-serialised through an XML writer it is smaller again and moves with the
+// writer, which is why no re-serialised figure is quoted here at all: it is a
+// fact about a writer, not about the dump.
+//
+// WHAT DOES NOT REPRODUCE IS THE CORPUS TOTAL, and it is the total that was
+// mistaken for the size. Four runs produced four sums for it while the maximum
+// and the holder of the record came out identical every time, so the total is
+// stated nowhere and pinned nowhere. Presence, the maximum and the holder are
+// pinned, in TestParseFormXML_CorpusCensus, which prints the convention in the
+// same line as the numbers it refuses on.
+type FormDynamicList struct {
+	// Name is the "name" attribute of the owning <Attribute>, which is the
+	// identifier the form's own module uses (Список.ТекстЗапроса and so on).
+	Name string
+
+	// ManualQuery is the <ManualQuery> flag as the file records it. It decides
+	// whether QueryText below is the query the platform runs: with it false the
+	// platform composes the query from the main table and the text, if any, is
+	// left over from an earlier edit. Measured: 986 lists carry true with a
+	// text, 5 carry false WITH a text, 927 carry false without one, and the
+	// element itself is absent in 0 of 1918.
+	ManualQuery bool
+
+	// MainTable is the <MainTable> value, empty when the element is absent.
+	// Empty unambiguously means absent: measured over the whole dump, the
+	// element is missing on 154 of 1918 lists and its value is the empty string
+	// on 0 of 1918.
+	MainTable string
+
+	// QueryText is the static query text as written in the file, empty when the
+	// element is absent. IT IS NOT A PROMISE ABOUT WHAT THE BASE RUNS: a form
+	// module may overwrite it at run time, and this reader looks at one file.
+	QueryText string
 }
 
 // FormElementInfo represents a parsed form element.
@@ -94,18 +172,89 @@ type FormHandlerInfo struct {
 // objectTypeToDumpDir is defined in metadata_types.go and maps 1C object type
 // names (as used in the tool input) to dump directory names.
 
-// errFormsDirUnreadable is the path-free RU refusal returned when an object's
+// commonFormsDumpDir is the dump directory holding common forms.
+//
+// It is a separate constant and NOT an entry in metadataTypes, because a common
+// form does not have the object-form path shape. See findCommonFormFile.
+const commonFormsDumpDir = "CommonForms"
+
+// ErrFormsDirUnreadable is the path-free RU refusal returned when an object's
 // Forms directory cannot be read through the dump root: a symlink that escapes
 // the dump at any path component (refused by os.Root), a non-directory standing
 // in for a directory position, or a permission error. It replaces a wrapped OS
 // error because that error carries the absolute path it failed on, which must
 // never reach the caller. Customer-facing RU: no тире, no absolute path.
-var errFormsDirUnreadable = errors.New("каталог форм объекта недоступен")
+var ErrFormsDirUnreadable = errors.New("каталог форм объекта недоступен")
 
-// errFormXMLNotRegular is the path-free RU refusal returned when a form file is
+// ErrFormXMLNotRegular is the path-free RU refusal returned when a form file is
 // not a plain regular file: a symlink, FIFO, socket, device or directory.
 // Customer-facing RU: no тире, no absolute path.
-var errFormXMLNotRegular = errors.New("файл формы имеет неверный тип")
+var ErrFormXMLNotRegular = errors.New("файл формы имеет неверный тип")
+
+// ErrFormObjectNameRejected classifies every refusal of objectName made on the
+// name alone, before the filesystem is touched at all.
+//
+// It is a sentinel so callers and tests can tell this refusal from the others
+// with errors.Is instead of reading the message. That distinction is not
+// cosmetic: an unrecognised object type is ALSO an error, so a test asserting
+// only that something came back was green before the lookup existed.
+var ErrFormObjectNameRejected = errors.New("object name rejected before any filesystem access")
+
+// ErrFormUnknownObjectType classifies a lookup for a kind this package does not
+// serve forms for.
+//
+// EVERY ErrForm SENTINEL IN THIS FILE IS EXPORTED SO THE CALLER CAN CLASSIFY
+// WITHOUT READING A MESSAGE. That is not a convenience: the only other way to
+// tell these apart from outside the package is to match the text, and the text
+// is precisely what may not be forwarded, because one of these failures used to
+// be reported wrapped around the absolute path it happened on. A caller that has
+// to choose between leaking the message and guessing the cause will leak the
+// message.
+//
+// THEY ARE ENUMERATED AND NOT COUNTED: ErrFormsDirUnreadable,
+// ErrFormXMLNotRegular, ErrFormObjectNameRejected, ErrFormUnknownObjectType,
+// ErrFormXMLUnreadable, ErrFormXMLTooLarge. This paragraph used to open with
+// «THE FOUR SENTINELS ABOVE AND THIS ONE», which was wrong in both halves at
+// once: three stood above it, and the file held six. A numeral over a set that
+// grows is a claim nobody re-reads, so the membership is derived rather than
+// written down, in TestFormSentinelsAreEnumeratedWhereTheyAreClaimed, which
+// reads the declarations back out of this file and fails on any this list does
+// not name.
+var ErrFormUnknownObjectType = errors.New("unknown object type for dump lookup")
+
+// ErrFormXMLUnreadable is the path-free RU refusal returned when the form file
+// cannot be opened or read at all: it is missing, permission was refused, or the
+// read failed part way.
+//
+// IT REPLACES A WRAPPED OS ERROR FOR THE REASON ErrFormsDirUnreadable ALREADY
+// RECORDS: that error carries the absolute path it failed on, and the path names
+// the dump root and through it the OS account the server runs under. This end of
+// the same channel stayed open after the directory end was closed, so an
+// unreadable Form.xml still reported the operator's layout into an answer a model
+// reads and into server.log under --debug. The cause is not lost, only the path:
+// what a caller can act on is the CLASS of the failure, and the sentinel is what
+// carries it.
+//
+// Customer-facing RU: no тире, no absolute path.
+var ErrFormXMLUnreadable = errors.New("файл формы не удалось прочитать")
+
+// ErrFormXMLTooLarge is the path-free RU refusal returned when a form file is
+// larger than maxFormFileBytes. Nothing partial comes back with it: half a
+// Form.xml parses into a form that looks complete, and answering from it would
+// be worse than refusing. Customer-facing RU: no тире, no absolute path.
+var ErrFormXMLTooLarge = errors.New("файл формы слишком велик и не прочитан")
+
+// maxFormFileBytes caps how many bytes one Form.xml may contribute before it is
+// refused. Declared as a var, not a const, so a test can tighten it and exercise
+// the boundary without building two 16 MiB files; the same technique and the
+// same ceiling as maxSubsystemFileBytes in subsystem_reader.go, which guards the
+// same class of input for the same reason.
+//
+// It is a defensive ceiling, not a budget: measured on a 2.9 GB reference dump,
+// the largest of 5665 Form.xml files is 1739122 bytes, which is 10.4 per cent of
+// this limit. What it stops is a dump that is not a normal one, most plainly an
+// in-dump symlink to an endless device.
+var maxFormFileBytes int64 = 16 << 20
 
 // FindFormFiles locates all Form.xml files for the given object in the dump directory.
 // It returns a map of form name to absolute file path.
@@ -124,15 +273,54 @@ var errFormXMLNotRegular = errors.New("файл формы имеет невер
 // symlinked Form.xml is neither read NOR listed, so the return value cannot serve
 // as an existence oracle for paths outside the dump.
 func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, error) {
-	dirName, ok := objectTypeToDumpDir[objectType]
-	if !ok {
-		return nil, fmt.Errorf("unknown object type %q for dump lookup", objectType)
+	dirName, known := objectTypeToDumpDir[objectType]
+	commonForm := isCommonFormType(objectType)
+	if !known && !commonForm {
+		return nil, fmt.Errorf("%w: unknown object type %q for dump lookup",
+			ErrFormUnknownObjectType, objectType)
 	}
 
+	// An empty name is refused rather than joined. Joined, it collapses its own
+	// segment and the lookup then addresses the PARENT directory: for a common
+	// form that is CommonForms/Ext/Form.xml, for an object form it is the type
+	// directory's own Forms. Neither is the form anybody asked about, and both
+	// answer without saying they are answering about something else.
+	if objectName == "" {
+		return nil, fmt.Errorf("%w: object name is empty", ErrFormObjectNameRejected)
+	}
+	// A NUL is refused HERE, on the name, and not left to the filesystem.
+	//
+	// It reaches this function: object_name is decoded from JSON, and JSON spells
+	// the byte as an escape, so a perfectly well formed request decodes to a Go
+	// string carrying it, which no lexical check below notices.
+	//
+	// WITHOUT THIS GUARD THE OUTCOME IS NOT DECIDED BY OBJECT FORM VERSUS COMMON
+	// FORM, it is decided by whether the kind's OWN top-level directory exists.
+	// Re-run over all four combinations of Catalogs/ and CommonForms/ presence:
+	// the two branches behave IDENTICALLY, each returning ErrFormsDirUnreadable
+	// once its own top-level directory exists (the walk reaches the component
+	// carrying the NUL byte and the OS refuses it) and "no forms" (nil, nil)
+	// when it does not (the walk fails on the missing top-level directory first
+	// and never reaches the NUL byte at all). A prior version of this comment
+	// reported an object form as ErrFormsDirUnreadable against a common form's
+	// "no error at all and an empty map" - true only of the fixture it was
+	// measured on, which built Catalogs/ and no CommonForms/. The reference
+	// dump carries 386 CommonForms directories, so on it the pre-guard
+	// common-form case would ALSO have come back ErrFormsDirUnreadable, which
+	// the caller renders as advice to check directory permissions: wrong either
+	// way, for a name no filesystem can hold in the first place.
+	//
+	// The name is NOT interpolated into the message, unlike the traversal case
+	// below: the whole point is that the value carries a control byte, and the
+	// one place this message can end up is an operator's log line.
+	if strings.ContainsRune(objectName, 0) {
+		return nil, fmt.Errorf("%w: object name contains a NUL byte", ErrFormObjectNameRejected)
+	}
 	if strings.Contains(objectName, "..") ||
 		strings.Contains(objectName, "/") ||
 		strings.Contains(objectName, "\\") {
-		return nil, fmt.Errorf("invalid object name %q: contains path traversal characters", objectName)
+		return nil, fmt.Errorf("%w: invalid object name %q: contains path traversal characters",
+			ErrFormObjectNameRejected, objectName)
 	}
 
 	// A dumpDir that exists but is not a directory (FIFO, socket, device, plain
@@ -147,9 +335,13 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil // Absent dump - no forms, not an error.
 		}
-		return nil, errFormsDirUnreadable
+		return nil, ErrFormsDirUnreadable
 	}
 	defer func() { _ = root.Close() }()
+
+	if commonForm {
+		return findCommonFormFile(root, dumpDir, objectName)
+	}
 
 	relForms := filepath.Join(dirName, objectName, "Forms")
 	entries, err := readDirInRoot(root, relForms)
@@ -159,21 +351,101 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 		}
 		// Containment refusal, non-directory position, or unreadable: never
 		// silent, but named without disclosing the path it failed on.
-		return nil, errFormsDirUnreadable
+		return nil, ErrFormsDirUnreadable
 	}
 
 	result := make(map[string]string)
+	unreadable := false
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		relXML := filepath.Join(relForms, entry.Name(), "Ext", "Form.xml")
-		if st, statErr := root.Lstat(relXML); statErr == nil && st.Mode().IsRegular() {
+		st, statErr := root.Lstat(relXML)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue // This entry has no Ext/Form.xml - not an error.
+			}
+			// A mode-000 Ext/ directory (or any other permission or containment
+			// refusal) used to fall through this same continue, indistinguishable
+			// from an entry that genuinely has no Ext/Form.xml. That collapsed an
+			// unreadable entry into an absent one: with no other form, the object
+			// came back with an empty map and a nil error, which the caller reads
+			// as "this object has no forms" rather than "this entry could not be
+			// read" - the live instance of the class the NUL-byte guard above was
+			// written against.
+			//
+			// Recorded and skipped here rather than returned immediately: a
+			// SIBLING form that DID read is real, answerable data, and one
+			// unreadable entry must not erase it for a multi-form object. Only
+			// surfaced as ErrFormsDirUnreadable once every entry has been seen
+			// and none of them produced a readable form, mirroring the
+			// readDirInRoot handling just above and never silent even then.
+			unreadable = true
+			continue
+		}
+		if st.Mode().IsRegular() {
 			result[entry.Name()] = filepath.Join(dumpDir, relXML)
 		}
 	}
 
+	if len(result) == 0 && unreadable {
+		return nil, ErrFormsDirUnreadable
+	}
 	return result, nil
+}
+
+// isCommonFormType reports whether objectType names the common-form kind.
+//
+// Both spellings are accepted because both reach this package from tool input:
+// the English name is what the schema advertises and the Russian one is what the
+// metadata tree shows, and they name the same kind.
+func isCommonFormType(objectType string) bool {
+	return objectType == "CommonForm" || objectType == dumpDirNames[commonFormsDumpDir]
+}
+
+// findCommonFormFile resolves the single Form.xml of a common form.
+//
+// THE PATH SHAPE IS DIFFERENT AND THAT IS THE WHOLE REASON THIS BRANCH EXISTS:
+//
+//	object form   <Вид>/<Объект>/Forms/<Форма>/Ext/Form.xml    six segments
+//	common form   CommonForms/<Имя>/Ext/Form.xml               four segments
+//
+// There is no "Forms" directory and no directory named after the form, because
+// the form IS the metadata object: its name is the object's name, which is why
+// the returned map is keyed by objectName. Measured on the reference dump: 386
+// CommonForms directories, none of them holding a Forms segment, 22 of them
+// carrying 42 dynamic lists between them.
+//
+// Registering the kind in metadataTypes instead would have been the smaller
+// diff and the worse fix: the walk would then build <...>/Forms, fail to find
+// it, and take the "No forms directory, not an error" exit, turning a loud
+// unknown-type refusal into a silent empty answer.
+//
+// Containment is the object-form branch's, unchanged and deliberately shared.
+// The value is joined onto dumpDir exactly as the object-form branch joins it,
+// because the one consumer of this map hands the value straight to ParseFormXML,
+// whose contract states it performs no containment of its own. root.Lstat does
+// not follow the final component, so a symlinked Form.xml is neither read nor
+// listed and the map cannot serve as an existence oracle for anything outside
+// the dump.
+func findCommonFormFile(root *os.Root, dumpDir, objectName string) (map[string]string, error) {
+	relXML := filepath.Join(commonFormsDumpDir, objectName, "Ext", "Form.xml")
+
+	st, err := root.Lstat(relXML)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil // No such common form - not an error, same as an object with no forms.
+		}
+		// Containment refusal, a non-directory in the path, or an unreadable
+		// component: never silent, and never naming the path it failed on.
+		return nil, ErrFormsDirUnreadable
+	}
+	if !st.Mode().IsRegular() {
+		return nil, nil // Symlink, FIFO, directory: dropped exactly as for an object form.
+	}
+
+	return map[string]string{objectName: filepath.Join(dumpDir, relXML)}, nil
 }
 
 // ParseFormXML parses a 1C form XML file and extracts elements, commands, and handlers.
@@ -192,15 +464,28 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 func ParseFormXML(path string) (*FormInfo, error) {
 	st, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading form XML: %w", err)
+		return nil, ErrFormXMLUnreadable
 	}
 	if !st.Mode().IsRegular() {
-		return nil, errFormXMLNotRegular
+		return nil, ErrFormXMLNotRegular
 	}
 
-	data, err := os.ReadFile(path)
+	// Bounded read rather than os.ReadFile: the size is taken from the bytes
+	// actually delivered, not from the Lstat above, so a file that grows between
+	// the two calls is still refused. One byte over the limit is enough to tell
+	// the two cases apart, which is why the reader is given limit+1.
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading form XML: %w", err)
+		return nil, ErrFormXMLUnreadable
+	}
+	defer func() { _ = f.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxFormFileBytes+1))
+	if err != nil {
+		return nil, ErrFormXMLUnreadable
+	}
+	if int64(len(data)) > maxFormFileBytes {
+		return nil, ErrFormXMLTooLarge
 	}
 
 	return parseFormXMLData(data)
@@ -250,6 +535,11 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 	// FormInfo.NoFormRoot: if it is still -1 when the document ends, the file
 	// held no form and nothing below was ever recorded.
 	formDepth := -1
+	// formNS holds the namespace prefixes declared on <Form> itself. Only the
+	// <Attributes> branch needs them, and only because xsi:type carries a QName
+	// in an attribute VALUE, which the decoder does not expand (see
+	// isDynamicListSettings). Everything else in this parser matches on Local.
+	var formNS map[string]string
 
 	for {
 		tok, err := decoder.Token()
@@ -296,6 +586,7 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 			// regardless of any XML prologue / leading whitespace.
 			if formDepth == -1 && local == "Form" {
 				formDepth = depth
+				formNS = namespaceScope(nil, t)
 				continue
 			}
 
@@ -310,6 +601,8 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 					form.Elements = parseChildItemsRecursive(decoder, &depth)
 				case "Commands":
 					form.Commands = parseCommandsSection(decoder, &depth)
+				case "Attributes":
+					form.DynamicLists = parseAttributesSection(decoder, &depth, namespaceScope(formNS, t))
 				default:
 					if isFormElementTag(local) {
 						// Form has a direct UI child without a <ChildItems>
@@ -469,6 +762,243 @@ func parseFormElement(decoder *xml.Decoder, start xml.StartElement, depth *int) 
 			}
 		}
 	}
+}
+
+// xsiNamespace is the XML Schema instance namespace. The type discriminator this
+// section turns on is the attribute {xsiNamespace}type, matched by its resolved
+// namespace and not by the spelling "xsi:type": the prefix is a local choice of
+// the document and only the namespace it is bound to is fixed.
+const xsiNamespace = "http://www.w3.org/2001/XMLSchema-instance"
+
+// dynamicListTypeName is the local part of the xsi:type value that marks a form
+// attribute as a dynamic list.
+const dynamicListTypeName = "DynamicList"
+
+// parseAttributesSection reads the form's <Attributes> block and returns one
+// entry per attribute that declares a dynamic list, in file order.
+//
+// The section holds EVERY attribute of the form, most of which are ordinary
+// typed values; only the ones whose <Settings> is typed DynamicList are kept.
+// Measured over the reference dump's common forms alone: 153 <Settings>
+// elements carry an xsi:type, of which 42 are dynamic lists and 111 are not
+// (107 v8:TypeDescription and 4 mxl:SpreadsheetDocument).
+func parseAttributesSection(decoder *xml.Decoder, depth *int, scope map[string]string) []FormDynamicList {
+	var lists []FormDynamicList
+	sectionDepth := *depth
+
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return lists
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			*depth++
+			// Every start seen here is a direct child of <Attributes>, because
+			// both branches below consume the whole subtree they open.
+			if t.Name.Local == "Attribute" {
+				if list, ok := parseFormAttribute(decoder, t, depth, namespaceScope(scope, t)); ok {
+					lists = append(lists, list)
+				}
+			} else {
+				skipElement(decoder, depth)
+			}
+
+		case xml.EndElement:
+			*depth--
+			if *depth < sectionDepth {
+				return lists
+			}
+		}
+	}
+}
+
+// parseFormAttribute reads one <Attribute> and reports its dynamic list, if it
+// declares one. The boolean is the whole answer to "is this attribute a dynamic
+// list": an attribute with no <Settings>, or with settings of another type, is
+// not one, and returning a zero value with false keeps that distinct from a
+// dynamic list whose fields happen to be empty.
+func parseFormAttribute(decoder *xml.Decoder, start xml.StartElement, depth *int, scope map[string]string) (FormDynamicList, bool) {
+	list := FormDynamicList{Name: attr(start, "name")}
+	found := false
+	attrDepth := *depth
+
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return list, found
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			*depth++
+			// Direct children only: <Settings> is one level under <Attribute>,
+			// and a settings block nested deeper belongs to something else.
+			if *depth == attrDepth+1 && isDynamicListSettings(t, namespaceScope(scope, t)) {
+				readDynamicListSettings(decoder, depth, &list)
+				found = true
+			} else {
+				skipElement(decoder, depth)
+			}
+
+		case xml.EndElement:
+			*depth--
+			if *depth < attrDepth {
+				return list, found
+			}
+		}
+	}
+}
+
+// readDynamicListSettings fills the three recorded fields from the children of a
+// <Settings xsi:type="DynamicList"> block.
+//
+// Everything else in the block is skipped, and <ListSettings> is the reason that
+// matters: it is present on 1918 lists out of 1918, so admitting it would attach
+// the designer's saved composer state to EVERY list this parser reports, at a
+// size that is bounded by nothing in the schema. See FormDynamicList for what is
+// and is not measured about that size.
+func readDynamicListSettings(decoder *xml.Decoder, depth *int, list *FormDynamicList) {
+	settingsDepth := *depth
+
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			*depth++
+			if *depth == settingsDepth+1 {
+				switch t.Name.Local {
+				case "ManualQuery":
+					// The file spells the flag "true" or "false"; anything else
+					// is not the flag being set, so it reads as false.
+					list.ManualQuery = readCharData(decoder, depth) == "true"
+				case "QueryText":
+					list.QueryText = readCharData(decoder, depth)
+				case "MainTable":
+					list.MainTable = readCharData(decoder, depth)
+				default:
+					skipElement(decoder, depth)
+				}
+			} else {
+				skipElement(decoder, depth)
+			}
+
+		case xml.EndElement:
+			*depth--
+			if *depth < settingsDepth {
+				return
+			}
+		}
+	}
+}
+
+// isDynamicListSettings reports whether start is a <Settings> element typed as a
+// dynamic list.
+//
+// THE DECISION IS ON THE VALUE OF xsi:type, NEVER ON THE TAG NAME. <Settings> is
+// the same tag for every kind of attribute settings in this schema, so a tag
+// match answers yes to all of them: measured over the dump, 2891 <Settings>
+// elements carry an xsi:type and only 1918 of them are dynamic lists.
+//
+// AND THE VALUE IS A QName, WHICH THE DECODER DOES NOT EXPAND. Go resolves
+// prefixes in element and attribute NAMES, not in attribute VALUES, so the value
+// arrives as written: "DynamicList" bare, "v8:TypeDescription" prefixed. The
+// prefix is therefore resolved here, against the declarations in scope, and the
+// EXPANDED name is compared. Comparing the text after the colon would be wrong,
+// not merely loose: the dump carries 92 machine-generated prefix declarations
+// and the single prefix d5p1 is bound to five different namespaces across the
+// corpus, so a prefix says nothing about which type it names.
+//
+// The expanded namespace is compared against the namespace of the <Settings>
+// element ITSELF rather than a hard-coded URI. An xsi:type names a type in the
+// schema of the element it types, so the element carries the answer, and no
+// constant here can drift from the schema version a future dump declares.
+// Measured: all 5665 Form.xml files in the reference dump declare the same
+// default namespace, and under this rule the walk accepts exactly 1918 lists.
+func isDynamicListSettings(start xml.StartElement, scope map[string]string) bool {
+	if start.Name.Local != "Settings" {
+		return false
+	}
+
+	var raw string
+	found := false
+	for _, a := range start.Attr {
+		if a.Name.Space == xsiNamespace && a.Name.Local == "type" {
+			raw, found = a.Value, true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+
+	prefix, local, hasPrefix := strings.Cut(raw, ":")
+	if !hasPrefix {
+		// An unprefixed QName in a value resolves through the DEFAULT namespace,
+		// which is the empty-prefix entry of the scope.
+		prefix, local = "", prefix
+	}
+	if local != dynamicListTypeName {
+		return false
+	}
+
+	space, declared := scope[prefix]
+	if prefix != "" && !declared {
+		// A prefix nothing binds names nothing. Guessing that it meant this
+		// schema is how a suffix match sneaks back in.
+		return false
+	}
+	return space == start.Name.Space
+}
+
+// namespaceScope returns the prefix-to-namespace bindings in force inside start,
+// which are the parent's bindings plus any this element declares.
+//
+// The parent map is returned UNCHANGED when the element declares nothing, which
+// is the overwhelmingly common case, so the walk allocates only at the handful
+// of elements that actually carry an xmlns attribute. The map is never mutated
+// in place for the same reason a scope is not global: a declaration on one
+// element must not be visible to its siblings.
+func namespaceScope(parent map[string]string, start xml.StartElement) map[string]string {
+	var scope map[string]string
+	for _, a := range start.Attr {
+		prefix, ok := xmlnsDeclaration(a)
+		if !ok {
+			continue
+		}
+		if scope == nil {
+			scope = make(map[string]string, len(parent)+len(start.Attr))
+			for k, v := range parent {
+				scope[k] = v
+			}
+		}
+		scope[prefix] = a.Value
+	}
+	if scope == nil {
+		return parent
+	}
+	return scope
+}
+
+// xmlnsDeclaration reports whether a is a namespace declaration and which prefix
+// it binds, with the DEFAULT declaration reported under the empty prefix.
+//
+// The two shapes are what the Go decoder produces and were confirmed by reading
+// its output rather than assumed: xmlns:v8="..." arrives as {Space: "xmlns",
+// Local: "v8"}, and xmlns="..." arrives as {Space: "", Local: "xmlns"}.
+func xmlnsDeclaration(a xml.Attr) (string, bool) {
+	switch {
+	case a.Name.Space == "xmlns":
+		return a.Name.Local, true
+	case a.Name.Space == "" && a.Name.Local == "xmlns":
+		return "", true
+	}
+	return "", false
 }
 
 // parseCommandsSection reads all commands from the top-level <Commands> block.

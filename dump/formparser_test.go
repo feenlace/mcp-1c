@@ -448,6 +448,61 @@ func TestFindFormFiles(t *testing.T) {
 	}
 }
 
+// TestFindFormFiles_OneUnreadableFormDoesNotEraseReadableSiblings pins the
+// choice made for a MULTI-form object where one entry's Ext/ cannot be read
+// and at least one other entry's can: the readable sibling is still answered,
+// with no error, exactly as before ErrFormsDirUnreadable existed for this
+// class of failure. An object left with NO readable form at all still returns
+// ErrFormsDirUnreadable (TestFormRefusalsCarryTheirOwnSentinel, "a form entry
+// whose Ext directory cannot be read, Forms/ itself readable"): the two cases
+// are told apart by whether the map would come back empty, not by whether an
+// unreadable entry was seen at all.
+//
+// ФормаДокумента sorts before ФормаСписка (Д before С), so ReadDir visits the
+// readable entry FIRST here: this is the harder direction to get right, since
+// a naive fix has already collected the good result before it reaches the bad
+// entry, and returning early throws that result away.
+func TestFindFormFiles_OneUnreadableFormDoesNotEraseReadableSiblings(t *testing.T) {
+	dir := t.TempDir()
+
+	goodExt := filepath.Join(dir, "Documents", "ТестДок", "Forms", "ФормаДокумента", "Ext")
+	if err := os.MkdirAll(goodExt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(goodExt, "Form.xml"), []byte("<Form/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	badExt := filepath.Join(dir, "Documents", "ТестДок", "Forms", "ФормаСписка", "Ext")
+	if err := os.MkdirAll(badExt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(badExt, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(badExt, 0o755) })
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, so a mode 000 path is still reachable")
+	}
+	if _, err := os.Stat(filepath.Join(badExt, "Form.xml")); err == nil {
+		t.Skip("this filesystem or user ignores mode 000, so the entry is readable")
+	}
+
+	forms, err := FindFormFiles(dir, "Document", "ТестДок")
+	if err != nil {
+		t.Fatalf("expected the readable sibling to still answer with no error, got: %v", err)
+	}
+	if len(forms) != 1 {
+		t.Fatalf("expected exactly 1 readable form, got %d: %+v", len(forms), forms)
+	}
+	if _, ok := forms["ФормаДокумента"]; !ok {
+		t.Errorf("expected the readable form ФормаДокумента in results, got %+v", forms)
+	}
+	if _, ok := forms["ФормаСписка"]; ok {
+		t.Errorf("the unreadable form ФормаСписка must not appear in results, got %+v", forms)
+	}
+}
+
 func TestFindFormFiles_NoFormsDir(t *testing.T) {
 	dir := t.TempDir()
 
@@ -460,6 +515,13 @@ func TestFindFormFiles_NoFormsDir(t *testing.T) {
 	}
 }
 
+// TestFindFormFiles_UnknownType classifies with errors.Is and NOT on the text.
+//
+// It used to match strings.Contains(err.Error(), "unknown object type"), which
+// is exactly the coupling the exported sentinels exist to remove: the message is
+// what may not be forwarded out of this package, so a test that depends on it
+// pins the one thing callers are told not to read, and it would keep passing
+// while the sentinel underneath was swapped for another.
 func TestFindFormFiles_UnknownType(t *testing.T) {
 	dir := t.TempDir()
 
@@ -467,9 +529,7 @@ func TestFindFormFiles_UnknownType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown object type")
 	}
-	if !strings.Contains(err.Error(), "unknown object type") {
-		t.Errorf("expected 'unknown object type' in error, got: %v", err)
-	}
+	assertFormSentinel(t, err, "ErrFormUnknownObjectType")
 }
 
 func TestFindFormFiles_PathTraversal(t *testing.T) {

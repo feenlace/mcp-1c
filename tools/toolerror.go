@@ -471,6 +471,58 @@ const remedyEventLogUserFilterUnresolved = "Так расширение отве
 	"3. Текст ошибки выше: его вернул поиск в списке пользователей информационной базы, и он " +
 	"говорит, почему поиск не состоялся.\n"
 
+// lineDumpLegReason reports the second leg's failure when both legs failed.
+//
+// It carries the CODE and the reader's sentence, and nothing from the lower
+// layer's own message. The code is there so a caller can branch on it without
+// parsing Russian; the sentence is there because a code alone is not a remedy.
+//
+// Customer-facing RU: no тире.
+const lineDumpLegReason = "Чтение из выгрузки тоже не удалось, причина `%s`: %s"
+
+// formNotFoundStatus is the status the extension answers when it cannot resolve
+// the object a form was asked for.
+//
+// It is 404 for a whole CLASS of metadata and not only for a misspelt name, and
+// that class is what remedyFormNotFound exists to name.
+const formNotFoundStatus = 404
+
+// remedyFormNotFound is shown for a 404 that the EXTENSION itself produced under
+// the form heading, and it exists because a bare «Object not found» reads as
+// «check the spelling» when for a whole class of objects there is no spelling
+// that works.
+//
+// THE CLASS IS MEASURED, not supposed. The handler resolves an object through a
+// map of metadata collections, that map holds applied kinds only, and no common
+// kind is in it, so a common form can never be resolved by that endpoint. The
+// same module nevertheless LISTS common forms when it builds the metadata tree,
+// which is why a caller meets this refusal at all: the object is visible and is
+// not readable, and until this text existed nothing said so.
+//
+// IT NAMES NO TOOL, and that is a constraint rather than a preference. This
+// package is vendored into a build that registers a different set of tools;
+// advice naming a tool of this edition names something that caller does not
+// have. The machinery that rewrites such sentences over there works from a
+// hand-written table of whole phrases, so a sentence nobody adds to it travels
+// through unchanged. A remedy that names no tool needs no entry in that table
+// and cannot go stale in it. TestFormRemedy_NamesNoToolRegisteredInThisEdition
+// is the guard, and it runs HERE, in the repository the sentence is written in,
+// because the guard over there reads a vendored snapshot, which is the past.
+//
+// Customer-facing RU: no тире.
+const remedyFormNotFound = "Так отвечает расширение, когда объект с таким видом и именем оно в базе " +
+	"не нашло.\n\n" +
+	"Проверьте:\n" +
+	"1. Имя объекта: оно ищется по точному написанию, как в конфигураторе.\n" +
+	"2. Вид объекта. Общие формы этот адрес не отдаёт вовсе: расширение ищет объект по карте " +
+	"видов, и в ней перечислены только прикладные объекты, справочники, документы, регистры и " +
+	"подобные им. В дереве метаданных общая форма при этом видна, и это не противоречие: " +
+	"перечисляет её другой обработчик, а читает этот.\n" +
+	"3. Запуск сервера с флагом `--dump`. С выгрузкой конфигурации общая форма читается прямо из " +
+	"файла, минуя расширение: укажите вид объекта как ОбщаяФорма или CommonForm, а именем " +
+	"объекта имя самой формы. Состав элементов, команды, обработчики и сводка динамических " +
+	"списков берутся оттуда же.\n"
+
 // remedyDenialEnvelope ASSERTS NO CAUSE, and that is the whole of its design.
 //
 // It is shown for a body that parsed as the nested form of the envelope. That
@@ -746,6 +798,15 @@ func renderFailure(heading string, err error) string {
 		p.add(lineGeneric)
 		addQuoted(&p, captionCause, errText(err))
 	}
+
+	// The dump leg's own cause, when there was one, as a CODE from a closed set
+	// and never as the lower layer's message. It is added after the class above
+	// because the 1C side is what the heading is about and the dump is the
+	// fallback that also failed; a reader needs the first answer first.
+	var dlf *dumpLegFailure
+	if errors.As(err, &dlf) {
+		p.add(fmt.Sprintf(lineDumpLegReason, dlf.reason.code(), dumpLegReasonText[dlf.reason]))
+	}
 	return p.String()
 }
 
@@ -864,6 +925,15 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 		} else {
 			p.add(remedyQueryRejected)
 		}
+	}
+	// Keyed on the heading AND the status, like the event-log branch above and
+	// unlike it in one respect: this endpoint answers 404 for exactly one cause,
+	// an object it could not resolve, so the status alone identifies it and no
+	// second test on the detail is needed. Extension envelope only: a foreign 404
+	// has no established author, and asserting a cause for it is the defect
+	// remedyForeignBody was rewritten to stop committing.
+	if heading == headingForm && se.StatusCode == formNotFoundStatus {
+		p.add(remedyFormNotFound)
 	}
 }
 
