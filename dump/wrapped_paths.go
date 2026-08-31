@@ -10,19 +10,14 @@ import (
 //
 // WHAT THIS ANSWERS. The anchor scan in bslPathToModuleName recovers the right key
 // when a dump root is pointed at from one level too high, and collapsed_keys.go
-// counts what a collision costs. Between them sits a case neither one reports: a
-// path two levels above a SINGLE extension. The anchor scan finds the kind
-// directory and derives a base-configuration key, so nothing collides and the
-// collapse counter is silent; detectExtensionLayout looks one level down, finds a
-// wrapper rather than a manifest, and produces no layout. The extension namespace
-// simply disappears, every module of that extension is filed as though it belonged
-// to the configuration, and both channels say nothing at all.
+// counts what a collision costs. Between them sits a case neither one reports. The
+// anchor scan finds the kind directory and derives a base-configuration key, so
+// nothing collides and the collapse counter is silent.
 //
 // WHAT IS COUNTED. A path is WRAPPED when the derivation had to skip leading
 // segments that the extension layout did not account for, i.e. anchorIndex moved.
 // That is a direct property of the tree, not an inference from one: at a correctly
-// pointed root it is 0 on all 13575 paths of dumps/dump_bsl, and two levels above
-// an extension it is every path in the dump.
+// pointed root it is 0 on all 13575 paths of dumps/dump_bsl.
 //
 // WHY IT IS NOT FOLDED INTO THE COLLAPSE REPORT. The two measure different things
 // and can each be zero while the other is not. A collapse says content is
@@ -53,8 +48,18 @@ type WrappedPathState struct {
 // A segment the LAYOUT consumes is not a wrap: under the -AllExtensions shape the
 // first segment is a recognised extension directory and the namespace accounts for
 // it, so the question is asked of what is left.
+//
+// The same is true one level lower: an extension reached through byPrefix is
+// namespaced by a TWO-segment prefix, and moduleKey strips both before deriving
+// the rest, so both are consumed here as well. The longer prefix is asked first,
+// as in moduleKey.
 func (l extensionLayout) wrapDepth(relPath string) int {
 	parts := strings.Split(filepath.ToSlash(relPath), "/")
+	if len(l.byPrefix) > 0 && len(parts) >= 3 {
+		if _, ok := l.byPrefix[parts[0]+"/"+parts[1]]; ok {
+			return anchorIndex(parts[2:])
+		}
+	}
 	if len(l.byDir) > 0 && len(parts) >= 2 {
 		if _, ok := l.byDir[parts[0]]; ok {
 			return anchorIndex(parts[1:])

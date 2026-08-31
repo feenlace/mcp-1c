@@ -49,14 +49,12 @@ const (
 	// -AllExtensions shape, reached through byDir rather than through the nested
 	// byPrefix the fix added.
 	//
-	// IT IS IN THIS FIXTURE FOR A MEASURED REASON, NOT FOR VARIETY. wrapDepth
-	// consults byDir AND NOTHING ELSE (wrapped_paths.go): it asks whether the FIRST
-	// segment is a recognised extension directory. On the nested tree of issue 46
-	// alone, an empty layout and the resolved one therefore return the SAME wrap
-	// answer for every path, and the wrap report cannot tell them apart. Under this
-	// sibling it can: with byDir resolved its module is not wrapped, and against an
-	// empty layout the leading segment counts as one. That is what makes reading
-	// the layout as a field OBSERVABLE from the reports instead of merely asserted.
+	// IT IS IN THIS FIXTURE FOR A MEASURED REASON, NOT FOR VARIETY. It is the only
+	// extension here reached through byDir rather than through byPrefix, so both
+	// halves of wrapDepth are exercised, and against an empty layout its leading
+	// segment counts as one wrap while a resolved layout accounts for it. That is
+	// what makes reading the layout as a field OBSERVABLE from the reports instead
+	// of merely asserted.
 	issue46FlatExtDir  = "Adapt"
 	issue46FlatExtName = "АдаптацияУчета"
 	issue46FlatExtKey  = "ext.АдаптацияУчета.Документ.Продажа.МодульОбъекта"
@@ -378,10 +376,6 @@ func issue46FourStarts(t *testing.T, root, cacheDir string) []issue46Reading {
 // derivation instead was considered and rejected for exactly the reason this test
 // pins: two of the four starts derive no keys, so the map would still be empty when
 // they answer.
-//
-// NOTE ON WrappedPaths: wrapDepth is not part of this fix, so the wrap counter
-// still counts the nested extension's file. The assertion is that the four starts
-// AGREE on the number, not that the number is zero.
 func TestIssue46_WarmAndReadOnlyStartsAgreeWithTheColdOne(t *testing.T) {
 	root := mkIssue46ParityTree(t, false)
 	legs := issue46FourStarts(t, root, t.TempDir())
@@ -409,12 +403,12 @@ func TestIssue46_WarmAndReadOnlyStartsAgreeWithTheColdOne(t *testing.T) {
 		t.Fatalf("cold CollapsedKeys = %+v, want no collapse: the fix exists so these two "+
 			"documents keep separate keys", cold.collapsed)
 	}
-	// The wrap counter must be ALIVE on this tree, or "the four agree" would be
-	// agreement over a dead instrument. One file is wrapped (the nested extension's,
-	// whose two container segments wrapDepth does not account for) and the sibling
-	// extension's is not, which is the pair that makes an empty layout distinguishable
-	// from a resolved one.
-	if want := (WrappedPathState{Files: 1, Total: 3}); cold.wrapped != want {
+	// NOTHING IS WRAPPED ON THIS TREE. Both segments of the nested extension's
+	// prefix are accounted for by the namespace it now has, exactly as the
+	// sibling's one segment is. A zero cannot carry the instrument's aliveness on
+	// its own, which is what TestIssue46_TheParityControlStillCountsACollisionAndAWrap
+	// is for; what is asserted here is that the four starts AGREE on the number.
+	if want := (WrappedPathState{Files: 0, Total: 3}); cold.wrapped != want {
 		t.Fatalf("cold WrappedPaths = %+v, want %+v", cold.wrapped, want)
 	}
 	if len(cold.missing) != 0 {
@@ -449,7 +443,7 @@ func TestIssue46_WarmAndReadOnlyStartsAgreeWithTheColdOne(t *testing.T) {
 // works: "the four agree" is true when all four report nothing for the wrong
 // reason. So the same four starts are made over the same tree PLUS a wrapper that
 // declares no extension, where a module really does land on the base
-// configuration's key. All four must count the collision, count both wrapped files,
+// configuration's key. All four must count the collision, count the wrapped file,
 // still recognise both extensions, and still carry the base key TWICE in a multiset
 // that a set-valued reading would silently repair.
 func TestIssue46_TheParityControlStillCountsACollisionAndAWrap(t *testing.T) {
@@ -472,7 +466,7 @@ func TestIssue46_TheParityControlStillCountsACollisionAndAWrap(t *testing.T) {
 			"parity in the test above is parity over a counter that never counts",
 			cold.collapsed, wantCollapsed)
 	}
-	if want := (WrappedPathState{Files: 2, Total: 4}); cold.wrapped != want {
+	if want := (WrappedPathState{Files: 1, Total: 4}); cold.wrapped != want {
 		t.Fatalf("control cold WrappedPaths = %+v, want %+v", cold.wrapped, want)
 	}
 	if cold.layout.Extensions != 2 {
