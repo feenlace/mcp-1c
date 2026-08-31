@@ -475,9 +475,6 @@ func (l *extensionLayout) noteNestedTruncation(dir string) {
 // are exactly those: inside a flat -Extension dump they are the extension's tree,
 // and treating one as a nested extension would strip its first segment and derive
 // a key from the remainder.
-//
-// The check applies ONLY when the root is an extension. When it is not, there is no
-// tree for such a directory to belong to, and the manifest decides on its own.
 func belongsToSelfExtension(child string) bool {
 	if _, ok := dumpDirNames[child]; ok {
 		return true
