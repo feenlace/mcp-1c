@@ -403,3 +403,90 @@ func TestNestedProbeSpendsABoundedTotalAcrossChildren(t *testing.T) {
 			midway.byPrefix)
 	}
 }
+
+// TestNestedProbeDoesNotAdmitAKindDirectoryAsAnExtension.
+//
+// The test above refuses to LIST a kind directory of the root. This one is about
+// what the descent finds INSIDE a directory it was allowed to list: a grandchild
+// named for a metadata kind is the content of the directory above it, so a
+// manifest sitting in one names an extension over a subtree that is not its own.
+//
+// WHAT ADMITTING IT DOES TO THE KEYS, which is why it is not merely untidy. The
+// namespace is minted over the TWO-SEGMENT prefix, so the kind segment is part of
+// the prefix and bslPathToModuleName never sees it. The module below then keys as
+// ext.Подмена.Ном.Ext.МодульОбъекта, where Ext is the on-disk directory that a
+// kind-anchored derivation consumes, instead of the Справочник.Ном.МодульОбъекта
+// it has always had.
+//
+// THE CONTROL IS THE SAME TREE WITH ONE NAME CHANGED, from a kind to Расш: same
+// depth, same manifest, same extension name, same module underneath. If the
+// refusal reached further than the name, the control would lose its namespace too.
+//
+// THE KEY IS ASSERTED AGAINST A LITERAL rather than against bslPathToModuleName,
+// for the reason TestNestedProbeStopsAtALargeDirectoryAndSaysSo already gives:
+// with an empty layout moduleKey delegates straight to it, so comparing the two
+// would be one expression written twice.
+func TestNestedProbeDoesNotAdmitAKindDirectoryAsAnExtension(t *testing.T) {
+	const (
+		wrapper = "Обёртка"
+		kind    = "Catalogs"
+		notKind = "Расш"
+		extName = "Подмена"
+		relTail = "/Ном/Ext/ObjectModule.bsl"
+		baseKey = "Справочник.Ном.МодульОбъекта"
+		relKind = wrapper + "/" + kind + relTail
+	)
+
+	// PREMISE, read from the table rather than typed: if Catalogs ever leaves
+	// dumpDirNames the descent stops refusing it by name, and this test would go
+	// green while measuring nothing.
+	if _, ok := dumpDirNames[kind]; !ok {
+		t.Fatalf("premise broken: %q is no longer in dumpDirNames, so nothing here is "+
+			"measuring a refusal by name", kind)
+	}
+
+	build := func(t *testing.T, grand string) extensionLayout {
+		t.Helper()
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, extManifestClassic),
+			[]byte(baseConfigManifest()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mkBSLFile(t, root, "Documents/ПеремещениеЗапасов/Ext/ObjectModule.bsl", issue46BaseBody)
+		mkExtensionDump(t, filepath.Join(root, wrapper, grand), extManifestClassic, extName)
+		mkBSLFile(t, root, wrapper+"/"+grand+relTail, issue46ExtBody)
+		return detectExtensionLayout(root)
+	}
+
+	planted := build(t, kind)
+	if len(planted.byPrefix) != 0 {
+		t.Errorf("byPrefix = %v, want empty: %q is the content of the directory above "+
+			"it, and a manifest planted there names an extension over a subtree that is "+
+			"not its own", planted.byPrefix, kind)
+	}
+	if got := planted.summary(); got.Extensions != 0 {
+		t.Errorf("summary = %+v, want Extensions 0: a metadata kind directory was "+
+			"reported to the operator as an extension of this dump", got)
+	}
+	if got := planted.moduleKey(relKind); got != baseKey {
+		t.Errorf("moduleKey(%q) = %q, want %q: the prefix swallowed the kind segment and "+
+			"put the on-disk Ext directory into the key in its place",
+			relKind, got, baseKey)
+	}
+	// REFUSED BEFORE THE MANIFEST QUESTION IS PAID FOR, not after it is answered.
+	// Every assertion above holds just as well for a check placed after the Lstat,
+	// and only the counters tell those two apart. MEASURED, not budgeted: the run
+	// that first took these numbers is what they are pinned from.
+	if want := (extensionScanCost{ReadDirs: 3, Lstats: 3, Reads: 1}); planted.cost != want {
+		t.Errorf("cost = %+v, want %+v: the grandchild is refused by NAME, so neither an "+
+			"Lstat nor a manifest read may be spent on it", planted.cost, want)
+	}
+
+	// CONTROL: one variable, the grandchild's name.
+	probed := build(t, notKind)
+	if got, want := probed.byPrefix[wrapper+"/"+notKind], extName; got != want {
+		t.Fatalf("control failed: byPrefix[%q] = %q, want %q. A grandchild whose name is "+
+			"NOT a kind must still be found, or the refusal above is not the NAME: "+
+			"byPrefix=%v", wrapper+"/"+notKind, got, want, probed.byPrefix)
+	}
+}

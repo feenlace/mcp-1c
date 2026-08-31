@@ -441,8 +441,17 @@ func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int)
 			l.noteNestedTruncation(child)
 			return
 		}
-		*budget++
 		grand := e.Name()
+		// A GRANDCHILD NAMED FOR A METADATA KIND IS THE CONTENT OF THE DIRECTORY
+		// ABOVE IT, so a manifest sitting in one names an extension over a subtree
+		// that is not its own. Admitting it makes the kind segment part of the
+		// two-segment prefix, bslPathToModuleName never sees it, and every key under
+		// that prefix loses the kind it had. Refused before *budget++, so nothing is
+		// spent on an entry that is never asked about.
+		if belongsToSelfExtension(grand) {
+			continue
+		}
+		*budget++
 		prefix := child + "/" + grand
 		switch verdict, name, reason := manifestVerdictOf(filepath.Join(path, grand), &l.cost); verdict {
 		case manifestExtension:
