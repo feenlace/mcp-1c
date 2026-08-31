@@ -1,9 +1,13 @@
 package dump
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -321,4 +325,294 @@ func TestASchemaStaleGenerationIsNotAdoptedAndTheRebuildCarriesTheFix(t *testing
 	if slices.Contains(names, issue46BaseKey) {
 		t.Errorf("the rebuilt generation still serves the pre-fix key %q: %v", issue46BaseKey, names)
 	}
+}
+
+// issue46SearchTerm is a word the nested extension's module body carries, used to
+// ask the SHARD-BACKED search whether the cache under it answers for this tree.
+// Taken from issue46ExtBody rather than written out beside it, so a body that
+// stops carrying the word cannot leave the arms below querying for something no
+// file holds.
+const issue46SearchTerm = "расширение"
+
+// AN INTERRUPTED DROP IS THE ONE THAT MATTERS, because the gate's own answer to
+// the state it leaves behind is «reuse».
+//
+// removeFlatCacheContents walks os.ReadDir(cpath), which returns entries sorted by
+// name, so "manifest.json" is reached before any "shard_*" directory. A drop that
+// stops partway therefore leaves shards standing with no manifest beside them, and
+// flatCacheSchemaStale answers FALSE for exactly that shape, deliberately and for a
+// documented reason: shards with no manifest are what a build leaves behind before
+// it writes one, and dropping them would be a gratuitous cold rebuild.
+//
+// What follows from there is not a slower start but a dead search.
+// loadFromManifestAndDiff's manifest==nil branch walks the dump for NAMES, saves a
+// FRESH manifest stamped CURRENT, and indexes nothing into the shards. The docIDs
+// in those shards stay the ones the foreign build wrote, so a hit on a key the
+// bump moved is one GetContent cannot resolve and it is dropped as unreadable. On
+// the tree below the bump moved the only key there is, so the answer is empty; and
+// the current stamp the walk just wrote means the gate never fires again, so it is
+// empty on every start after that one too. GetContent still serves a module asked
+// for by name, so the dump is UNSEARCHABLE rather than unreadable, which is why
+// nothing about the state looks broken.
+//
+// SO THE ORDER IS THE FIX: the shards go first, the manifest goes last, and the
+// manifest goes only if every shard went. A shard whose removal FAILED must keep
+// the manifest beside it, because that manifest is the only surviving evidence
+// that those shards are foreign. Under that order the only partial state
+// removeFlatCacheContents can leave is manifest-present with fewer shards, which is
+// the shape flatCacheSchemaStale already answers TRUE for, so the drop is retried
+// on the next start instead of being sealed in.
+func TestAnInterruptedFlatCacheDropIsRetriedRatherThanServed(t *testing.T) {
+	if !strings.Contains(issue46ExtBody, issue46SearchTerm) {
+		t.Fatalf("premise broken: the extension body %q does not carry %q, so a search for it "+
+			"measures nothing", issue46ExtBody, issue46SearchTerm)
+	}
+
+	// CONTROL. Same tree, same foreign stamp, no interruption: the gate drops the
+	// cache whole and the cold rebuild answers the query. It is what makes the arm
+	// below about the INTERRUPTION rather than about the stamp — a green there has
+	// to be reachable without one, or the arm is only measuring that a stale cache
+	// is rebuilt.
+	t.Run("control: the same stamp with no interruption", func(t *testing.T) {
+		root, cacheDir, cpath := staleFlatCacheOfIssue46(t)
+		stampFlatCacheOneSchemaBack(t, cpath)
+		if !flatCacheSchemaStale(cpath) {
+			t.Fatalf("premise broken: a cache stamped one schema version back is not seen as " +
+				"stale, so this control drops nothing")
+		}
+		assertIssue46IsSearchable(t, root, cacheDir, "the first start")
+		assertIssue46IsSearchable(t, root, cacheDir, "the reopen after it")
+	})
+
+	t.Run("the interrupted drop", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("the interruption is injected by clearing the write bit on a shard directory, " +
+				"which is not what stops an unlink on Windows")
+		}
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores the directory permission this test injects the failure with")
+		}
+
+		root, cacheDir, cpath := staleFlatCacheOfIssue46(t)
+		stampFlatCacheOneSchemaBack(t, cpath)
+		if !flatCacheSchemaStale(cpath) {
+			t.Fatalf("premise broken: a cache stamped one schema version back is not seen as " +
+				"stale, so there is nothing here for an interrupted drop to interrupt")
+		}
+
+		// THE INTERRUPTION. A shard directory whose children cannot be unlinked
+		// stands in for the process that died between two entries: the removal of
+		// that shard fails and every other entry is removed as usual. It is the same
+		// end state — a shard the drop did not get, with the drop having run — and it
+		// covers the per-entry failure (EBUSY, an open handle) in the same shot,
+		// which the interruption alone would not.
+		//
+		// EVERY DIRECTORY IN THE SUBTREE HAS TO LOSE THE WRITE BIT, not just the top
+		// one, and the difference is not cosmetic. MEASURED here first: clearing it
+		// on shard_0 alone leaves its store/ subdirectory writable, so os.RemoveAll
+		// descends and empties store/ while index_meta.json survives. That shard is
+		// then not preserved but CORRUPTED, the next open fails on it, and the
+		// corrupt-cache recovery drops the cache and cold-rebuilds — so the search
+		// assertions below went green over a shard that had been destroyed by the
+		// injection rather than kept by the fix. The inventory premise below is what
+		// makes that impossible to repeat.
+		shardDirs := cacheShardDirs(cpath)
+		if len(shardDirs) == 0 {
+			t.Fatalf("premise broken: the flat cache under %s holds no shard_* directory, so "+
+				"there is no shard for the drop to fail on", cpath)
+		}
+		blocked := shardDirs[0]
+		before := treeInventory(t, blocked)
+		if len(before) == 0 {
+			t.Fatalf("premise broken: the shard %s holds no files, so leaving it in place "+
+				"proves nothing", blocked)
+		}
+		chmodDirs(t, blocked, 0o500)
+		t.Cleanup(func() { chmodDirsBestEffort(blocked, 0o755) })
+
+		removeFlatCacheContents(cpath)
+
+		// PREMISE: the injection really did stop a removal, and stopped it WHOLE. A
+		// shard that was removed anyway leaves an empty cache and the assertions
+		// below measure nothing; a shard that was half removed is a corrupt cache,
+		// which the recovery path drops on its own and which would make the search
+		// assertions pass without the fix.
+		if _, statErr := os.Stat(blocked); statErr != nil {
+			t.Fatalf("premise broken: the blocked shard %s was removed anyway (stat err=%v), "+
+				"so nothing was interrupted and the assertions below measure an empty cache",
+				blocked, statErr)
+		}
+		if after := treeInventory(t, blocked); !slices.Equal(before, after) {
+			t.Fatalf("premise broken: the drop changed the blocked shard %s instead of leaving "+
+				"it alone.\n before: %v\n after:  %v\nA damaged shard is dropped by the "+
+				"corrupt-cache recovery, so the assertions below would pass without the "+
+				"ordering this test is about.", blocked, before, after)
+		}
+
+		// ASSERTION 1: the manifest outlived the shard the drop could not take, so
+		// the cache still declares itself foreign and the drop will be retried.
+		//
+		// Errorf and not Fatalf: when this one fails the manifest is gone, which is
+		// precisely the state the assertions below are about, and running them says
+		// what that state costs instead of only that it was reached.
+		if !flatCacheSchemaStale(cpath) {
+			t.Errorf("after a drop that could not remove the shard %s, the cache no longer "+
+				"reads as schema-stale. The manifest was taken while a foreign shard stayed, "+
+				"so the only evidence of the foreign schema is gone and the next start will "+
+				"serve those shards.", blocked)
+		}
+
+		// THE RETRY, DRIVEN THROUGH THE REAL GATE WITH THE OBSTRUCTION STILL THERE.
+		// The assertion above reads the state a drop leaves; this reads what NewIndex
+		// does with it. The gate has to fire a second time, the second drop has to
+		// keep the manifest again, and the partial drop has to be reported rather
+		// than left for an operator to infer from an empty search.
+		rec := captureLogs(t)
+		func() {
+			idx, err := NewIndex(root, cacheDir, false)
+			if err != nil {
+				t.Fatalf("NewIndex over a cache whose drop is still blocked: %v", err)
+			}
+			defer idx.Close()
+			<-idx.Done()
+		}()
+		if !flatCacheSchemaStale(cpath) {
+			t.Errorf("after a start whose drop was blocked again, the cache no longer reads "+
+				"as schema-stale, so the start after it would serve the foreign shards in %s",
+				blocked)
+		}
+		errs := rec.atLevel(slog.LevelError)
+		if !slices.ContainsFunc(errs, func(m string) bool {
+			return strings.Contains(m, "did not take every shard")
+		}) {
+			t.Errorf("a drop that left a shard behind was not reported at ERROR. Messages at "+
+				"ERROR: %v. WARN is dropped by the three default logger configurations this "+
+				"binary runs --build-index and the MCP pipe launch under, so a quieter level "+
+				"is the same as no report at all.", errs)
+		}
+
+		// The obstruction clears, as it does once the process that was holding the
+		// shard is gone. This is the next start, and the question is what it serves.
+		// Restored over the whole subtree for the same reason it was cleared over the
+		// whole subtree: buildShard opens with an os.RemoveAll of the shard path, and
+		// one directory left read-only deeper down fails the rebuild.
+		chmodDirs(t, blocked, 0o755)
+
+		// ASSERTION 2 and 3: the retry, and then the start after it. The second one
+		// is not a repetition — the first start writes a manifest, and if it wrote a
+		// current-stamped one over a foreign shard the gate can never fire again, so
+		// a search that only works once is the self-sealing failure and not a fix.
+		assertIssue46IsSearchable(t, root, cacheDir, "the start after the interruption")
+		assertIssue46IsSearchable(t, root, cacheDir, "the reopen after that")
+	})
+}
+
+// stampFlatCacheOneSchemaBack rewrites the flat manifest under cpath with its
+// schema version moved one back, which is the foreign cache every arm here starts
+// from. It stamps whatever the current version is rather than a literal, for the
+// reason stated at the top of this file.
+func stampFlatCacheOneSchemaBack(t *testing.T, cpath string) {
+	t.Helper()
+	m, err := LoadManifest(cpath)
+	if err != nil || m == nil {
+		t.Fatalf("LoadManifest(%s): m=%v err=%v", cpath, m, err)
+	}
+	m.SchemaVersion = dumpIndexSchemaVersion - 1
+	if err := m.Save(cpath); err != nil {
+		t.Fatalf("saving the stale-stamped manifest: %v", err)
+	}
+}
+
+// assertIssue46IsSearchable opens the index for real and asks the SHARD-BACKED
+// search for a word the tree carries.
+//
+// The mode is smart on purpose. Regex and exact scan the files behind idx.names,
+// which a warm start re-derives from the dump, so both answer correctly over
+// shards that hold nothing of the kind; smart is the only mode whose answer comes
+// out of the shard the drop was supposed to remove. It is also what search_code
+// runs by default.
+func assertIssue46IsSearchable(t *testing.T, root, cacheDir, when string) {
+	t.Helper()
+	idx, err := NewIndex(root, cacheDir, false)
+	if err != nil {
+		t.Fatalf("NewIndex on %s: %v", when, err)
+	}
+	defer idx.Close()
+	<-idx.Done()
+	if err := idx.BuildError(); err != nil {
+		t.Fatalf("BuildError on %s: %v", when, err)
+	}
+
+	matches, stats, err := idx.SearchWithStats(SearchParams{Query: issue46SearchTerm})
+	if err != nil {
+		t.Fatalf("SearchWithStats on %s: %v", when, err)
+	}
+	if len(matches) == 0 {
+		t.Errorf("on %s a search for %q returned no match at all: stats %+v, modules served %v. "+
+			"The dump holds the word, so the shards being searched are not this tree's.",
+			when, issue46SearchTerm, stats, idx.ModuleNames())
+		return
+	}
+	if matches[0].Module != issue46ExtKey {
+		t.Errorf("on %s a search for %q answered with the module %q, want the namespaced key %q",
+			when, issue46SearchTerm, matches[0].Module, issue46ExtKey)
+	}
+}
+
+// treeInventory lists every file under root as "relpath size", sorted, so an
+// injection that was meant to PRESERVE a directory can be shown to have preserved
+// it rather than assumed to have.
+func treeInventory(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return relErr
+		}
+		out = append(out, rel+" "+strconv.FormatInt(info.Size(), 10))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// chmodDirs sets mode on root and on every directory beneath it. Unlinking a file
+// needs the write bit on its PARENT directory, so clearing it on the top directory
+// alone stops nothing deeper than one level.
+func chmodDirs(t *testing.T, root string, mode os.FileMode) {
+	t.Helper()
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return nil
+		}
+		return os.Chmod(p, mode)
+	})
+	if err != nil {
+		t.Fatalf("chmod %s to %o: %v", root, mode, err)
+	}
+}
+
+// chmodDirsBestEffort is chmodDirs for a t.Cleanup, where a failure to restore a
+// mode must not be reported as a test failure of its own.
+func chmodDirsBestEffort(root string, mode os.FileMode) {
+	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil || !info.IsDir() {
+			return nil //nolint:nilerr // best-effort restore
+		}
+		_ = os.Chmod(p, mode)
+		return nil
+	})
 }

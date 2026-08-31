@@ -57,12 +57,21 @@ func cacheShardDirs(cacheDir string) []string {
 	}
 	var dirs []string
 	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), "shard_") {
+		if isFlatShardEntry(e) {
 			dirs = append(dirs, filepath.Join(cacheDir, e.Name()))
 		}
 	}
 	slices.Sort(dirs)
 	return dirs
+}
+
+// isFlatShardEntry reports whether a directory entry is one of the flat cache's
+// shards. It is shared by cacheShardDirs and removeFlatCacheContents so the set
+// the schema gate INSPECTS is the same set the drop REMOVES. Two copies of this
+// predicate could disagree, and a shard the gate counts but the drop does not
+// recognise is exactly the leftover this ordering exists to prevent.
+func isFlatShardEntry(e os.DirEntry) bool {
+	return e.IsDir() && strings.HasPrefix(e.Name(), "shard_")
 }
 
 // removeFlatCacheContents removes the LEGACY flat cache artifacts directly under
@@ -82,6 +91,36 @@ func cacheShardDirs(cacheDir string) []string {
 // instead of announcing one, and it is the difference between a log line an
 // operator can act on and a sentence that is true by construction. The list is
 // what the callers' "removed" attribute carries.
+//
+// THE SHARDS GO FIRST AND THE MANIFEST GOES LAST, AND THE MANIFEST GOES ONLY IF
+// EVERY SHARD WENT. Best-effort means this function can stop anywhere: a process
+// killed mid-drop, or a single os.RemoveAll that fails on an open handle. What it
+// leaves behind is then a state some other reader has to interpret, and only one
+// of the two possible partial states is safe.
+//
+// os.ReadDir returns entries sorted by name, so "manifest.json" is reached before
+// any "shard_*". Removing in that order leaves shards standing with no manifest
+// beside them, and flatCacheSchemaStale answers "reuse" for exactly that shape,
+// deliberately: shards with no manifest are what a build leaves behind before it
+// writes one. So the next start opens shards written under the foreign schema,
+// loadFromManifestAndDiff's manifest==nil branch walks the dump for names and
+// saves a FRESH manifest stamped CURRENT without indexing anything, and from then
+// on the gate has nothing left to fire on. The docIDs in those shards stay the
+// ones the foreign build wrote, so a hit on a key the bump moved is a key
+// GetContent cannot resolve: it is counted, dropped as unreadable, and never
+// reaches the answer. Where the bump moved every key of a dump that is every hit,
+// on that start and on every start after it. GetContent still serves a module
+// asked for by name, so such a dump is unsearchable rather than unreadable, which
+// is why nothing about the state looks broken.
+//
+// Reversed, the only partial state this function can leave is manifest-present
+// with fewer shards, which flatCacheSchemaStale already answers "stale" for, so
+// the drop is retried on the next start.
+//
+// AND ONLY IF EVERY SHARD WENT, because ordering alone does not cover a shard
+// whose removal FAILS. Removing the manifest after that would take the only
+// surviving evidence that the shards beside it are foreign, which is the same end
+// state by a different route.
 func removeFlatCacheContents(cpath string) []string {
 	if cpath == "" {
 		return nil
@@ -91,14 +130,45 @@ func removeFlatCacheContents(cpath string) []string {
 		return nil
 	}
 	var removed []string
+	shardsLeft := 0
+
+	// The shards first.
+	for _, e := range entries {
+		if !isFlatShardEntry(e) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(cpath, e.Name())); err == nil {
+			removed = append(removed, e.Name())
+		} else {
+			shardsLeft++
+		}
+	}
+
+	// Then everything else that is neither a generation nor the manifest.
 	for _, e := range entries {
 		if e.Name() == generationsDirName {
 			continue // preserve immutable generations
+		}
+		if e.Name() == manifestFileName || isFlatShardEntry(e) {
+			continue
 		}
 		if err := os.RemoveAll(filepath.Join(cpath, e.Name())); err == nil {
 			removed = append(removed, e.Name())
 		}
 	}
+
+	// The manifest last, and not at all while a shard it describes is still there.
+	if shardsLeft == 0 {
+		for _, e := range entries {
+			if e.Name() != manifestFileName {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(cpath, e.Name())); err == nil {
+				removed = append(removed, e.Name())
+			}
+		}
+	}
+
 	slices.Sort(removed)
 	return removed
 }
