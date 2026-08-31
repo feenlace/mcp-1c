@@ -135,6 +135,30 @@ const (
 	// it never reached.
 	maxExtensionScan = 64
 
+	// maxNestedProbeEntries bounds the size of a directory the one-level descent
+	// below will list through. Past it the descent stops and records a doubt.
+	//
+	// IT IS A HYPOTHESIS AND NO CORPUS IN THIS TREE STANDS BEHIND IT. The argument
+	// for a small number is that a directory which WRAPS a dump is small by
+	// construction, while a directory holding product data is not; the tree the
+	// defect was reported against holds one entry. The failure it can produce is
+	// always the REPORTED one: too small refuses to look and says doubtScanTruncated,
+	// never a silent miss. What would settle the value is a census over real --dump
+	// roots recording, for every top-level directory belongsToSelfExtension does not
+	// refuse, its entry count and whether a subdirectory of it carries an extension
+	// manifest. Nothing here has measured that.
+	maxNestedProbeEntries = 32
+
+	// maxNestedProbeChildren bounds how many subdirectories the descent asks the
+	// manifest question about IN TOTAL, across every child of the root.
+	//
+	// It is maxExtensionScan and is written as that constant rather than as its
+	// value: the second level may never spend more manifest questions than the
+	// first is already allowed to spend. That inequality is the whole of the
+	// justification, and the number it resolves to is as unmeasured as the one
+	// above.
+	maxNestedProbeChildren = maxExtensionScan
+
 	// maxExtensionNameRunes bounds an accepted extension name. It is a bound on
 	// what becomes a key component and a rendered string, not a platform limit.
 	maxExtensionNameRunes = 128
@@ -206,6 +230,22 @@ type extensionLayout struct {
 	// byDir maps an immediate child directory to the extension name its own
 	// manifest declares, the -AllExtensions shape. Nil otherwise.
 	byDir map[string]string
+	// byPrefix maps a TWO-SEGMENT root-relative prefix, "<child>/<grandchild>" and
+	// always slash-separated whatever the platform's separator is, to the extension
+	// name the manifest there declares. Nil otherwise.
+	//
+	// It exists because the two halves of the key derivation disagreed about depth.
+	// This detection stopped at the root's immediate children while anchorIndex in
+	// index.go scans EVERY segment, so an extension one level lower than the
+	// detection looks had its wrapper segments dropped with no namespace put back
+	// and its modules landed on the base configuration's own keys. Measured on the
+	// tree of issue 46: the surviving key served the EXTENSION's bytes, because
+	// WalkDir is lexical and the second write into pathByName won.
+	//
+	// A key of this map can never share its first segment with a key of byDir: the
+	// descent runs only where the child's own verdict was manifestAbsent, which is
+	// exactly the verdict that keeps that child out of byDir.
+	byPrefix map[string]string
 	// doubts is every directory whose extension-ness could not be decided. It is
 	// never a reason to guess; it is the thing that gets reported.
 	doubts []layoutDoubt
@@ -223,7 +263,9 @@ type extensionScanCost struct {
 }
 
 // empty reports whether the layout changes nothing.
-func (l extensionLayout) empty() bool { return l.self == "" && len(l.byDir) == 0 }
+func (l extensionLayout) empty() bool {
+	return l.self == "" && len(l.byDir) == 0 && len(l.byPrefix) == 0
+}
 
 // moduleKey derives the index key for a dump-relative path under this layout.
 //
@@ -236,9 +278,19 @@ func (l extensionLayout) empty() bool { return l.self == "" && len(l.byDir) == 0
 // a container that carries its own manifest, "ExtA/..." is ExtA's and only what is
 // left over is the container's. Resolving that by precedence instead, the way this
 // did before, filed every child under the container's name and collided them with
-// each other.
+// each other. THE LONGER PREFIX IS ASKED FIRST for the same reason one level
+// further down: two segments are more specific evidence than one.
 func (l extensionLayout) moduleKey(relPath string) string {
 	slash := filepath.ToSlash(relPath)
+	if len(l.byPrefix) > 0 {
+		parts := strings.Split(slash, "/")
+		// Two segments for the prefix and at least one for what is inside it.
+		if len(parts) >= 3 {
+			if name, ok := l.byPrefix[parts[0]+"/"+parts[1]]; ok {
+				return NFC("ext." + name + "." + bslPathToModuleName(strings.Join(parts[2:], "/")))
+			}
+		}
+	}
 	if len(l.byDir) > 0 {
 		parts := strings.Split(slash, "/")
 		// At least a directory and a file, or there is no extension subtree to be
@@ -263,6 +315,23 @@ func (l extensionLayout) moduleKey(relPath string) string {
 // manifest's name byte-exactly is paid ONLY on that same Lstat hit, which on a base
 // configuration dump means once, at the root. TestLayoutDetectionCostIsBounded
 // measures it as numbers rather than arguing it.
+//
+// THE DESCENT: ONE LEVEL FURTHER, AND ONLY WHERE THE FIRST LEVEL FOUND NOTHING. A
+// child whose own verdict was manifestAbsent, and whose NAME is not one
+// belongsToSelfExtension refuses, is listed once and each of ITS subdirectories is
+// asked the same manifest question. Nothing below that is looked at. The listing is
+// refused past maxNestedProbeEntries and the subdirectories asked across ALL
+// children are capped by maxNestedProbeChildren; both caps record
+// doubtScanTruncated rather than passing over in silence, for the reason
+// maxExtensionScan gives.
+//
+// WHAT THAT COSTS A BASE CONFIGURATION depends on its top level, not on its size.
+// The five kind directories of the tree TestLayoutDetectionCostIsBounded builds are
+// all dumpDirNames members, so they are refused BY NAME before any listing and that
+// test's exact numbers do not move. A real dump can still hold a top-level
+// directory the table does not name: ExternalDataProcessors is deliberately absent
+// from dumpDirNames (see metadata_types.go), and a directory like it is listed on
+// every start.
 //
 // KNOWN LIMIT, stated because it is real: GenSig hashes the .bsl files of a dump
 // and nothing else, so ADDING a Configuration.xml to a dump that already has a
@@ -289,6 +358,7 @@ func detectExtensionLayout(dir string) extensionLayout {
 	}
 
 	scanned := 0
+	probed := 0
 	for _, e := range ents {
 		if !e.IsDir() {
 			continue
@@ -310,9 +380,93 @@ func detectExtensionLayout(dir string) extensionLayout {
 			l.byDir[child] = name
 		case manifestUndecided:
 			l.doubts = append(l.doubts, layoutDoubt{dir: child, reason: reason})
+		case manifestAbsent:
+			// NOTHING HERE, SO LOOK ONE LEVEL LOWER. manifestNotExtension is
+			// deliberately not in this branch: a child that carries a manifest and
+			// was read to its end has ANSWERED, and this file does not ask what else
+			// it might be. Whether such a child is a dump root of its own is
+			// dumproot.go's question (DumpRootInspection.NestedRoots).
+			//
+			// The name check is the SAME predicate the -Extension branch above uses,
+			// asked here for a different reason and therefore not folded into that
+			// call site: there it says «this is the root extension's own content»,
+			// here it says «this is the content of whatever holds it». Descending
+			// into one would cost a ReadDir per kind directory and an Lstat per
+			// object below it, on every start, which is the growth
+			// TestLayoutDetectionCostIsBounded exists to refuse.
+			if belongsToSelfExtension(child) {
+				continue
+			}
+			l.probeNestedExtensions(dir, child, &probed)
 		}
 	}
 	return l
+}
+
+// probeNestedExtensions asks the manifest question about the immediate children of
+// ONE child of the dump root, and records a hit under the two-segment prefix that
+// reaches it. It goes no deeper: depth two below the root is the whole of it.
+func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int) {
+	if *budget >= maxNestedProbeChildren {
+		l.noteNestedTruncation(child)
+		return
+	}
+	path := filepath.Join(root, child)
+
+	ents, err := os.ReadDir(path)
+	if err != nil {
+		// SILENT, AND THAT MATCHES WHAT THE LEVEL ABOVE ALREADY DID. This branch is
+		// reached only on manifestAbsent, and manifestVerdictOf returned that for
+		// THIS SAME DIRECTORY while recording no doubt. Reporting the directory here
+		// and not there would leave the two levels disagreeing about one directory,
+		// which is a change to the depth-one answer and not this one.
+		return
+	}
+	l.cost.ReadDirs++
+
+	// THE SIZE OF A DIRECTORY NOBODY HAS CLASSIFIED IS THE COST OF LOOKING IN IT.
+	// Refusing is reported rather than silent because «no extension below this» and
+	// «I did not look below this» are different answers, and the second is the one
+	// that files an extension into the base keyspace with nothing to show for it.
+	if len(ents) > maxNestedProbeEntries {
+		l.noteNestedTruncation(child)
+		return
+	}
+
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		if *budget >= maxNestedProbeChildren {
+			l.noteNestedTruncation(child)
+			return
+		}
+		*budget++
+		grand := e.Name()
+		prefix := child + "/" + grand
+		switch verdict, name, reason := manifestVerdictOf(filepath.Join(path, grand), &l.cost); verdict {
+		case manifestExtension:
+			if l.byPrefix == nil {
+				l.byPrefix = make(map[string]string, 2)
+			}
+			l.byPrefix[prefix] = name
+		case manifestUndecided:
+			l.doubts = append(l.doubts, layoutDoubt{dir: prefix, reason: reason})
+		}
+	}
+}
+
+// noteNestedTruncation records the truncation ONCE however many directories the
+// descent had to pass over. summary folds every doubtScanTruncated into one
+// boolean, so a second entry tells the operator nothing while the slice would grow
+// with the tree.
+func (l *extensionLayout) noteNestedTruncation(dir string) {
+	for _, d := range l.doubts {
+		if d.reason == doubtScanTruncated {
+			return
+		}
+	}
+	l.doubts = append(l.doubts, layoutDoubt{dir: dir, reason: doubtScanTruncated})
 }
 
 // belongsToSelfExtension reports whether a child directory of a root that is
@@ -718,9 +872,15 @@ func elementText(b []byte, tag string) (string, bool) {
 type ExtensionLayoutSummary struct {
 	// SelfNamed reports that the inspected path is itself one extension.
 	SelfNamed bool
-	// Extensions is how many immediate child directories are extensions.
+	// Extensions is how many directories below the inspected path are extensions.
+	// The detection reaches two levels down, so this counts the immediate children
+	// that declare one PLUS the grandchildren the descent found under a child that
+	// declared none.
 	Extensions int
-	// Dirs are those child directories, sorted. OPERATOR LOG ONLY; see above.
+	// Dirs are those directories as root-relative prefixes, slash-separated on
+	// every platform, sorted. A child contributes one segment and a grandchild two,
+	// so a reader is told WHERE the extension is and not only that one exists.
+	// OPERATOR LOG ONLY; see above.
 	Dirs []string
 	// The ways a directory can be undecided, counted separately because the
 	// thing to do about each of them differs.
@@ -750,9 +910,12 @@ func (s ExtensionLayoutSummary) Quiet() bool {
 func (l extensionLayout) summary() ExtensionLayoutSummary {
 	var s ExtensionLayoutSummary
 	s.SelfNamed = l.self != ""
-	s.Extensions = len(l.byDir)
+	s.Extensions = len(l.byDir) + len(l.byPrefix)
 	for dir := range l.byDir {
 		s.Dirs = append(s.Dirs, dir)
+	}
+	for prefix := range l.byPrefix {
+		s.Dirs = append(s.Dirs, prefix)
 	}
 	slices.Sort(s.Dirs)
 	for _, d := range l.doubts {
