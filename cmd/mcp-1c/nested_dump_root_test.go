@@ -217,8 +217,11 @@ func TestNestedDumpRootMessageSaysOnlyWhatWasMeasured(t *testing.T) {
 	twoRoots := dump.DumpRootInspection{NestedRoots: []string{"ext", "main"}}
 
 	// Every root below the path is a recognised extension: no overwrite is claimed
-	// and no discard is prescribed.
-	allExt := nestedDumpRootMessage(twoRoots, dump.ExtensionLayoutSummary{Extensions: 2})
+	// and no discard is prescribed. Dirs says WHICH directories those are, and a
+	// summary from the detection always carries one entry per counted extension, so
+	// a count without them is a shape dump.InspectExtensionLayout cannot return.
+	allExt := nestedDumpRootMessage(twoRoots,
+		dump.ExtensionLayoutSummary{Extensions: 2, Dirs: []string{"ext", "main"}})
 	if allExt == "" {
 		t.Fatal("the message is empty for an inspection that found roots")
 	}
@@ -267,9 +270,9 @@ func TestNestedDumpRootMessageSaysOnlyWhatWasMeasured(t *testing.T) {
 
 	// Truncation is carried rather than dropped.
 	cut := nestedDumpRootMessage(dump.DumpRootInspection{NestedRoots: []string{"main"}, Truncated: true},
-		dump.ExtensionLayoutSummary{Extensions: 1})
+		dump.ExtensionLayoutSummary{Extensions: 1, Dirs: []string{"main"}})
 	if cut == nestedDumpRootMessage(dump.DumpRootInspection{NestedRoots: []string{"main"}},
-		dump.ExtensionLayoutSummary{Extensions: 1}) {
+		dump.ExtensionLayoutSummary{Extensions: 1, Dirs: []string{"main"}}) {
 		t.Error("a truncated scan produces the same sentence as a complete one, so the " +
 			"operator cannot tell a full answer from a partial one")
 	}

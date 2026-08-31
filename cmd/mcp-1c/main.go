@@ -576,6 +576,35 @@ func dumpPathFault(dumpDir string) error {
 	return nil
 }
 
+// extensionRootsAmong is how many of nested the layout detection recognised as
+// extensions.
+//
+// IT COMPARES DIRECTORIES, because the sentences that read it are about
+// directories. ExtensionLayoutSummary.Extensions counts what the detection
+// recognised at EITHER of the two levels it reaches, while
+// DumpRootInspection.NestedRoots holds immediate children and nothing else, so a
+// grandchild raises that count while never being one of the roots a sentence here
+// describes. «One root below the path, one extension below the path» therefore
+// holds for a tree where those are DIFFERENT DIRECTORIES.
+//
+// Dirs carries the prefix that reaches each one, one segment for a child and two
+// for a grandchild, and a name in NestedRoots is a single directory name that can
+// carry no separator at all, so a grandchild's prefix cannot match one. The names
+// are compared and never rendered: they are read off disk, and the prose here
+// carries no тире.
+func extensionRootsAmong(nested []string, layout dump.ExtensionLayoutSummary) int {
+	n := 0
+	for _, root := range nested {
+		for _, dir := range layout.Dirs {
+			if dir == root {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
 // nestedDumpRootMessage is what to say when --dump does not point at the dump
 // root, or "" when there is nothing to say.
 //
@@ -645,6 +674,11 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 			" штуки, их имена в поле roots. "
 	}
 
+	// EVERY SENTENCE BELOW IS ABOUT THE ROOTS BELOW THE PATH. extRoots is how many
+	// of them the detection recognised; layout.Extensions counts directories deeper
+	// than a root as well and cannot answer that question.
+	extRoots := extensionRootsAmong(insp.NestedRoots, layout)
+
 	switch {
 	case len(insp.NestedRoots) == 1:
 		// ONE ROOT BELOW THE PATH, AND THERE IS NOTHING FOR ITS MODULES TO OVERWRITE.
@@ -661,30 +695,43 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 		// nothing about loss in either direction: an inspection that read one ReadDir
 		// has not measured what the index will do, and «ничего не потеряется» would
 		// be the same kind of sentence as the one being removed, only reassuring.
-		if layout.Extensions == 1 {
+		//
+		// AND NEITHER SENTENCE IS SAID WHEN THE EVIDENCE IS ABOUT SOMEWHERE ELSE.
+		// The second one prescribes the path change, and that change drops every
+		// recognised extension outside this root, so it is said only when the
+		// detection recognised none.
+		switch {
+		case extRoots == 1:
 			msg += "Он опознан как выгрузка расширения, и сервер проиндексирует его под " +
 				"собственным именем, так что содержимое не потеряется. Указывать его в " +
 				"--dump нужно только если вам нужен именно он."
-		} else {
+		case layout.Extensions == 0:
 			msg += "Он не опознан как выгрузка расширения. Укажите в --dump сам этот корень."
 		}
-	case layout.Extensions >= len(insp.NestedRoots):
+	case extRoots >= len(insp.NestedRoots):
 		// Every root below the path is a recognised extension. Their modules get
 		// their own namespace, so nothing collides and nothing is lost; saying so is
 		// what stops the operator from re-pointing the path and discarding the rest.
 		msg += "Все они опознаны как выгрузки расширений, и сервер проиндексирует " +
 			"каждую под её собственным именем, так что содержимое не потеряется. " +
 			"Указывать один из них в --dump нужно только если вам нужен именно он."
-	case layout.Extensions > 0:
+	case extRoots > 0:
 		msg += "Часть из них опознана как выгрузки расширений и получит собственные " +
 			"имена, остальные попадут в общее пространство ключей и могут затереть " +
 			"друг друга. Укажите в --dump тот корень, который вам нужен."
-	default:
+	case layout.Extensions == 0:
+		// Its second clause is about the modules of those roots, and the modules of a
+		// recognised extension below one of them are not in that keyspace: moduleKey
+		// gives them their own. So the clause is said when the detection recognised
+		// nothing at all, which is when it covers every module under the path.
 		msg += "Ни один из них не опознан как выгрузка расширения, поэтому их модули " +
 			"попадают в одно пространство ключей и затирают друг друга. Укажите в " +
 			"--dump тот корень, который вам нужен."
 	}
 
+	// The switch can add nothing at all, and the sentence before it ends with a
+	// space, so the join is trimmed rather than assumed.
+	msg = strings.TrimRight(msg, " ")
 	msg += " Сервер не переходит внутрь сам, потому что выбрать за вас не может, " +
 		"а молчаливый переход скрыл бы ошибку пути ровно так же, как она скрывалась до сих пор."
 	if insp.Truncated {
