@@ -278,7 +278,7 @@ func TestNestedDumpRootMessageSaysOnlyWhatWasMeasured(t *testing.T) {
 	}
 }
 
-// TestStartupMessagesCarryNoDashAndNoDiskContent drives every branch of both
+// TestStartupMessagesCarryNoDashAndNoDiskContent drives both
 // sentences past a byte scan for the dash characters, and past a HOSTILE directory
 // name rather than a polite one.
 //

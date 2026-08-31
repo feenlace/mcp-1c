@@ -250,6 +250,24 @@ func TestTheNameCheckDoesNotDependOnDirectoryOrder(t *testing.T) {
 			collisionGenuineDir, late, strings.Compare(collisionGenuineDir, late) < 0)
 	}
 
+	// THE CONTROL, AND WITHOUT IT THIS TEST MEASURES NOTHING. Agreement is what is
+	// asserted below, and two EMPTY answers agree: with the descent switched off
+	// neither tree records a prefix entry, both fingerprints read prefixNames=[],
+	// and the comparison is green. So the same two trees are built with the deeper
+	// directory declaring a name of ITS OWN, on BOTH sides of the sort boundary, and
+	// the descent has to record it on both. This is the shape the three tests
+	// around it carry: an empty byPrefix is a DROP only where a different name fills
+	// it.
+	for _, wrapper := range []string{early, late} {
+		ctrl := detectExtensionLayout(mkCollisionTree(t, wrapper, "Иное"))
+		prefix := wrapper + "/" + collisionImpostor
+		if got := ctrl.byPrefix[prefix]; got != "Иное" {
+			t.Fatalf("control: byPrefix[%q] = %q, want %q. The descent does not reach that "+
+				"directory at all, so the agreement below is two empty answers agreeing. "+
+				"Full layout: %+v", prefix, got, "Иное", ctrl)
+		}
+	}
+
 	earlyLayout := detectExtensionLayout(mkCollisionTree(t, early, collisionExtName))
 	lateLayout := detectExtensionLayout(mkCollisionTree(t, late, collisionExtName))
 
