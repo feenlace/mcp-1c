@@ -563,7 +563,7 @@ var namespaceDigestCorpus = []string{
 
 const (
 	bslNamespaceCorpusDigest              = "1526cd4d57389758fbf3833ea75faff115eaa486a093a342c88dc6a534ea8871"
-	pinnedSchemaVersionForNamespaceDigest = 6
+	pinnedSchemaVersionForNamespaceDigest = 7
 )
 
 // namespaceCorpusDigest is sha256 over "<key>\t<namespace>\n" for

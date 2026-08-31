@@ -517,9 +517,19 @@ const bslUnwrappedCorpusDigest = "7e0d5d125153d6af3e6601479212439c7034a87e17225d
 // the bump is owed to the persisted namespace FIELD moving under keys that
 // themselves stand still. Had this digest moved, the namespace change would have
 // been reaching into the key derivation, which is not what it is allowed to do.
+//
+// IT DID NOT MOVE ACROSS 6 -> 7 EITHER, AND THERE THAT IS WEAKER EVIDENCE THAN IT
+// LOOKS. v7 changes extensionLayout.moduleKey, one layer ABOVE
+// bslPathToModuleName, so an extension nested two levels below the dump root is
+// keyed into its own namespace instead of the base configuration's. This digest is
+// taken over bslPathToModuleName directly and never through a layout, so it could
+// not have moved whatever v7 did there: it is blind to that change by
+// construction. Its standing still says the path-to-key function is untouched,
+// which is true and is the whole of what it says. Nothing in this package pins the
+// keys a layout produces.
 const (
 	bslKeyCorpusDigest              = "0803e4ed74354c08f4606b0fbf4599ac82078508bcf97cb66a7fd63941246351"
-	pinnedSchemaVersionForKeyDigest = 6
+	pinnedSchemaVersionForKeyDigest = 7
 )
 
 func digestOf(paths []string) (string, string) {

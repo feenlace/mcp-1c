@@ -195,7 +195,35 @@ const (
 	// stale shard, and IN it for regex and exact, which read the freshly derived
 	// PathIndex — one process answering one question two ways, which is worse than
 	// either answer alone. The bump forces the rebuild that makes them agree.
-	dumpIndexSchemaVersion = 6
+	//
+	// v7: the docID derivation moved again, and this time one layer ABOVE
+	// bslPathToModuleName. detectExtensionLayout now descends one level below the
+	// dump root and records what it finds under a two-segment prefix, and moduleKey
+	// resolves that longer prefix before the one-segment one, so an extension that
+	// sits two levels down is keyed into its own namespace instead of being filed
+	// under the base configuration's own keys. The change is in extlayout.go and
+	// reaches a docID through moduleKeyFor, the chokepoint in index.go.
+	//
+	// NO DIGEST IN THIS PACKAGE PINS THE KEYS THAT MOVE, and saying so is the point
+	// rather than an aside. bslKeyCorpusDigest and bslUnwrappedCorpusDigest are taken
+	// over bslPathToModuleName directly and never through a layout, so they are blind
+	// to this change by construction; bslNamespaceCorpusDigest is taken over
+	// splitModuleKey, which reads a key that already exists. All three are unmoved
+	// across this bump, and what that says is that the path-to-key function and the
+	// namespace rule are untouched, NOT that no key moved.
+	//
+	// It takes a bump for the reason the v4 entry above gives, applied to a different
+	// tree shape. A docID is PERSISTED: buildManifest writes one per file as "d", and
+	// readGenerationNames and the unchanged half of a manifest diff read it back out
+	// of the manifest rather than re-deriving it from the path. genSig hashes the
+	// relpath, mtime and size of every .bsl plus the three version integers and
+	// nothing else, and this branch adds no .bsl and moves none, so a wrongly nested
+	// installation computes the same signature before and after. Without the bump it
+	// keeps its READY generation, or keeps a flat cache flatCacheSchemaStale would
+	// otherwise call current, and goes on answering with the pre-fix keys until an
+	// operator runs --reindex. The population whose keys are wrong today would be the
+	// one population the fix does not reach.
+	dumpIndexSchemaVersion = 7
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and
