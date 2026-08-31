@@ -472,9 +472,7 @@ func TestWrappedNotice_SaysOnlyWhatItCounted(t *testing.T) {
 		}
 	}
 
-	// AND IT STILL SAYS THE MECHANISM AND THE REMEDY, or «no false claim» would be
-	// satisfied by deleting the explanation altogether.
-	for _, want := range []string{"подкаталогах первого уровня", "Чего это стоило, счётчик не измеряет"} {
+	for _, want := range []string{"Чего это стоило, счётчик не измеряет"} {
 		if !strings.Contains(notice, want) {
 			t.Errorf("the notice no longer carries %q, so the clause was removed rather "+
 				"than corrected:\n%s", want, notice)

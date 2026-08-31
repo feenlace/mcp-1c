@@ -634,13 +634,6 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 		// from a path two levels above a real root, and its keys are perfectly
 		// correct. Guessing would put a warning in front of every operator with a
 		// partial but valid tree.
-		//
-		// The case that matters here, a --dump two levels too high, is reported on
-		// the other channel and by MEASUREMENT rather than by shape: every file in
-		// such a tree is keyed from a path the anchor scan had to move, which is
-		// what dump.WrappedPathState counts and what the notice in
-		// tools/index_notice.go carries. That number is zero for the partial tree
-		// above and is every file for this one.
 		return ""
 	}
 

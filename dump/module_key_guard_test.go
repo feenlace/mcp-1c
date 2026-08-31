@@ -525,8 +525,7 @@ const bslUnwrappedCorpusDigest = "7e0d5d125153d6af3e6601479212439c7034a87e17225d
 // taken over bslPathToModuleName directly and never through a layout, so it could
 // not have moved whatever v7 did there: it is blind to that change by
 // construction. Its standing still says the path-to-key function is untouched,
-// which is true and is the whole of what it says. Nothing in this package pins the
-// keys a layout produces.
+// which is true and is the whole of what it says.
 const (
 	bslKeyCorpusDigest              = "0803e4ed74354c08f4606b0fbf4599ac82078508bcf97cb66a7fd63941246351"
 	pinnedSchemaVersionForKeyDigest = 7

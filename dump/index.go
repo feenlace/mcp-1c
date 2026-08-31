@@ -740,19 +740,6 @@ func bslPathToModuleName(relPath string) string {
 	// (len(parts) < 4) falls through to the base parser unchanged, which keeps
 	// the previous behaviour and never panics.
 	//
-	// THIS SHAPE KEYS OFF THE DIRECTORY, THE OTHER TWO KEY OFF THE MANIFEST, AND
-	// THAT ASYMMETRY IS INTENDED. Stated here because the question gets asked of
-	// this line, not of extlayout.go, and because the answer is not the obvious one.
-	//
-	// IT CANNOT READ A MANIFEST. The platform never writes a "Расширения" directory;
-	// it is a hand made tree. detectExtensionLayout Lstats a child's
-	// Configuration.xml at depth 1, whereas this layout would put one at depth 2, so
-	// there is nothing for the manifest rule to consult even in principle. Reaching
-	// down a level would cost a listing per grandchild, which is the growth
-	// TestLayoutDetectionCostIsBounded exists to forbid, and a hand made tree
-	// normally carries no manifest at all, so the rule would find nothing and every
-	// pinned Расширения key would lose its namespace.
-	//
 	// AND IT DELIBERATELY DOES NOT RUN validExtensionName OVER parts[1]. That gate
 	// exists for a name a MANIFEST declares, where accepting one is a claim this
 	// server makes about a whole tree from the contents of a single file, and the
@@ -1207,9 +1194,7 @@ type Index struct {
 // What does NOT go through it is a key that was already derived once and written
 // down: readGenerationNames and the unchanged half of a manifest diff take the
 // DocID straight out of the generation manifest, because re-deriving it there
-// would let one generation disagree with itself about a file nobody touched. The
-// version that governs whether such a manifest may be adopted at all is
-// dumpIndexSchemaVersion, and the extension layout rides its v4 bump.
+// would let one generation disagree with itself about a file nobody touched.
 func (idx *Index) moduleKeyFor(relPath string) string {
 	return idx.layout().moduleKey(relPath)
 }
