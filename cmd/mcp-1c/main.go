@@ -605,6 +605,39 @@ func extensionRootsAmong(nested []string, layout dump.ExtensionLayoutSummary) in
 	return n
 }
 
+// extensionsOutsideRoots is how many of the extensions the detection recognised lie
+// outside every one of nested.
+//
+// IT ANSWERS A DIFFERENT QUESTION FROM extensionRootsAmong, and the two answers
+// decide different sentences. That one asks whether a root IS an extension, which is
+// what a sentence ABOUT THE ROOTS needs. This one asks what re-pointing --dump at one
+// of them would throw out of the index, which is what an INSTRUCTION needs. An
+// extension one level below a root is invisible to the first and not to the second,
+// and inside plus outside is exactly layout.Extensions, so no single count over that
+// total can decide both.
+//
+// Dirs are root-relative and slash-separated on every platform, one segment for a
+// child and two for a grandchild, while a name in nested is a single directory name
+// carrying no separator, so the prefix test is what puts a grandchild under its root
+// and an equality test alone would miss it. The names are compared and never
+// rendered, for the reason extensionRootsAmong gives.
+func extensionsOutsideRoots(nested []string, layout dump.ExtensionLayoutSummary) int {
+	n := 0
+	for _, dir := range layout.Dirs {
+		inside := false
+		for _, root := range nested {
+			if dir == root || strings.HasPrefix(dir, root+"/") {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			n++
+		}
+	}
+	return n
+}
+
 // nestedDumpRootMessage is what to say when --dump does not point at the dump
 // root, or "" when there is nothing to say.
 //
@@ -678,6 +711,14 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 	// of them the detection recognised; layout.Extensions counts directories deeper
 	// than a root as well and cannot answer that question.
 	extRoots := extensionRootsAmong(insp.NestedRoots, layout)
+	// AND THE OTHER TWO NUMBERS THE SENTENCES BELOW NEED. extOutside is what a
+	// change of path would discard; extInside is what a claim about a shared
+	// keyspace has to exclude. The subtraction is exact rather than convenient:
+	// dump/extlayout.go builds Dirs with one entry per recognised extension and
+	// sets Extensions to that same total, so the two halves add back up and the
+	// layout is walked once.
+	extOutside := extensionsOutsideRoots(insp.NestedRoots, layout)
+	extInside := layout.Extensions - extOutside
 
 	switch {
 	case len(insp.NestedRoots) == 1:
@@ -695,18 +736,13 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 		// nothing about loss in either direction: an inspection that read one ReadDir
 		// has not measured what the index will do, and «ничего не потеряется» would
 		// be the same kind of sentence as the one being removed, only reassuring.
-		//
-		// AND NEITHER SENTENCE IS SAID WHEN THE EVIDENCE IS ABOUT SOMEWHERE ELSE.
-		// The second one prescribes the path change, and that change drops every
-		// recognised extension outside this root, so it is said only when the
-		// detection recognised none.
 		switch {
 		case extRoots == 1:
 			msg += "Он опознан как выгрузка расширения, и сервер проиндексирует его под " +
 				"собственным именем, так что содержимое не потеряется. Указывать его в " +
 				"--dump нужно только если вам нужен именно он."
-		case layout.Extensions == 0:
-			msg += "Он не опознан как выгрузка расширения. Укажите в --dump сам этот корень."
+		default:
+			msg += "Он не опознан как выгрузка расширения."
 		}
 	case extRoots >= len(insp.NestedRoots):
 		// Every root below the path is a recognised extension. Their modules get
@@ -718,20 +754,31 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 	case extRoots > 0:
 		msg += "Часть из них опознана как выгрузки расширений и получит собственные " +
 			"имена, остальные попадут в общее пространство ключей и могут затереть " +
-			"друг друга. Укажите в --dump тот корень, который вам нужен."
-	case layout.Extensions == 0:
+			"друг друга."
+	case extInside == 0:
 		// Its second clause is about the modules of those roots, and the modules of a
 		// recognised extension below one of them are not in that keyspace: moduleKey
-		// gives them their own. So the clause is said when the detection recognised
-		// nothing at all, which is when it covers every module under the path.
+		// gives them their own.
 		msg += "Ни один из них не опознан как выгрузка расширения, поэтому их модули " +
-			"попадают в одно пространство ключей и затирают друг друга. Укажите в " +
-			"--dump тот корень, который вам нужен."
+			"попадают в одно пространство ключей и затирают друг друга."
 	}
 
 	// The switch can add nothing at all, and the sentence before it ends with a
 	// space, so the join is trimmed rather than assumed.
 	msg = strings.TrimRight(msg, " ")
+
+	// THE INSTRUCTION HAS ITS OWN PREDICATE, and that separation is the repair.
+	// Re-pointing --dump at one root discards every recognised extension that is
+	// not under it, so it is withheld while there is one. The two arms that report
+	// every root recognised carry their own instruction, and extRoots keeps this
+	// one out of them.
+	if extOutside == 0 && extRoots < len(insp.NestedRoots) {
+		if len(insp.NestedRoots) == 1 {
+			msg += " Укажите в --dump сам этот корень."
+		} else {
+			msg += " Укажите в --dump тот корень, который вам нужен."
+		}
+	}
 	msg += " Сервер не переходит внутрь сам, потому что выбрать за вас не может, " +
 		"а молчаливый переход скрыл бы ошибку пути ровно так же, как она скрывалась до сих пор."
 	if insp.Truncated {
