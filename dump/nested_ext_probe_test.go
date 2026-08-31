@@ -198,19 +198,15 @@ func TestNestedProbeDoesNotDescendIntoARecognisedExtension(t *testing.T) {
 	}
 }
 
-// TestNestedProbeStopsAtALargeDirectoryAndSaysSo.
+// TestNestedProbeStopsAtALargeDirectoryAndKeepsTheBaseKeys.
 //
 // The descent lists a directory it knows nothing about, so its cost is that
-// directory's size. Past maxNestedProbeEntries it stops, and STOPPING IS REPORTED:
-// «there is no extension below this» and «I did not look below this» are different
-// answers, and the second one is the one that turns a lossless tree lossy without
-// anything to show for it. The doubt is the same doubtScanTruncated the depth-one
-// cap already records, so it reaches the operator through the channel that exists.
+// directory's size. Past maxNestedProbeEntries it stops.
 //
 // THE CONTROL IS ONE FILLER DIRECTORY FEWER. It sits exactly ON the guard rather
 // than far from it, so the pair measures the boundary and not the general idea that
 // small trees are scanned.
-func TestNestedProbeStopsAtALargeDirectoryAndSaysSo(t *testing.T) {
+func TestNestedProbeStopsAtALargeDirectoryAndKeepsTheBaseKeys(t *testing.T) {
 	const (
 		wrapper  = "Обёртка"
 		nested   = "extension"
@@ -241,9 +237,11 @@ func TestNestedProbeStopsAtALargeDirectoryAndSaysSo(t *testing.T) {
 	// so its listing is one entry PAST the guard.
 	big := build(t, maxNestedProbeEntries)
 	s := big.summary()
-	if !s.ScanTruncated {
-		t.Errorf("summary = %+v, want ScanTruncated: a directory too large to probe was "+
-			"passed over in silence, which reads as «no extension below this»", s)
+	if s.ScanTruncated {
+		t.Errorf("summary = %+v, want ScanTruncated false: declining the one-level descent "+
+			"leaves the keys the shipped contract already had, and the notice this flag "+
+			"raises says modules were indexed without an extension name, which is false "+
+			"of every tree that lost nothing", s)
 	}
 	if len(big.byPrefix) != 0 || s.Extensions != 0 {
 		t.Errorf("byPrefix = %v, Extensions = %d: the guard did not stop the descent",
@@ -360,9 +358,10 @@ func TestNestedProbeSpendsABoundedTotalAcrossChildren(t *testing.T) {
 	// even listed.
 	spent := build(t, maxNestedProbeEntries, false)
 	s := spent.summary()
-	if !s.ScanTruncated {
-		t.Errorf("summary = %+v, want ScanTruncated: the budget ran out before the last "+
-			"child and saying nothing reads as «no extension below this»", s)
+	if s.ScanTruncated {
+		t.Errorf("summary = %+v, want ScanTruncated false: the budget ran out before the "+
+			"last child, and declining an optional extra look is not a doubt about what "+
+			"the index holds", s)
 	}
 	if s.Extensions != 0 {
 		t.Errorf("summary = %+v, want no extension found past an exhausted budget", s)
@@ -393,9 +392,10 @@ func TestNestedProbeSpendsABoundedTotalAcrossChildren(t *testing.T) {
 	// behind it is never asked about.
 	midway := build(t, maxNestedProbeEntries-1, true)
 	ms := midway.summary()
-	if !ms.ScanTruncated {
-		t.Errorf("summary = %+v, want ScanTruncated: the budget ran out inside a listing, "+
-			"which is a different event from running out before one", ms)
+	if ms.ScanTruncated {
+		t.Errorf("summary = %+v, want ScanTruncated false: the budget ran out inside a "+
+			"listing, which is a different event from running out before one and is just "+
+			"as much a refusal to spend rather than a report of a loss", ms)
 	}
 	if _, ok := midway.byPrefix[last+"/extension"]; ok {
 		t.Errorf("byPrefix = %v: the extension was reached past an exhausted budget, so "+
@@ -423,7 +423,7 @@ func TestNestedProbeSpendsABoundedTotalAcrossChildren(t *testing.T) {
 // refusal reached further than the name, the control would lose its namespace too.
 //
 // THE KEY IS ASSERTED AGAINST A LITERAL rather than against bslPathToModuleName,
-// for the reason TestNestedProbeStopsAtALargeDirectoryAndSaysSo already gives:
+// for the reason TestNestedProbeStopsAtALargeDirectoryAndKeepsTheBaseKeys already gives:
 // with an empty layout moduleKey delegates straight to it, so comparing the two
 // would be one expression written twice.
 func TestNestedProbeDoesNotAdmitAKindDirectoryAsAnExtension(t *testing.T) {

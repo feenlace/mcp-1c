@@ -136,14 +136,12 @@ const (
 	maxExtensionScan = 64
 
 	// maxNestedProbeEntries bounds the size of a directory the one-level descent
-	// below will list through. Past it the descent stops and records a doubt.
+	// below will list through. Past it the descent stops.
 	//
 	// IT IS A HYPOTHESIS AND NO CORPUS IN THIS TREE STANDS BEHIND IT. The argument
 	// for a small number is that a directory which WRAPS a dump is small by
 	// construction, while a directory holding product data is not; the tree the
-	// defect was reported against holds one entry. The failure it can produce is
-	// always the REPORTED one: too small refuses to look and says doubtScanTruncated,
-	// never a silent miss. What would settle the value is a census over real --dump
+	// defect was reported against holds one entry. What would settle the value is a census over real --dump
 	// roots recording, for every top-level directory belongsToSelfExtension does not
 	// refuse, its entry count and whether a subdirectory of it carries an extension
 	// manifest. Nothing here has measured that.
@@ -321,9 +319,7 @@ func (l extensionLayout) moduleKey(relPath string) string {
 // belongsToSelfExtension refuses, is listed once and each of ITS subdirectories is
 // asked the same manifest question. Nothing below that is looked at. The listing is
 // refused past maxNestedProbeEntries and the subdirectories asked across ALL
-// children are capped by maxNestedProbeChildren; both caps record
-// doubtScanTruncated rather than passing over in silence, for the reason
-// maxExtensionScan gives.
+// children are capped by maxNestedProbeChildren.
 //
 // WHAT THAT COSTS A BASE CONFIGURATION depends on its top level, not on its size.
 // The five kind directories of the tree TestLayoutDetectionCostIsBounded builds are
@@ -457,7 +453,6 @@ func (l *extensionLayout) dropPrefixNameCollisions() {
 // reaches it. It goes no deeper: depth two below the root is the whole of it.
 func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int) {
 	if *budget >= maxNestedProbeChildren {
-		l.noteNestedTruncation(child)
 		return
 	}
 	path := filepath.Join(root, child)
@@ -474,11 +469,7 @@ func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int)
 	l.cost.ReadDirs++
 
 	// THE SIZE OF A DIRECTORY NOBODY HAS CLASSIFIED IS THE COST OF LOOKING IN IT.
-	// Refusing is reported rather than silent because «no extension below this» and
-	// «I did not look below this» are different answers, and the second is the one
-	// that files an extension into the base keyspace with nothing to show for it.
 	if len(ents) > maxNestedProbeEntries {
-		l.noteNestedTruncation(child)
 		return
 	}
 
@@ -487,7 +478,6 @@ func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int)
 			continue
 		}
 		if *budget >= maxNestedProbeChildren {
-			l.noteNestedTruncation(child)
 			return
 		}
 		grand := e.Name()
@@ -512,19 +502,6 @@ func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int)
 			l.doubts = append(l.doubts, layoutDoubt{dir: prefix, reason: reason})
 		}
 	}
-}
-
-// noteNestedTruncation records the truncation ONCE however many directories the
-// descent had to pass over. summary folds every doubtScanTruncated into one
-// boolean, so a second entry tells the operator nothing while the slice would grow
-// with the tree.
-func (l *extensionLayout) noteNestedTruncation(dir string) {
-	for _, d := range l.doubts {
-		if d.reason == doubtScanTruncated {
-			return
-		}
-	}
-	l.doubts = append(l.doubts, layoutDoubt{dir: dir, reason: doubtScanTruncated})
 }
 
 // belongsToSelfExtension reports whether a child directory of a root that is
