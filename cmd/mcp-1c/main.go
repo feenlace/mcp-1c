@@ -653,8 +653,7 @@ func extensionsOutsideRoots(nested []string, layout dump.ExtensionLayoutSummary)
 // that tree means throwing the other extension away. A message that misstates the
 // harm and prescribes a loss is worse than no message, so this one says which of
 // the children the server recognised and what it will do with them, and warns
-// about a shared keyspace only when the children are NOT extensions and really do
-// share one, which takes AT LEAST TWO of them. One root below the path shared a
+// about a shared keyspace only when the children are NOT extensions. One root below the path shared a
 // keyspace with nothing and was told it overwrote itself; that branch is now its
 // own and is documented at the case that carries it.
 //
@@ -711,14 +710,9 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 	// of them the detection recognised; layout.Extensions counts directories deeper
 	// than a root as well and cannot answer that question.
 	extRoots := extensionRootsAmong(insp.NestedRoots, layout)
-	// AND THE OTHER TWO NUMBERS THE SENTENCES BELOW NEED. extOutside is what a
-	// change of path would discard; extInside is what a claim about a shared
-	// keyspace has to exclude. The subtraction is exact rather than convenient:
-	// dump/extlayout.go builds Dirs with one entry per recognised extension and
-	// sets Extensions to that same total, so the two halves add back up and the
-	// layout is walked once.
+	// extOutside is what a
+	// change of path would discard.
 	extOutside := extensionsOutsideRoots(insp.NestedRoots, layout)
-	extInside := layout.Extensions - extOutside
 
 	switch {
 	case len(insp.NestedRoots) == 1:
@@ -755,10 +749,7 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 		msg += "Часть из них опознана как выгрузки расширений и получит собственные " +
 			"имена, остальные попадут в общее пространство ключей и могут затереть " +
 			"друг друга."
-	case extInside == 0:
-		// Its second clause is about the modules of those roots, and the modules of a
-		// recognised extension below one of them are not in that keyspace: moduleKey
-		// gives them their own.
+	default:
 		msg += "Ни один из них не опознан как выгрузка расширения, поэтому их модули " +
 			"попадают в одно пространство ключей и затирают друг друга."
 	}
@@ -769,7 +760,7 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 
 	// THE INSTRUCTION HAS ITS OWN PREDICATE, and that separation is the repair.
 	// Re-pointing --dump at one root discards every recognised extension that is
-	// not under it, so it is withheld while there is one. The two arms that report
+	// not under it. The two arms that report
 	// every root recognised carry their own instruction, and extRoots keeps this
 	// one out of them.
 	if extOutside == 0 && extRoots < len(insp.NestedRoots) {

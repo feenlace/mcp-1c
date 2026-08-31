@@ -520,8 +520,7 @@ const bslUnwrappedCorpusDigest = "7e0d5d125153d6af3e6601479212439c7034a87e17225d
 //
 // IT DID NOT MOVE ACROSS 6 -> 7 EITHER, AND THERE THAT IS WEAKER EVIDENCE THAN IT
 // LOOKS. v7 changes extensionLayout.moduleKey, one layer ABOVE
-// bslPathToModuleName, so an extension nested two levels below the dump root is
-// keyed into its own namespace instead of the base configuration's. This digest is
+// bslPathToModuleName. This digest is
 // taken over bslPathToModuleName directly and never through a layout, so it could
 // not have moved whatever v7 did there: it is blind to that change by
 // construction. Its standing still says the path-to-key function is untouched,

@@ -12,35 +12,12 @@ import (
 	"github.com/feenlace/mcp-1c/dump"
 )
 
-// A DIAGNOSIS AND AN INSTRUCTION ARE TWO CLAIMS, AND THEY ARE FALSIFIED BY TWO
-// DIFFERENT DIRECTORIES.
+// A DIAGNOSIS AND AN INSTRUCTION ARE TWO CLAIMS.
 //
-// Each arm of the startup switch used to weld a sentence about what the index will
-// do to a sentence telling the operator what to change, and guard the pair with one
-// predicate over layout.Extensions. That count is the extensions recognised
-// ANYWHERE below the --dump path. A recognised extension INSIDE one of the nested
-// roots falsifies the diagnosis, because moduleKey gives its modules their own
-// namespace and they are not in the keyspace the diagnosis describes. A recognised
-// extension OUTSIDE every nested root makes the instruction costly, because
-// re-pointing --dump at a root throws that extension out of the index. Inside plus
-// outside is exactly layout.Extensions, so one predicate over that total is
-// guaranteed to be wrong for one of the two claims.
-//
-// BOTH HALVES WERE MEASURED ON THIS BRANCH BEFORE THE REPAIR. With two plain nested
-// roots and one unrelated recognised extension elsewhere under the path, the index
-// reported CollapsedKeys{Files:2 Keys:2} and the operator was told neither that the
-// roots overwrite each other nor what to do about it, purely because an unrelated
-// extension existed somewhere else. With one nested root holding a recognised
-// extension inside it, re-pointing --dump at that root produces the IDENTICAL key
-// multiset, and the operator was told nothing at all.
-//
-// SO THE TWO CLAIMS GET TWO PREDICATES: extInside decides the diagnosis and
-// extOutside decides the instruction. The fixtures below pin them apart. Where a
+// Where a
 // message claims something about loss, the same test builds the index and reads
 // CollapsedKeys, so the sentence and its measurement cannot drift onto different
-// trees. Where the message hands out a remedy, the same test indexes the directory
-// the remedy names, so «this costs nothing» is a comparison of two key multisets
-// rather than a promise.
+// trees.
 
 // instrPlainRoot writes a dump root that is one by KIND-DIRECTORY COUNT and carries
 // no manifest of its own. That shape matters twice: it is what dumproot.go counts as
@@ -108,6 +85,9 @@ type instrCase struct {
 	measureLoss bool
 	wantFiles   int
 	wantKeys    int
+	// wantModuleKey is a key the index must publish for the same tree, read off
+	// the same build as the collapse report above.
+	wantModuleKey string
 
 	// repoint is the nested root the instruction would send the operator to. The
 	// test indexes it and compares key multisets: repointKeeps is what the
@@ -179,6 +159,21 @@ func instrCases() []instrCase {
 		roots: []string{"R"}, exts: 0, outside: 0,
 		wantOverwrite: false, wantRemedy: true, wantSafe: false,
 		wantOneUnrecognised: true, wantAllUnrecognised: false,
+	}, {
+		// Two plain roots and a recognised extension INSIDE one of them. The roots
+		// collide with each other and the extension keeps its own namespace, and
+		// both of those are read off the same tree by the assertions below.
+		name: "две простые выгрузки и расширение внутри одной из них",
+		build: func(t *testing.T, parent string) {
+			instrPlainRoot(t, parent, "A")
+			instrPlainRoot(t, parent, "B")
+			instrExtension(t, parent, "A/"+ext, ext)
+		},
+		roots: []string{"A", "B"}, exts: 1, outside: 0,
+		wantOverwrite: true, wantRemedy: true, wantSafe: false,
+		wantOneUnrecognised: false, wantAllUnrecognised: true,
+		measureLoss: true, wantFiles: 2, wantKeys: 2,
+		wantModuleKey: "ext." + ext + ".ОбщийМодуль.Доп.Модуль",
 	}}
 }
 
@@ -203,11 +198,6 @@ func TestTheDiagnosisAndTheRemedyAreDecidedSeparately(t *testing.T) {
 				t.Fatalf("layout recognised %d extensions, want %d. Dirs: %q",
 					layout.Extensions, c.exts, layout.Dirs)
 			}
-			// extInside is derived by subtraction, which is exact only while the
-			// summary reports one name per extension. dump/extlayout.go builds Dirs
-			// with one append per byDir and one per byPrefix and sets Extensions to
-			// the sum of their lengths, so this holds for every summary that package
-			// produces; asserting it here is what keeps the subtraction honest.
 			if len(layout.Dirs) != layout.Extensions {
 				t.Fatalf("layout named %d directories while counting %d extensions: %+v",
 					len(layout.Dirs), layout.Extensions, layout)
@@ -241,11 +231,16 @@ func TestTheDiagnosisAndTheRemedyAreDecidedSeparately(t *testing.T) {
 
 			// AND THE MEASUREMENT, ON THE SAME TREE.
 			if c.measureLoss {
-				_, st := instrKeys(t, parent)
+				names, st := instrKeys(t, parent)
 				if st.Files != c.wantFiles || st.Keys != c.wantKeys {
 					t.Errorf("the message describes the loss and the same process measures "+
 						"CollapsedKeys() = {Files:%d Keys:%d Sample:%v}, want {Files:%d Keys:%d}."+
 						"\nMessage: %s", st.Files, st.Keys, st.Sample, c.wantFiles, c.wantKeys, msg)
+				}
+				if c.wantModuleKey != "" && !slices.Contains(names, c.wantModuleKey) {
+					t.Errorf("the index does not publish %q, so the recognised extension "+
+						"inside a root did not keep its own namespace. Keys: %q",
+						c.wantModuleKey, names)
 				}
 			}
 
