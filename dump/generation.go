@@ -199,9 +199,7 @@ const (
 	// v7: the docID derivation moved again, and this time one layer ABOVE
 	// bslPathToModuleName. detectExtensionLayout now descends one level below the
 	// dump root and records what it finds under a two-segment prefix, and moduleKey
-	// resolves that longer prefix before the one-segment one, so an extension that
-	// sits two levels down is keyed into its own namespace instead of being filed
-	// under the base configuration's own keys. The change is in extlayout.go and
+	// resolves that longer prefix before the one-segment one. The change is in extlayout.go and
 	// reaches a docID through moduleKeyFor, the chokepoint in index.go.
 	//
 	// NO DIGEST IN THIS PACKAGE PINS THE KEYS THAT MOVE, and saying so is the point

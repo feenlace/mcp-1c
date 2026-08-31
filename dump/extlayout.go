@@ -400,7 +400,56 @@ func detectExtensionLayout(dir string) extensionLayout {
 			l.probeNestedExtensions(dir, child, &probed)
 		}
 	}
+	l.dropPrefixNameCollisions()
 	return l
+}
+
+// dropPrefixNameCollisions removes every byPrefix entry whose extension name is not
+// unique across {self} + byDir + byPrefix. self and byDir are never touched.
+//
+// WHY ANYTHING IS DROPPED. moduleKey derives ONE namespace per NAME, so two entries
+// carrying one name key two subtrees into one namespace and one of the two files
+// stops being reachable through GetContent. Measured on the tree
+// TestADepthTwoExtensionMayNotTakeADepthOneName builds: without this pass the two
+// files produce ONE key twice, CollapsedKeys reports {Files:1 Keys:1}, and that key
+// serves the deeper file's bytes.
+//
+// NEITHER COLLIDING ENTRY IS KEPT. Dropping the byDir entry as well would send both
+// subtrees to one base key, and the extension one level down would lose the
+// namespace its own manifest declares to a directory that has no claim on it.
+// Keeping the first one is order dependent, and "first" here is os.ReadDir byte
+// order, which a rename changes.
+//
+// IT RUNS AFTER THE LOOP AND NOT AT THE ASSIGNMENT. byDir is INCOMPLETE while the
+// descent runs: os.ReadDir sorts, so a wrapper named «Ааа» is descended into before
+// a genuine «Настоящее» is read, and the same question asked where the entry is
+// recorded answers differently for two trees that differ by that rename.
+// TestTheNameCheckDoesNotDependOnDirectoryOrder is that difference as a test.
+//
+// The names are counted under NFC because that is the form moduleKey puts into the
+// key.
+func (l *extensionLayout) dropPrefixNameCollisions() {
+	if len(l.byPrefix) == 0 {
+		return
+	}
+	seen := make(map[string]int, len(l.byDir)+len(l.byPrefix)+1)
+	if l.self != "" {
+		seen[NFC(l.self)]++
+	}
+	for _, name := range l.byDir {
+		seen[NFC(name)]++
+	}
+	for _, name := range l.byPrefix {
+		seen[NFC(name)]++
+	}
+	for prefix, name := range l.byPrefix {
+		if seen[NFC(name)] > 1 {
+			delete(l.byPrefix, prefix)
+		}
+	}
+	if len(l.byPrefix) == 0 {
+		l.byPrefix = nil
+	}
 }
 
 // probeNestedExtensions asks the manifest question about the immediate children of
@@ -879,9 +928,6 @@ type ExtensionLayoutSummary struct {
 	// SelfNamed reports that the inspected path is itself one extension.
 	SelfNamed bool
 	// Extensions is how many directories below the inspected path are extensions.
-	// The detection reaches two levels down, so this counts the immediate children
-	// that declare one PLUS the grandchildren the descent found under a child that
-	// declared none.
 	Extensions int
 	// Dirs are those directories as root-relative prefixes, slash-separated on
 	// every platform, sorted. A child contributes one segment and a grandchild two,
