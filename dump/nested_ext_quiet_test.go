@@ -35,8 +35,7 @@ func mkFillerDirs(t *testing.T, root, child string, n int) {
 
 // TestAHealthyDumpRootIsQuietPastTheDescentCaps.
 //
-// EACH ARM CARRIES ITS CONTROL AND THE CONTROL MOVES ONE DIRECTORY. Not a shape,
-// not a size class: filler directories, and nothing else, in the same tree.
+// EACH ARM CARRIES ITS CONTROL
 func TestAHealthyDumpRootIsQuietPastTheDescentCaps(t *testing.T) {
 	// ARM A: the per listing entry cap. A base configuration whose
 	// ExternalDataProcessors directory holds one entry more than the descent will
