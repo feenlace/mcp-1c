@@ -113,10 +113,6 @@ func isFlatShardEntry(e os.DirEntry) bool {
 // asked for by name, so such a dump is unsearchable rather than unreadable, which
 // is why nothing about the state looks broken.
 //
-// Reversed, the only partial state this function can leave is manifest-present
-// with fewer shards, which flatCacheSchemaStale already answers "stale" for, so
-// the drop is retried on the next start.
-//
 // AND ONLY IF EVERY SHARD WENT, because ordering alone does not cover a shard
 // whose removal FAILS. Removing the manifest after that would take the only
 // surviving evidence that the shards beside it are foreign, which is the same end

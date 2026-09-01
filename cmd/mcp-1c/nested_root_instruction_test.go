@@ -316,13 +316,6 @@ func instrShippedSentences() []string {
 
 // instrEveryMessage sweeps the two structs the function reads and collects every
 // message it produces.
-//
-// IT SWEEPS THE STRUCTS AND NOT A SET OF TREES, and it is a SUPERSET of what disk
-// can produce: a hand-built summary can name a root as an extension AND name a
-// directory inside that same root, which the detection never does, because a child
-// is descended into only after answering manifestAbsent. A superset can only widen
-// the search for a sentence that should not exist. The other direction is covered by
-// the fixtures above, which reach the arms from real trees.
 func instrEveryMessage() []string {
 	var msgs []string
 	add := func(insp dump.DumpRootInspection, layout dump.ExtensionLayoutSummary) {

@@ -10,15 +10,6 @@ import (
 
 // The keys the nested descent must NOT have moved.
 //
-// The descent added in this branch is the only thing in the package that can mint
-// a namespace from a directory two levels below the dump root. Everything else in
-// the key derivation was left alone, and «left alone» is a claim about behaviour
-// that no diff can make: a later change to detectExtensionLayout, to
-// belongsToSelfExtension or to anchorIndex would move these keys without touching
-// a line any of the three tests below reads. That is what these are for. They are
-// not coverage of the new code path; they are the pins that make a change to it
-// visible.
-//
 // Each test therefore asserts on the SERVED keys of a real index, not on the
 // layout struct alone. The layout is asserted too, but as the premise: a green
 // reached with an empty layout for the wrong reason would say nothing about the
@@ -149,11 +140,7 @@ func TestLegacyRasshireniyaKeysAreUnchangedByTheNestedProbe(t *testing.T) {
 // pointed at a single configuration with no extension anywhere below it.
 //
 // It is the widest of the three, because it is the tree almost every installation
-// actually has. The descent runs on it (the kind directories are refused by name,
-// but nothing else is) and it must leave the keyspace exactly as it was: the
-// expected set is written out as literals rather than derived from the production
-// tables, so a change to those tables shows up here as a diff instead of following
-// the code.
+// actually has.
 func TestCorrectlyPointedDumpKeysAreUnchanged(t *testing.T) {
 	want := []string{
 		"Документ.ПеремещениеЗапасов.МодульОбъекта",

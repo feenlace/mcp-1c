@@ -9,25 +9,6 @@ import (
 
 // A configuration extension that does not sit directly under the dump root.
 //
-// THE TWO HALVES OF THE KEY DERIVATION DISAGREE ABOUT DEPTH, and that is the whole
-// of it. Namespace assignment is bounded BY STRUCTURE: extlayout.go:detectExtensionLayout
-// lists the dump root once, asks extlayout.go:manifestVerdictOf about the root itself,
-// and then asks it again only about the root's IMMEDIATE children. Nothing in it
-// descends further, so an extension is recognised at the root or one level below it
-// and nowhere else. Segment stripping is bounded by nothing: index.go:anchorIndex
-// walks every segment looking for the first one that opens a dump-shaped tail, and
-// index.go:bslPathToModuleName drops everything above it.
-//
-// So a tree that carries an extension one level deeper than the detector looks gets
-// the segments above the kind directory thrown away with no namespace put back, and
-// the extension's module lands on the base configuration's own key. Two files, one
-// key: on the cold build this test takes, index.go:loadBSLPaths keys plain maps by
-// module name, so the second write wins and the first file's content is no longer
-// reachable through index.go:GetContent.
-//
-// THIS TEST IS EXPECTED TO FAIL UNTIL THE FIX LANDS. It states the outcome that is
-// wanted, not the outcome that exists.
-//
 // WHY EACH ASSERTION IS HERE:
 //
 //	A  is the premise. Without it a green could be reached by a fixture that never

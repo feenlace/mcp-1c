@@ -184,18 +184,6 @@ func TestWrapperWithoutAManifestStillMergesAndIsCounted(t *testing.T) {
 
 // TestNonAdoptedManifestAtAStrippedPrefixGivesNoNamespace covers the manifest that
 // IS there and declares no extension.
-//
-// manifestNotExtension has TWO inhabitants and they are not the same document, so
-// both are built rather than one being taken as representative:
-//
-//	a  a closed <Properties> carrying no <ObjectBelonging>Adopted</ObjectBelonging>.
-//	   This is the base configuration shape, and baseConfigManifest is exactly it:
-//	   <Properties> opens, declares <Name>УправлениеТорговлей</Name>, and closes.
-//	b  a COMPLETE document with no <Properties> element at all. classifyManifest
-//	   reaches this through its own branch and never looks at ObjectBelonging.
-//
-// Reading manifestNotExtension as «a base configuration» would be wrong about b,
-// and a fixture that built only a would never have shown the difference.
 func TestNonAdoptedManifestAtAStrippedPrefixGivesNoNamespace(t *testing.T) {
 	tests := []struct {
 		name string

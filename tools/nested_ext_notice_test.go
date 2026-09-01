@@ -9,16 +9,6 @@ import (
 
 // The wrap notice on the tree of issue 46, measured where the operator reads it.
 //
-// WHAT THE FIX LEFT BEHIND. The descent in dump/extlayout.go now gives an extension
-// two levels below the dump root its own namespace, keyed by a two-segment prefix.
-// dump/wrapped_paths.go:wrapDepth was not taught about that map: it asks byDir
-// whether the FIRST segment is a recognised extension directory and asks nothing
-// else, so for a path the namespace fully accounts for it still handed the whole
-// path to anchorIndex, which moved, and the file counted as wrapped. The keys were
-// right and every search_code answer carried a notice telling the operator their
-// --dump is pointed above the dump root and to restart against the root, which is
-// the one thing that would take the namespace away again.
-//
 // WHY THE ASSERTION IS ON THE RENDERED ANSWER AND NOT ON THE COUNTER ALONE. The
 // counter is one input of indexNotices; the sentence is what ships. These tests go
 // through NewSearchCodeHandler on an index opened the way a serving process opens

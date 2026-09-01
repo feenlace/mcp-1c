@@ -13,16 +13,7 @@ import (
 // The four ways this package can start, measured against one another on the tree
 // of issue 46.
 //
-// WHY PARITY IS THE INSTRUMENT. The descent that gives a nested extension its
-// namespace lives inside detectExtensionLayout, behind extLayoutOnce, and exactly
-// one thing runs that Once: moduleKeyFor, which derives a key FROM A PATH. A cold
-// build goes through it once per file. The warm manifest start and the read-only
-// generation open take their DocIDs straight out of a manifest and never derive a
-// key at all. So a layout that is resolved lazily at key derivation, or read as a
-// FIELD instead of through the accessor, is right on the cold build and empty on
-// the two warm starts, and no cold-only test can see the difference.
-//
-// THAT IS NOT HYPOTHETICAL; IT SHIPPED ONCE IN THIS PACKAGE. noteWrappedPaths read
+// noteWrappedPaths read
 // idx.extLayout as a field, and the doc comment on Index.layout carries what it
 // cost: an -AllExtensions container measured {Files:0 Total:2} cold and
 // {Files:2 Total:2} warm over byte-identical keys, and the notice built on that
@@ -425,12 +416,7 @@ func TestIssue46_WarmAndReadOnlyStartsAgreeWithTheColdOne(t *testing.T) {
 	// THE PROPERTY.
 	for _, leg := range legs[1:] {
 		for _, d := range issue46Disagreements(cold, leg) {
-			t.Errorf("the %s start disagrees with the cold one. %s\n\n"+
-				"The layout is read once behind extLayoutOnce and only key derivation runs "+
-				"that Once; a start that takes its DocIDs from a manifest derives no key, so "+
-				"a layout resolved anywhere other than inside detectExtensionLayout is empty "+
-				"here while the cold build had it. This is the shape that shipped once "+
-				"already: see the doc comment on Index.layout.", leg.leg, d)
+			t.Errorf("the %s start disagrees with the cold one. %s", leg.leg, d)
 		}
 	}
 }

@@ -754,10 +754,6 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 			"попадают в одно пространство ключей и затирают друг друга."
 	}
 
-	// The switch can add nothing at all, and the sentence before it ends with a
-	// space, so the join is trimmed rather than assumed.
-	msg = strings.TrimRight(msg, " ")
-
 	// THE INSTRUCTION HAS ITS OWN PREDICATE, and that separation is the repair.
 	// Re-pointing --dump at one root discards every recognised extension that is
 	// not under it. The two arms that report

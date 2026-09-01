@@ -358,10 +358,7 @@ const issue46SearchTerm = "расширение"
 // SO THE ORDER IS THE FIX: the shards go first, the manifest goes last, and the
 // manifest goes only if every shard went. A shard whose removal FAILED must keep
 // the manifest beside it, because that manifest is the only surviving evidence
-// that those shards are foreign. Under that order the only partial state
-// removeFlatCacheContents can leave is manifest-present with fewer shards, which is
-// the shape flatCacheSchemaStale already answers TRUE for, so the drop is retried
-// on the next start instead of being sealed in.
+// that those shards are foreign.
 func TestAnInterruptedFlatCacheDropIsRetriedRatherThanServed(t *testing.T) {
 	if !strings.Contains(issue46ExtBody, issue46SearchTerm) {
 		t.Fatalf("premise broken: the extension body %q does not carry %q, so a search for it "+

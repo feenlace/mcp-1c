@@ -260,9 +260,7 @@ func TestNestedDumpRootMessageSaysOnlyWhatWasMeasured(t *testing.T) {
 
 	// NOT A ROOT AND NO ROOT BELOW IT EITHER: still silent, deliberately. One
 	// ReadDir cannot tell a path two levels above a dump from a hand-made tree
-	// holding one kind directory, and the second one keys perfectly well. That case
-	// is reported by MEASUREMENT on the other channel, by the wrapped-path count,
-	// which is zero for the valid tree and every file for the wrong one. Guessing
+	// holding one kind directory, and the second one keys perfectly well. Guessing
 	// here would put a warning in front of every operator with a partial tree.
 	if got := nestedDumpRootMessage(dump.DumpRootInspection{}, dump.ExtensionLayoutSummary{}); got != "" {
 		t.Errorf("an inspection that found nothing produced %q", got)

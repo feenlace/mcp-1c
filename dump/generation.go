@@ -202,14 +202,6 @@ const (
 	// resolves that longer prefix before the one-segment one. The change is in extlayout.go and
 	// reaches a docID through moduleKeyFor, the chokepoint in index.go.
 	//
-	// NO DIGEST IN THIS PACKAGE PINS THE KEYS THAT MOVE, and saying so is the point
-	// rather than an aside. bslKeyCorpusDigest and bslUnwrappedCorpusDigest are taken
-	// over bslPathToModuleName directly and never through a layout, so they are blind
-	// to this change by construction; bslNamespaceCorpusDigest is taken over
-	// splitModuleKey, which reads a key that already exists. All three are unmoved
-	// across this bump, and what that says is that the path-to-key function and the
-	// namespace rule are untouched, NOT that no key moved.
-	//
 	// It takes a bump for the reason the v4 entry above gives, applied to a different
 	// tree shape. A docID is PERSISTED: buildManifest writes one per file as "d", and
 	// readGenerationNames and the unchanged half of a manifest diff read it back out

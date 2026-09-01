@@ -9,12 +9,6 @@ import (
 
 // A HEALTHY DUMP ROOT SAYS NOTHING, AND THE DESCENT'S OWN LIMITS ARE NOT A DOUBT.
 //
-// doubtScanTruncated carries ONE boolean into ExtensionLayoutSummary.ScanTruncated,
-// and that boolean is rendered on EVERY tool answer as «часть каталогов выгрузки
-// сервер не смог отнести к расширениям. Их модули проиндексированы без имени
-// расширения». On the trees below there are no such modules: nothing was lost,
-// nothing is ambiguous, and the sentence is simply false of them.
-//
 // THE TWO EVENTS ARE NOT THE SAME EVENT. At depth one, maxExtensionScan means a
 // child that WOULD have been classified was not, and that is a loss against the
 // shipped contract, because depth one has always been scanned in full. At depth
@@ -40,11 +34,6 @@ func mkFillerDirs(t *testing.T, root, child string, n int) {
 }
 
 // TestAHealthyDumpRootIsQuietPastTheDescentCaps.
-//
-// Three arms, one per site that used to record the doubt: the per listing entry
-// cap, the budget checked BEFORE a child is listed, and the budget checked BETWEEN
-// two subdirectories of one child. A single arm would leave the other sites free to
-// keep alarming, which is exactly how two of them got there.
 //
 // EACH ARM CARRIES ITS CONTROL AND THE CONTROL MOVES ONE DIRECTORY. Not a shape,
 // not a size class: filler directories, and nothing else, in the same tree.
