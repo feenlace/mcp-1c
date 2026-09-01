@@ -353,11 +353,7 @@ func TestExtensionLayoutIsNeverReadAroundItsOnce(t *testing.T) {
 
 	if len(offenders) > 0 {
 		sort.Strings(offenders)
-		t.Errorf(".%s is read outside Index.%s at %v. The field is not the layout until "+
-			"extLayoutOnce has run, and only key derivation runs it: a warm manifest start "+
-			"and a read-only generation open derive no keys, so a read there silently "+
-			"measures against an empty layout instead of the one the index keyed with. "+
-			"Call Index.%s.", field, accessor, offenders, accessor)
+		t.Errorf(".%s is read outside Index.%s at %v. Call Index.%s.", field, accessor, offenders, accessor)
 	}
 }
 

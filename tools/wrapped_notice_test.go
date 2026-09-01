@@ -20,18 +20,6 @@ import (
 // neighbours below assert that it is.
 var dashRunes = []rune{'‒', '–', '—', '―', '−'}
 
-// The two notices added beside the collapse one, and the case that had no channel
-// at all.
-//
-// A --dump pointed TWO levels above a dump root holding one extension collides with
-// nothing: every path anchors on the metadata kind, derives a perfectly ordinary
-// base-configuration key, and the collapse counter has nothing to count. The
-// startup check cannot see it either, because one ReadDir cannot tell that tree
-// from a hand-made one holding a single kind directory. So the extension namespace
-// vanished and every channel stayed quiet. What can see it is a measurement taken
-// AFTER the keys are derived: how many files were keyed from a path the anchor scan
-// had to move.
-
 const wrappedMarker = "имена модулей выведены не от корня выгрузки"
 const doubtMarker = "не смог отнести к расширениям"
 
@@ -472,9 +460,7 @@ func TestWrappedNotice_SaysOnlyWhatItCounted(t *testing.T) {
 		}
 	}
 
-	// AND IT STILL SAYS THE MECHANISM AND THE REMEDY, or «no false claim» would be
-	// satisfied by deleting the explanation altogether.
-	for _, want := range []string{"подкаталогах первого уровня", "Чего это стоило, счётчик не измеряет"} {
+	for _, want := range []string{"Чего это стоило, счётчик не измеряет"} {
 		if !strings.Contains(notice, want) {
 			t.Errorf("the notice no longer carries %q, so the clause was removed rather "+
 				"than corrected:\n%s", want, notice)

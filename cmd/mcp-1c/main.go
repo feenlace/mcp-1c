@@ -576,6 +576,68 @@ func dumpPathFault(dumpDir string) error {
 	return nil
 }
 
+// extensionRootsAmong is how many of nested the layout detection recognised as
+// extensions.
+//
+// IT COMPARES DIRECTORIES, because the sentences that read it are about
+// directories. ExtensionLayoutSummary.Extensions counts what the detection
+// recognised at EITHER of the two levels it reaches, while
+// DumpRootInspection.NestedRoots holds immediate children and nothing else, so a
+// grandchild raises that count while never being one of the roots a sentence here
+// describes. «One root below the path, one extension below the path» therefore
+// holds for a tree where those are DIFFERENT DIRECTORIES.
+//
+// Dirs carries the prefix that reaches each one, one segment for a child and two
+// for a grandchild, and a name in NestedRoots is a single directory name that can
+// carry no separator at all, so a grandchild's prefix cannot match one. The names
+// are compared and never rendered: they are read off disk, and the prose here
+// carries no тире.
+func extensionRootsAmong(nested []string, layout dump.ExtensionLayoutSummary) int {
+	n := 0
+	for _, root := range nested {
+		for _, dir := range layout.Dirs {
+			if dir == root {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// extensionsOutsideRoots is how many of the extensions the detection recognised lie
+// outside every one of nested.
+//
+// IT ANSWERS A DIFFERENT QUESTION FROM extensionRootsAmong, and the two answers
+// decide different sentences. That one asks whether a root IS an extension, which is
+// what a sentence ABOUT THE ROOTS needs. This one asks what re-pointing --dump at one
+// of them would throw out of the index, which is what an INSTRUCTION needs. An
+// extension one level below a root is invisible to the first and not to the second,
+// and inside plus outside is exactly layout.Extensions, so no single count over that
+// total can decide both.
+//
+// Dirs are root-relative and slash-separated on every platform, one segment for a
+// child and two for a grandchild, while a name in nested is a single directory name
+// carrying no separator, so the prefix test is what puts a grandchild under its root
+// and an equality test alone would miss it. The names are compared and never
+// rendered, for the reason extensionRootsAmong gives.
+func extensionsOutsideRoots(nested []string, layout dump.ExtensionLayoutSummary) int {
+	n := 0
+	for _, dir := range layout.Dirs {
+		inside := false
+		for _, root := range nested {
+			if dir == root || strings.HasPrefix(dir, root+"/") {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			n++
+		}
+	}
+	return n
+}
+
 // nestedDumpRootMessage is what to say when --dump does not point at the dump
 // root, or "" when there is nothing to say.
 //
@@ -591,8 +653,7 @@ func dumpPathFault(dumpDir string) error {
 // that tree means throwing the other extension away. A message that misstates the
 // harm and prescribes a loss is worse than no message, so this one says which of
 // the children the server recognised and what it will do with them, and warns
-// about a shared keyspace only when the children are NOT extensions and really do
-// share one, which takes AT LEAST TWO of them. One root below the path shared a
+// about a shared keyspace only when the children are NOT extensions. One root below the path shared a
 // keyspace with nothing and was told it overwrote itself; that branch is now its
 // own and is documented at the case that carries it.
 //
@@ -634,13 +695,6 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 		// from a path two levels above a real root, and its keys are perfectly
 		// correct. Guessing would put a warning in front of every operator with a
 		// partial but valid tree.
-		//
-		// The case that matters here, a --dump two levels too high, is reported on
-		// the other channel and by MEASUREMENT rather than by shape: every file in
-		// such a tree is keyed from a path the anchor scan had to move, which is
-		// what dump.WrappedPathState counts and what the notice in
-		// tools/index_notice.go carries. That number is zero for the partial tree
-		// above and is every file for this one.
 		return ""
 	}
 
@@ -651,6 +705,14 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 		msg += "Внутри лежат готовые корни выгрузки, " + strconv.Itoa(len(insp.NestedRoots)) +
 			" штуки, их имена в поле roots. "
 	}
+
+	// EVERY SENTENCE BELOW IS ABOUT THE ROOTS BELOW THE PATH. extRoots is how many
+	// of them the detection recognised; layout.Extensions counts directories deeper
+	// than a root as well and cannot answer that question.
+	extRoots := extensionRootsAmong(insp.NestedRoots, layout)
+	// extOutside is what a
+	// change of path would discard.
+	extOutside := extensionsOutsideRoots(insp.NestedRoots, layout)
 
 	switch {
 	case len(insp.NestedRoots) == 1:
@@ -668,30 +730,42 @@ func nestedDumpRootMessage(insp dump.DumpRootInspection, layout dump.ExtensionLa
 		// nothing about loss in either direction: an inspection that read one ReadDir
 		// has not measured what the index will do, and «ничего не потеряется» would
 		// be the same kind of sentence as the one being removed, only reassuring.
-		if layout.Extensions == 1 {
+		switch {
+		case extRoots == 1:
 			msg += "Он опознан как выгрузка расширения, и сервер проиндексирует его под " +
 				"собственным именем, так что содержимое не потеряется. Указывать его в " +
 				"--dump нужно только если вам нужен именно он."
-		} else {
-			msg += "Он не опознан как выгрузка расширения. Укажите в --dump сам этот корень."
+		default:
+			msg += "Он не опознан как выгрузка расширения."
 		}
-	case layout.Extensions >= len(insp.NestedRoots):
+	case extRoots >= len(insp.NestedRoots):
 		// Every root below the path is a recognised extension. Their modules get
 		// their own namespace, so nothing collides and nothing is lost; saying so is
 		// what stops the operator from re-pointing the path and discarding the rest.
 		msg += "Все они опознаны как выгрузки расширений, и сервер проиндексирует " +
 			"каждую под её собственным именем, так что содержимое не потеряется. " +
 			"Указывать один из них в --dump нужно только если вам нужен именно он."
-	case layout.Extensions > 0:
+	case extRoots > 0:
 		msg += "Часть из них опознана как выгрузки расширений и получит собственные " +
 			"имена, остальные попадут в общее пространство ключей и могут затереть " +
-			"друг друга. Укажите в --dump тот корень, который вам нужен."
+			"друг друга."
 	default:
 		msg += "Ни один из них не опознан как выгрузка расширения, поэтому их модули " +
-			"попадают в одно пространство ключей и затирают друг друга. Укажите в " +
-			"--dump тот корень, который вам нужен."
+			"попадают в одно пространство ключей и затирают друг друга."
 	}
 
+	// THE INSTRUCTION HAS ITS OWN PREDICATE, and that separation is the repair.
+	// Re-pointing --dump at one root discards every recognised extension that is
+	// not under it. The two arms that report
+	// every root recognised carry their own instruction, and extRoots keeps this
+	// one out of them.
+	if extOutside == 0 && extRoots < len(insp.NestedRoots) {
+		if len(insp.NestedRoots) == 1 {
+			msg += " Укажите в --dump сам этот корень."
+		} else {
+			msg += " Укажите в --dump тот корень, который вам нужен."
+		}
+	}
 	msg += " Сервер не переходит внутрь сам, потому что выбрать за вас не может, " +
 		"а молчаливый переход скрыл бы ошибку пути ровно так же, как она скрывалась до сих пор."
 	if insp.Truncated {

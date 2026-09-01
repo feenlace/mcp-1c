@@ -178,13 +178,7 @@ func echoableSample(names []string) []string {
 // names from paths carrying directory levels ABOVE the dump root.
 //
 // WHY IT IS NOT THE COLLAPSE NOTICE. The two are different measurements and either
-// can be zero while the other is not. A --dump two levels above a SINGLE extension
-// collides with nothing at all, so the collapse counter stays silent, while every
-// module in the dump is filed as though it belonged to the configuration and the
-// extension namespace has simply disappeared. That case had no channel: the startup
-// check cannot see it either, because one ReadDir cannot tell it from a hand-made
-// tree with one kind directory in it. This number can, because it is measured after
-// the keys are derived rather than guessed from the shape of a directory.
+// can be zero while the other is not.
 //
 // The proportion is in it because it is what tells a reader which case they have:
 // a handful of odd files, or the whole dump.
@@ -206,11 +200,6 @@ func echoableSample(names []string) []string {
 // lost when a manifest sits deeper than the detection looks. Nothing in the number
 // says which tree this is, so the notice does not guess.
 //
-// What IS true of every one of them is the mechanism, and that is what replaces the
-// clause: detectExtensionLayout reads the manifest of the --dump directory itself
-// and of its immediate children, and of nothing below that, so a manifest deeper
-// than one level is never opened at all.
-//
 // Customer-facing RU: no тире.
 func indexWrappedNotice(st dump.WrappedPathState) string {
 	if st.Files <= 0 {
@@ -220,9 +209,7 @@ func indexWrappedNotice(st dump.WrappedPathState) string {
 		"Файлов, у которых над корнем выгрузки оказались лишние каталоги: %d из %d. "+
 		"Имена таких модулей сервер вывел от найденного ниже корня выгрузки, а не от "+
 		"каталога, указанного в `--dump`. Чего это стоило, счётчик не измеряет. "+
-		"Манифест расширения сервер читает только в самом каталоге `--dump` и в его "+
-		"подкаталогах первого уровня, поэтому манифест, лежащий глубже, не прочитан "+
-		"вовсе. Укажите в `--dump` сам корень выгрузки и перезапустите сервер. %s\n",
+		"Укажите в `--dump` сам корень выгрузки и перезапустите сервер. %s\n",
 		st.Files, st.Total, reloadDumpIsNotThePathRemedy)
 }
 
