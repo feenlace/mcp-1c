@@ -124,7 +124,7 @@ mcp-1c --install "srv-1c\buh_prod" --server --db-user Admin --db-password pass
 
 ### 4. Настроить AI-клиент
 
-Конфигурация MCP-сервера одинакова для любого клиента и любой модели. Не важно, используете вы Claude, Ollama или LM Studio, настройка MCP-1C не меняется:
+Конфигурация MCP-сервера:
 
 ```json
 {
@@ -141,7 +141,7 @@ mcp-1c --install "srv-1c\buh_prod" --server --db-user Admin --db-password pass
 
 Перезапустите AI-клиент. В Claude Desktop рекомендуем: **«+» → Connectors → Tool access → Always available**.
 
-> Также поддерживаются: **Claude Code**, **Cursor**, **Windsurf**, **VS Code + Copilot**, **VS Code + Continue**, **JetBrains IDE**, а также любые клиенты для локальных моделей с поддержкой MCP. Настройка каждого - в [пошаговой инструкции](docs/getting-started.md#шаг-4-настроить-ai-клиент).
+> Также поддерживаются: **Claude Code**, **Codex**, **Cursor**, **Windsurf**, **VS Code + Copilot**, **VS Code + Continue**, **JetBrains IDE**, а также любые клиенты для локальных моделей с поддержкой MCP. Настройка каждого - в [пошаговой инструкции](docs/getting-started.md#шаг-4-настроить-ai-клиент).
 
 Спросите: **«Покажи структуру конфигурации моей базы 1С»**
 
@@ -232,10 +232,10 @@ scripts\build-extension.cmd C:\Users\User\Documents\InfoBase
 | AI-клиенты | |
 |------------|---|
 | **Локальные модели** | Ollama, LM Studio, llama.cpp и любые MCP-совместимые клиенты |
-| **Облачные сервисы** | Claude Desktop, Claude Code, GPT (через MCP-клиент), YandexGPT, GigaChat |
+| **Облачные сервисы** | Claude Desktop, Claude Code, Codex, GPT (через MCP-клиент), YandexGPT, GigaChat |
 | **IDE** | Cursor, VS Code (Continue, Cline, Copilot), Windsurf, JetBrains IDEs |
 
-MCP-1C не знает и не определяет, какая модель работает на стороне клиента. Конфигурация одна и та же.
+MCP-1C не знает и не определяет, какая модель работает на стороне клиента.
 
 | Платформа 1С | Статус |
 |-------------|--------|
