@@ -50,15 +50,40 @@ func TestPlainModuleDirsIsTheKindsWithAModuleAndNoForms(t *testing.T) {
 	props := kindProperties(t)
 	has := func(kind, prop string) bool { return slices.Contains(props[kind], prop) }
 
-	// The kinds this repository does not claim as dump directories are excluded by
-	// name, because the reason they are out is the FOLDER name and not the
-	// property. Keeping them in the fixture and excluding them here is what stops
-	// the exclusion from being invisible.
-	notClaimed := map[string]bool{"СервисИнтеграции": true, "WebSocketКлиент": true}
+	// NESTED kinds are skipped, and the reason is categorical rather than a
+	// judgement about any one of them: a nested kind has no top-level dump
+	// directory at all, so there is no dumpDirNames entry it could ever be missing
+	// from. Which kinds those are is read from the nested-kind fixture rather than
+	// listed here, so the two files cannot drift apart.
+	nested := nestedKindRussianNames(t)
+
+	// Top-level kinds this repository does not yet name a dump directory for are
+	// excluded BY NAME, because the reason they are out is the FOLDER name and not
+	// the property. Keeping them in the fixture and excluding them here is what
+	// stops the exclusion from being invisible; the assertion below keeps the list
+	// from outliving its reason.
+	notClaimed := map[string]bool{
+		"СервисИнтеграции":      true,
+		"WebSocketКлиент":       true,
+		"ВнешнийИсточникДанных": true,
+	}
+	for kind := range notClaimed {
+		if _, ok := props[kind]; !ok {
+			t.Errorf("«%s» is excluded by name but %s no longer covers it, so the exclusion "+
+				"guards nothing", kind, kindPropertiesFixture)
+		}
+		for dir, ru := range dumpDirNames {
+			if ru == kind {
+				t.Errorf("dumpDirNames[%q] = %q, so «%s» now HAS a dump directory and must be "+
+					"taken off this exclusion list and checked like every other kind",
+					dir, ru, kind)
+			}
+		}
+	}
 
 	checkedIn, checkedOut := 0, 0
 	for kind := range props {
-		if notClaimed[kind] {
+		if nested[kind] || notClaimed[kind] {
 			continue
 		}
 		if _, known := props[kind]; !known {
