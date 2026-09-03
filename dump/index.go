@@ -434,11 +434,26 @@ var subdirSegmentNames = map[string]string{
 //
 // Membership here only ever narrows a suffix from "МодульФормы" to "Модуль"; the
 // prefix is unaffected.
+// IntegrationServices and WebSocketClients are the fifth and sixth members, and
+// they arrive by the rule rather than by being noticed: «ОбъектМетаданных:
+// СервисИнтеграции» carries Модуль and no Формы, and so does «ОбъектМетаданных:
+// WebSocketКлиент». Both pages are snapshotted in the fixture the rule test reads.
+//
+// Neither can collide with a nested object's module. A WebSocket client has no
+// nested kind at all, and the integration service's only one, КаналСервисаИнтеграции,
+// has neither a Модуль nor a Формы property, so no Ext/Module.bsl exists below
+// either of them to be re-keyed by this entry.
+//
+// ExternalDataSources is deliberately NOT here, and by the same rule: its kind has
+// no «Модуль» property, so its Ext/Module.bsl is not an object module and the entry
+// would be an invention. It gets a dumpDirNames prefix and nothing else.
 var plainModuleDirs = map[string]bool{
-	"CommonModules": true,
-	"HTTPServices":  true,
-	"WebServices":   true,
-	"Bots":          true,
+	"CommonModules":       true,
+	"HTTPServices":        true,
+	"WebServices":         true,
+	"Bots":                true,
+	"IntegrationServices": true,
+	"WebSocketClients":    true,
 }
 
 // configModuleDirName is the top-level dump directory that holds the modules of
