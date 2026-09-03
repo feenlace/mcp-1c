@@ -272,7 +272,10 @@ func (c *Client) do(req *http.Request, endpoint string, result any) error {
 		// только пароль, логин печатается целиком. После разделения на границе
 		// в адресе учётных данных уже нет, но вызывающий мог присвоить BaseURL
 		// напрямую, поэтому очистка остаётся.
-		return &TransportError{Base: c.displayBase, Endpoint: endpoint, Err: ScrubbedURLError(err)}
+		return &TransportError{
+			Base: c.displayBase, Endpoint: endpoint, Err: ScrubbedURLError(err),
+			Timeout: c.HTTPClient.Timeout,
+		}
 	}
 	defer resp.Body.Close()
 

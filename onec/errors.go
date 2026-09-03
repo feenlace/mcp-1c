@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/feenlace/mcp-1c/internal/jsonshape"
@@ -330,6 +331,9 @@ type TransportError struct {
 	Base     string
 	Endpoint string
 	Err      error
+	// Timeout — действовавший лимит ожидания HTTP-клиента на момент отказа.
+	// Ноль означает, что значение неизвестно.
+	Timeout time.Duration
 }
 
 func (e *TransportError) Error() string {

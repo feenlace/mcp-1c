@@ -223,6 +223,15 @@ const (
 	lineTransportNoBase = "❌ Ответ от 1С не получен: обращение по адресу из `--base` не состоялось."
 	lineRequest         = "❌ Обращение к 1С не состоялось: значение `--base` не является корректным адресом."
 	lineGeneric         = "❌ Операция не выполнена."
+	// lineTransportDeadline is the transport failure that is THIS server's own
+	// wait limit rather than 1С being out of reach.
+	lineTransportDeadline = "❌ Ответ от 1С не получен: истёк лимит ожидания, который задаёт сам " +
+		"сервер MCP (текущее значение %s)."
+	// lineTransportDeadlineNoValue is the same statement for a TransportError
+	// that carries no timeout, for the reason lineTransportNoBase exists: an
+	// empty slot reads as a defect rather than as a fact.
+	lineTransportDeadlineNoValue = "❌ Ответ от 1С не получен: истёк лимит ожидания, который задаёт " +
+		"сам сервер MCP."
 )
 
 // untrustedTextNotice frames upstream text as data rather than as instruction,
@@ -689,6 +698,21 @@ const remedyUnreachable = "До 1С не удалось достучаться, 
 	"4. Схему адреса: обращение по http к порту, который обслуживает только https, обрывается " +
 	"так же, как недоступный узел.\n"
 
+// remedyOwnDeadline is shown when the transport failure is this server's own
+// wait limit. It states that the limit expired and does not conclude that 1С is
+// slow: a node that silently drops packets looks the same from here, which is
+// why the network stays on the list as the second possibility.
+//
+// Customer-facing RU: no тире.
+const remedyOwnDeadline = "Это предел с нашей стороны, а не отказ 1С: если соединение успело " +
+	"установиться, 1С могла продолжать выполнять запрос и после того, как ожидание прекратилось.\n\n" +
+	"Что делать:\n" +
+	"1. Поднимите предел: флаг `--request-timeout` или переменная окружения " +
+	"`MCP_1C_REQUEST_TIMEOUT`.\n" +
+	"2. Сузьте выборку, чтобы 1С ответила быстрее.\n" +
+	"3. Если предел уже большой, проверьте сеть до веб-сервера: узел, который молча роняет " +
+	"пакеты, выглядит отсюда так же, как долгий ответ.\n"
+
 // queryReadOnlyReassurance is emitted for execute_query only, and only when 1С
 // itself answered. Grounded twice: the client side check in NewQueryHandler and
 // the extension's own check, so the statement is true of every query that can
@@ -783,13 +807,27 @@ func renderFailure(heading string, err error) string {
 	case errors.As(err, &se):
 		renderStatusError(&p, heading, se)
 	case errors.As(err, &te):
-		if te.Base == "" {
+		// errors.Is(context.DeadlineExceeded) and NOT net.Error.Timeout(): a
+		// system ETIMEDOUT reports Timeout() true, so keying on it would
+		// announce that as our own limit.
+		// Both http.Client.Timeout and context.WithTimeout satisfy the Is form.
+		deadline := errors.Is(te, context.DeadlineExceeded)
+		switch {
+		case deadline && te.Timeout > 0:
+			p.add(fmt.Sprintf(lineTransportDeadline, te.Timeout))
+		case deadline:
+			p.add(lineTransportDeadlineNoValue)
+		case te.Base == "":
 			p.add(lineTransportNoBase)
-		} else {
+		default:
 			p.add(fmt.Sprintf(lineTransport, te.Base))
 		}
 		addQuoted(&p, captionNetwork, errText(te.Err))
-		p.add(remedyUnreachable)
+		if deadline {
+			p.add(remedyOwnDeadline)
+		} else {
+			p.add(remedyUnreachable)
+		}
 	case errors.As(err, &re):
 		p.add(lineRequest)
 		addQuoted(&p, captionNetwork, errText(re.Err))
