@@ -179,9 +179,7 @@ func init() {
 	// The DIRECTORY name is the half that is still a convention rather than an
 	// observation: no dump on this machine holds a Bots directory and dumps/dump_2's
 	// Configuration.xml declares no such kind, so the plural English spelling below
-	// follows the same rule every other entry uses and nothing has confirmed it. If
-	// it is wrong the entry is inert, not harmful: no folder matches it and the kind
-	// keeps the raw-English prefix it has today.
+	// follows the same rule every other entry uses and nothing has confirmed it.
 	//
 	// ExternalDataProcessors is deliberately NOT here. It is not a configuration
 	// child class at all but a standalone root mdclass, and its projects carry no
@@ -204,17 +202,14 @@ func init() {
 	// serviceKindEnToRu (subsystem_kinds.go) already maps ExternalDataSource to, and
 	// the test asserts the two agree rather than trusting the copy.
 	//
-	// THE DIRECTORY NAMES ARE STILL A CONVENTION, exactly as the Bots entry above
-	// says of its own, and this is the same trade rather than a new one: no dump on
+	// THE DIRECTORY NAMES ARE STILL A CONVENTION, and this is the same trade rather than a new one: no dump on
 	// this machine holds any of the three directories, so the English plural below
-	// follows the rule every other entry uses and nothing has confirmed it. If a
-	// spelling is wrong the entry is inert rather than harmful, because no folder
-	// matches it and the kind keeps the raw-English prefix it has today.
+	// follows the rule every other entry uses and nothing has confirmed it.
 	//
 	// A NARROWER DECISION ABOUT THE SAME TWO KINDS IS REVERSED HERE, not overlooked.
 	// The tree used to hold that an unconfirmed directory name was reason enough to
 	// keep the entry out. The Bots entry already settled that question the other
-	// way, on the argument in the paragraph above, and these three now follow it.
+	// way, and these three now follow it.
 	// Nothing about the evidence changed: the folder names are exactly as
 	// unconfirmed as they were.
 	//
