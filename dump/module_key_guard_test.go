@@ -404,6 +404,31 @@ var unwrappedKeyDigestCorpus = []string{
 	// apart, so the corpus covers the branch on either side of the table.
 	"ExternalDataProcessors/Основной/Ext/Module.bsl",
 	"Module.bsl",
+	// THE NESTED KINDS, and they are here because WITHOUT THEM THIS GUARD IS BLIND
+	// TO THEM. Not one row above passes through Recalculations, Tables, Cubes or
+	// DimensionTables, so the change that taught the derivation about all four moved
+	// no digest at all and nothing here would have asked for the schema bump that
+	// change requires. Each row covers a branch of its own:
+	//
+	//   - one nested pair, and it is the collapse itself: this key was
+	//     "РегистрРасчета.Начисления.МодульНабораЗаписей", the same key the register's
+	//     own record-set module already holds.
+	//   - Tables and Cubes separately, the sibling half of the collapse: under one
+	//     external data source every child of every kind used to arrive at the
+	//     source's own key.
+	//   - a second level of nesting, which the accumulating loop handles and a
+	//     first-match one cannot.
+	//   - a form BELOW a nested kind, where the pair used to be dropped and the form
+	//     keyed as though it hung off the source itself.
+	//   - an object literally NAMED Forms, which is why the scan is positional. Read
+	//     at any index it mints "Справочник.Forms.Форма.Ext.МодульОбъекта", putting
+	//     the object's own Ext in the child slot.
+	"CalculationRegisters/Начисления/Recalculations/Перерасчет1/Ext/RecordSetModule.bsl",
+	"ExternalDataSources/Источник1/Tables/Т1/Ext/ManagerModule.bsl",
+	"ExternalDataSources/Источник1/Cubes/К1/Ext/ManagerModule.bsl",
+	"ExternalDataSources/Источник1/Cubes/К1/DimensionTables/И1/Ext/ManagerModule.bsl",
+	"ExternalDataSources/Источник1/Tables/Т1/Forms/Ф1/Ext/Form/Module.bsl",
+	"Catalogs/Forms/Ext/ObjectModule.bsl",
 }
 
 // anchoredKeyDigestCorpus is the half the anchor scan actually moves. Every row
@@ -497,7 +522,7 @@ var anchoredKeyDigestCorpus = []string{
 // outside that measurement by construction: it is not in that manifest.) The bump is justified by the wrongly-rooted
 // user whose PERSISTED DocIDs would otherwise replay the collapsed keys, which is
 // argued where it belongs, at dumpIndexSchemaVersion in generation.go.
-const bslUnwrappedCorpusDigest = "7e0d5d125153d6af3e6601479212439c7034a87e17225df9edef8ea829809fac"
+const bslUnwrappedCorpusDigest = "8394584424212621c7a38b7bd520201f3837e7424e25f0bd987a42477a5e85fa"
 
 // THE DIGEST DID NOT MOVE ACROSS THE 4 -> 5 BUMP, and that is the finding rather
 // than a formality. v5 adds an indexed "namespace" field to bslDocument; it does
@@ -525,9 +550,17 @@ const bslUnwrappedCorpusDigest = "7e0d5d125153d6af3e6601479212439c7034a87e17225d
 // not have moved whatever v7 did there: it is blind to that change by
 // construction. Its standing still says the path-to-key function is untouched,
 // which is true and is the whole of what it says.
+//
+// IT MOVED ACROSS 7 -> 8, and both halves of that bump could have moved it, so the
+// two were separated by measurement rather than by argument. Six rows were added
+// for the nested kinds, and rows alone move a digest without saying anything about
+// derivation. Holding those six rows fixed and deriving under the OLD loop gives
+// f4bbeb58 for bslKeyCorpusDigest and 6a809de8 for bslUnwrappedCorpusDigest; under
+// the new one each is the value now pinned for it. So the guard is answering to the
+// derivation, which is what makes it a guard at all.
 const (
-	bslKeyCorpusDigest              = "0803e4ed74354c08f4606b0fbf4599ac82078508bcf97cb66a7fd63941246351"
-	pinnedSchemaVersionForKeyDigest = 7
+	bslKeyCorpusDigest              = "9d5960b720a0fb81fd25153435f443b96ffd9d27c2abcb20145e0f3447eca017"
+	pinnedSchemaVersionForKeyDigest = 8
 )
 
 func digestOf(paths []string) (string, string) {

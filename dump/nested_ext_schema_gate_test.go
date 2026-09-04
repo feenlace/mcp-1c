@@ -26,7 +26,7 @@ import (
 // generation directory.
 //
 // WHAT THIS FILE MEASURES IS THE GATE, NOT THE NUMBER. Asserting
-// dumpIndexSchemaVersion == 7 puts one literal against another and stays green
+// dumpIndexSchemaVersion == 8 puts one literal against another and stays green
 // with the gate ripped out. Every arm below stamps a cache at
 // dumpIndexSchemaVersion-1, whatever the current version is, and asks what the
 // running binary does with it.
