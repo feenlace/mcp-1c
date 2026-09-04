@@ -142,12 +142,11 @@ func unownedRows(props map[string][]string, rows []nestedKindRow) []string {
 // and the set of skipped names is asserted in BOTH directions: a kind wired into
 // the dictionary without being taken off this list fails, and a kind added to the
 // fixture without either a dictionary entry or a line here fails too.
-var nestedKindsNotYetInSegmentDict = []string{
-	"Cubes",
-	"DimensionTables",
-	"Recalculations",
-	"Tables",
-}
+//
+// IT IS EMPTY NOW, and it is kept rather than deleted because the both-directions
+// assertion it feeds is what makes a NEW fixture row visible: add one without also
+// wiring it into the dictionary and the test names it here.
+var nestedKindsNotYetInSegmentDict = []string{}
 
 // TestNestedKindNamesAreCitedAndOwnedByTheirParent is the whole of this cluster's
 // claim: every Russian name the nested-kind work will need is a citation, and the
