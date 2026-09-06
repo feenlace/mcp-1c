@@ -1,0 +1,35 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<ConfigDumpInfo xmlns="http://v8.1c.ru/8.3/xcf/dumpinfo" xmlns:xen="http://v8.1c.ru/8.3/xcf/enums" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" format="Hierarchical" version="2.20">
+	<ConfigVersions>
+		<Metadata name="CalculationRegister.Начисления" id="ca6c0a68-8563-4ad5-a6b5-fe4ac840709d" configVersion="18271778b1213f4197b948b803ed73af00000000"/>
+		<Metadata name="CalculationRegister.Начисления.Recalculation.Перерасчет1" id="41804574-baa2-4c61-9e01-4ce6f8054de9" configVersion="3d00c6be542cfa4d965e0ccf4f6c4f7600000000"/>
+		<Metadata name="CalculationRegister.Начисления.Recalculation.Перерасчет1.RecordSetModule" id="41804574-baa2-4c61-9e01-4ce6f8054de9.0" configVersion="1f00eed6a5138f4bb7ecec76b27be66900000000"/>
+		<Metadata name="CalculationRegister.Начисления.Recalculation.Перерасчет2" id="21d4b7bf-095e-4824-aa8e-1843a9869a1a" configVersion="b2c52214495c9f4589123fa653bcf16e00000000"/>
+		<Metadata name="CalculationRegister.Начисления.Recalculation.Перерасчет2.RecordSetModule" id="21d4b7bf-095e-4824-aa8e-1843a9869a1a.0" configVersion="9d51e06e7f153046a06206a5850d38f000000000"/>
+		<Metadata name="CalculationRegister.Начисления.RecordSetModule" id="ca6c0a68-8563-4ad5-a6b5-fe4ac840709d.1" configVersion="f4790095ef35a849b4624cda1fd009ec00000000"/>
+		<Metadata name="ChartOfCalculationTypes.ВидыРасчета" id="e2644d8a-fad9-4b06-9328-85ec9c272430" configVersion="8eefea56a91c8b4988cd39eae6ef9ff400000000"/>
+		<Metadata name="Configuration.Конфигурация" id="71d6e2e9-5f88-475c-b85c-b49597d1abc1" configVersion="e2a242a981815a4f9fe9cb61386499fa00000000"/>
+		<Metadata name="Document.Док1" id="bda1dbfb-9100-48ce-9987-582f797b6874" configVersion="db83dc1a62b59644873e5da2a0b02d8700000000"/>
+		<Metadata name="ExternalDataSource.Источник1" id="0fb4f37b-1545-4289-b643-df18c2d70017" configVersion="45b1d98aee6f11449c2369a53825470300000000"/>
+		<Metadata name="ExternalDataSource.Источник1.Cube.К1" id="a969ae5e-b551-46b0-b822-cfbb55d23cd1" configVersion="b2a7e2bf1c1c3247a5c7ac95d865efc700000000">
+			<Metadata name="ExternalDataSource.Источник1.Cube.К1.Dimension.Изм1" id="4b72ad1b-29fb-47d0-b395-0506263533a5"/>
+			<Metadata name="ExternalDataSource.Источник1.Cube.К1.Resource.Сумма" id="a636fddf-200d-4ba5-a998-8c8a24cdf331"/>
+		</Metadata>
+		<Metadata name="ExternalDataSource.Источник1.Cube.К1.DimensionTable.И1" id="16d7753c-fdd0-4421-9271-1e565685b99c" configVersion="b284db04fbd81942883b201fd9b7502100000000">
+			<Metadata name="ExternalDataSource.Источник1.Cube.К1.DimensionTable.И1.Field.Код" id="fa65bcbf-5a54-4789-8822-8b2764455a2c"/>
+		</Metadata>
+		<Metadata name="ExternalDataSource.Источник1.Cube.К1.DimensionTable.И1.ObjectModule" id="16d7753c-fdd0-4421-9271-1e565685b99c.2" configVersion="aec6f866cd73b849b923deaec26ca33200000000"/>
+		<Metadata name="ExternalDataSource.Источник1.Cube.К1.RecordSetModule" id="a969ae5e-b551-46b0-b822-cfbb55d23cd1.2" configVersion="4f3bf59bb8e0b74395cf646d0a34f7bf00000000"/>
+		<Metadata name="ExternalDataSource.Источник1.Table.Т1" id="95420123-87c1-49e3-aa96-decf0aaf3532" configVersion="d6b649522a4cd74a80f7f6b803930d2100000000">
+			<Metadata name="ExternalDataSource.Источник1.Table.Т1.Field.Код" id="35918d88-5ca7-4b88-abd6-e7bfc3ea7e8d"/>
+		</Metadata>
+		<Metadata name="ExternalDataSource.Источник1.Table.Т1.Form.Ф1" id="5a9b10c7-7dd3-4a64-9b9c-97cef57083a2" configVersion="050788880069204fac80e3617ce3981600000000"/>
+		<Metadata name="ExternalDataSource.Источник1.Table.Т1.Form.Ф1.Form" id="5a9b10c7-7dd3-4a64-9b9c-97cef57083a2.0" configVersion="e938838d3a133e46a8a6e220d814461000000000"/>
+		<Metadata name="ExternalDataSource.Источник1.Table.Т1.RecordSetModule" id="95420123-87c1-49e3-aa96-decf0aaf3532.3" configVersion="5144842d62f15f48b3a0b9e2c3d7979800000000"/>
+		<Metadata name="IntegrationService.Сервис1" id="4d353ee5-3dd3-4e68-897f-717860882378" configVersion="86f7c8f5cfcf28429a8d4cf2292ffadb00000000"/>
+		<Metadata name="IntegrationService.Сервис1.Module" id="4d353ee5-3dd3-4e68-897f-717860882378.0" configVersion="5d30c7349867354eaad0e47eec10859c00000000"/>
+		<Metadata name="Language.Русский" id="71a670ef-3588-4796-9dc3-0e6cb9ba4fcd" configVersion="64a9d8a428047d4b8491475bb835893500000000"/>
+		<Metadata name="WebSocketClient.Клиент1" id="3ce699d8-38ef-471a-808b-bab507c97e06" configVersion="0b189b0afdf13e4783533a798d98cdda00000000"/>
+		<Metadata name="WebSocketClient.Клиент1.Module" id="3ce699d8-38ef-471a-808b-bab507c97e06.0" configVersion="7b2a1f114aca8549820fe7604c430f2000000000"/>
+	</ConfigVersions>
+</ConfigDumpInfo>

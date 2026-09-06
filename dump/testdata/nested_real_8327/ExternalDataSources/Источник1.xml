@@ -1,0 +1,34 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:cmi="http://v8.1c.ru/8.2/managed-application/cmi" xmlns:ent="http://v8.1c.ru/8.1/data/enterprise" xmlns:lf="http://v8.1c.ru/8.2/managed-application/logform" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows" xmlns:xen="http://v8.1c.ru/8.3/xcf/enums" xmlns:xpr="http://v8.1c.ru/8.3/xcf/predef" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<ExternalDataSource uuid="0fb4f37b-1545-4289-b643-df18c2d70017">
+		<InternalInfo>
+			<xr:GeneratedType name="ExternalDataSourceManager.Источник1" category="Manager">
+				<xr:TypeId>a30878c7-5853-400d-83bb-6a7df78d67a7</xr:TypeId>
+				<xr:ValueId>2ce03655-fc4c-450e-8368-3e05e734f3cf</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExternalDataSourceTablesManager.Источник1" category="TablesManager">
+				<xr:TypeId>6278d870-bbb3-4e04-99c4-c2ac3ce9f679</xr:TypeId>
+				<xr:ValueId>2048891d-036d-4cef-8839-1f5aa000ab2c</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExternalDataSourceCubesManager.Источник1" category="CubesManager">
+				<xr:TypeId>1575c764-7433-45b2-a718-fdf749d2ba45</xr:TypeId>
+				<xr:ValueId>b0da4d1d-922e-4ee2-a11a-a8887056551e</xr:ValueId>
+			</xr:GeneratedType>
+		</InternalInfo>
+		<Properties>
+			<Name>Источник1</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>Источник1</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+			<DataLockControlMode>Automatic</DataLockControlMode>
+		</Properties>
+		<ChildObjects>
+			<Table>Т1</Table>
+			<Cube>К1</Cube>
+		</ChildObjects>
+	</ExternalDataSource>
+</MetaDataObject>

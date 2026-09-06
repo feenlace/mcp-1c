@@ -1,0 +1,128 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:cmi="http://v8.1c.ru/8.2/managed-application/cmi" xmlns:ent="http://v8.1c.ru/8.1/data/enterprise" xmlns:lf="http://v8.1c.ru/8.2/managed-application/logform" xmlns:style="http://v8.1c.ru/8.1/data/ui/style" xmlns:sys="http://v8.1c.ru/8.1/data/ui/fonts/system" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:v8ui="http://v8.1c.ru/8.1/data/ui" xmlns:web="http://v8.1c.ru/8.1/data/ui/colors/web" xmlns:win="http://v8.1c.ru/8.1/data/ui/colors/windows" xmlns:xen="http://v8.1c.ru/8.3/xcf/enums" xmlns:xpr="http://v8.1c.ru/8.3/xcf/predef" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="2.20">
+	<Cube uuid="a969ae5e-b551-46b0-b822-cfbb55d23cd1">
+		<InternalInfo>
+			<xr:GeneratedType name="ExternalDataSourceCubeManager.Источник1.К1" category="Manager">
+				<xr:TypeId>c010c723-601f-4876-baa1-bb7b90db76f3</xr:TypeId>
+				<xr:ValueId>086107cb-0634-4725-bb1d-d2d6ca5a273e</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExternalDataSourceCubeList.Источник1.К1" category="List">
+				<xr:TypeId>96d60bf2-1347-4ee6-989a-d3f5b04bf357</xr:TypeId>
+				<xr:ValueId>c471634f-9b3b-4458-a8c5-538c403fab9d</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExternalDataSourceCubeRecordSet.Источник1.К1" category="RecordSet">
+				<xr:TypeId>1bc25273-a0c2-4357-b658-716d7ab3e392</xr:TypeId>
+				<xr:ValueId>ea6815d9-6b4a-490d-8ca6-22efb4987ecd</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExternalDataSourceCubeRecord.Источник1.К1" category="Record">
+				<xr:TypeId>36dad0be-0ff7-46ad-9cb9-d2dc9bc56647</xr:TypeId>
+				<xr:ValueId>898e8d5b-e720-4b76-a51b-5349b1d16122</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExternalDataSourceCubeRecordKey.Источник1.К1" category="RecordKey">
+				<xr:TypeId>bf7faa81-b9b4-449e-8887-e6cee4af17d8</xr:TypeId>
+				<xr:ValueId>f329846a-0fec-4886-93da-34b86122e6ff</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExternalDataSourceCubeRecordManager.Источник1.К1" category="RecordManager">
+				<xr:TypeId>03bc719e-6b6c-4d0f-881e-a2ba13466908</xr:TypeId>
+				<xr:ValueId>e5f7b352-2469-402f-bac9-668c9555ac14</xr:ValueId>
+			</xr:GeneratedType>
+			<xr:GeneratedType name="ExternalDataSourceCubeDimensionsTablesManager.Источник1.К1" category="DimensionTables">
+				<xr:TypeId>44fbdb24-4ab6-4c3b-aeba-32a2a4fd12bf</xr:TypeId>
+				<xr:ValueId>444efc67-a520-4d26-b8e6-895a14a17ddf</xr:ValueId>
+			</xr:GeneratedType>
+		</InternalInfo>
+		<Properties>
+			<Name>К1</Name>
+			<Synonym>
+				<v8:item>
+					<v8:lang>ru</v8:lang>
+					<v8:content>К1</v8:content>
+				</v8:item>
+			</Synonym>
+			<Comment/>
+			<NameInDataSource>K1</NameInDataSource>
+			<Characteristics/>
+			<UseStandardCommands>false</UseStandardCommands>
+			<DefaultRecordForm/>
+			<DefaultListForm/>
+			<RecordPresentation/>
+			<ExtendedRecordPresentation/>
+			<ListPresentation/>
+			<ExtendedListPresentation/>
+			<Explanation/>
+			<IncludeHelpInContents>false</IncludeHelpInContents>
+		</Properties>
+		<ChildObjects>
+			<DimensionTable>И1</DimensionTable>
+			<Dimension uuid="4b72ad1b-29fb-47d0-b395-0506263533a5">
+				<Properties>
+					<Name>Изм1</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Изм1</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>cfg:ExternalDataSourceCubeDimensionTableRef.Источник1.К1.И1</v8:Type>
+					</Type>
+					<PasswordMode>false</PasswordMode>
+					<Format/>
+					<EditFormat/>
+					<ToolTip/>
+					<MarkNegatives>false</MarkNegatives>
+					<Mask/>
+					<MultiLine>false</MultiLine>
+					<ExtendedEdit>false</ExtendedEdit>
+					<MinValue xsi:nil="true"/>
+					<MaxValue xsi:nil="true"/>
+					<FillFromFillingValue>false</FillFromFillingValue>
+					<FillValue xsi:nil="true"/>
+					<FillChecking>DontCheck</FillChecking>
+					<ChoiceFoldersAndItems>Items</ChoiceFoldersAndItems>
+					<ChoiceParameterLinks/>
+					<ChoiceParameters/>
+					<QuickChoice>Auto</QuickChoice>
+					<CreateOnInput>Auto</CreateOnInput>
+					<ChoiceForm/>
+					<LinkByType/>
+					<ChoiceHistoryOnInput>Auto</ChoiceHistoryOnInput>
+				</Properties>
+			</Dimension>
+			<Resource uuid="a636fddf-200d-4ba5-a998-8c8a24cdf331">
+				<Properties>
+					<Name>Сумма</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Сумма</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:decimal</v8:Type>
+						<v8:NumberQualifiers>
+							<v8:Digits>10</v8:Digits>
+							<v8:FractionDigits>0</v8:FractionDigits>
+							<v8:AllowedSign>Any</v8:AllowedSign>
+						</v8:NumberQualifiers>
+					</Type>
+					<PasswordMode>false</PasswordMode>
+					<Format/>
+					<EditFormat/>
+					<ToolTip/>
+					<MarkNegatives>false</MarkNegatives>
+					<Mask/>
+					<MultiLine>false</MultiLine>
+					<ChoiceParameterLinks/>
+					<ChoiceParameters/>
+					<QuickChoice>Auto</QuickChoice>
+					<ChoiceForm/>
+					<ExtendedEdit>false</ExtendedEdit>
+					<NameInDataSource>SUMMA</NameInDataSource>
+				</Properties>
+			</Resource>
+		</ChildObjects>
+	</Cube>
+</MetaDataObject>
