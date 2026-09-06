@@ -18,8 +18,7 @@ const nestedRealDumpDir = "testdata/nested_real_8327"
 // nestedRealDumpMarker is the one BSL file this real dump keys for every
 // nested-kind module, with the marker comment the owner placed in it and the key
 // this branch (schema 8) mints for it, measured by running the branch's own
-// --build-index over a copy of this fixture (report: REPORT.md, section "Branch
-// schema 8 measurement").
+// --build-index over a copy of this fixture.
 type nestedRealDumpMarker struct {
 	relPath string
 	marker  string
@@ -133,8 +132,7 @@ func TestNestedRealDumpHasExactlyTheseNineModules(t *testing.T) {
 // TestNestedRealDumpMintsNineDistinctKeysAtSchema8 is the branch's own claim,
 // checked against the real dump rather than the branch's own fixture: every one of
 // the nine module files gets the exact key the design derived, and the nine keys
-// are pairwise distinct. This is the schema-8 half of the crossing measured in
-// REPORT.md.
+// are pairwise distinct.
 func TestNestedRealDumpMintsNineDistinctKeysAtSchema8(t *testing.T) {
 	idx := newRealDumpIndex(t, nestedRealDumpDir)
 
@@ -190,7 +188,7 @@ func TestNestedRealDumpMintsNineDistinctKeysAtSchema8(t *testing.T) {
 // produced before this branch. Schema 7's derivation was edited in place (no
 // version branch survives in dump/index.go: see generation.go:199's own comment
 // that the derivation "moved again"), so this is not a call to old code; it is the
-// key list measured in REPORT.md by building the v1.19.0 tag (dafe4969) over a
+// key list measured by building the v1.19.0 tag (dafe4969) over a
 // byte-identical copy of this same fixture. It exists so that a future change
 // which accidentally widens schema 8 back towards schema 7's behaviour on THIS
 // dump has something concrete to fail against.

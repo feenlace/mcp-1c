@@ -118,7 +118,7 @@ var universeServiceKinds = []universeKind{
 //
 // DOCUMENTED UNCERTAIN OMISSION (left OUT, and deliberately NOT added to serviceKindEnToRu
 // so it is neither enumerated nor mapped): IntegrationService
-// (8.3.21+). It has n=0 in the indexed public configs and its dump folder, BSL collection
+// (8.3.21+). It has n=0 in the indexed public configs and BSL collection
 // and .ПолноеИмя() prefix are all unvalidated, so it stays out pending real-config
 // confirmation. If a future serviceKindEnToRu ever gains it, the classification invariant
 // forces an explicit include/exclude decision rather than a silent gap.

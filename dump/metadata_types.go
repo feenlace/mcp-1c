@@ -187,8 +187,7 @@ func init() {
 	// that can never be the top of a configuration dump.
 	dumpDirNames["Bots"] = "Бот"
 
-	// Three kinds that kept their raw English prefix. They are NOT in the
-	// Configuration.xml manifest fixture, so the cross-check in
+	// Three kinds that kept their raw English prefix. the cross-check in
 	// TestDumpDirRussianNamesMatchTheKindTables does not reach them;
 	// TestTheNewPrefixesAreCitedNotTyped stands in its place and asserts the source
 	// of each name individually.

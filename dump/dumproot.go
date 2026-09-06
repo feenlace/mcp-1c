@@ -141,9 +141,7 @@ type DumpRootInspection struct {
 // is still a root when one of these sits beside them, and a manifest still decides
 // on its own; both are asserted rather than described.
 //
-// WHAT IT COSTS IS MEASURED AND IS NOTHING HERE. None of the three appears at the
-// top of any dump on this machine, so the kind score of every real root is the
-// number it already was. What it cannot cost nothing for is a configuration whose
+// What it cannot cost nothing for is a configuration whose
 // ONLY kinds are these and which carries no manifest; that dump would now need its
 // manifest.
 var ambiguousKindDirs = map[string]bool{
