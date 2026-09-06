@@ -413,9 +413,7 @@ var unwrappedKeyDigestCorpus = []string{
 	//   - one nested pair, and it is the collapse itself: this key was
 	//     "РегистрРасчета.Начисления.МодульНабораЗаписей", the same key the register's
 	//     own record-set module already holds.
-	//   - Tables and Cubes separately, the sibling half of the collapse: under one
-	//     external data source every child of every kind used to arrive at the
-	//     source's own key.
+	//   - Tables and Cubes separately, the sibling half of the collapse.
 	//   - a second level of nesting, which the accumulating loop handles and a
 	//     first-match one cannot.
 	//   - a form BELOW a nested kind, where the pair used to be dropped and the form

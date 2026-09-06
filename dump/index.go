@@ -399,7 +399,7 @@ var moduleNameSuffixes = map[string]string{
 //
 // Every Russian name here is the one testdata/nested_kind_dirs.txt cites from the
 // platform type reference, and TestNestedKindNamesAreCitedAndOwnedByTheirParent
-// compares the two, so a name typed from memory fails rather than ships.
+// compares the two.
 var subdirSegmentNames = map[string]string{
 	"Forms":           "Форма",
 	"Commands":        "Команда",

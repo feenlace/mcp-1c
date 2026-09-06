@@ -31,7 +31,7 @@ type nestedRealDumpMarker struct {
 	keyV7 string
 }
 
-// nestedRealDumpMarkers is the complete file list of testdata/nested_real_8327:
+// nestedRealDumpMarkers is the complete file list:
 // nine .bsl files, one marker each, no file omitted. Completeness is asserted by
 // TestNestedRealDumpHasExactlyTheseNineModules below rather than trusted here.
 var nestedRealDumpMarkers = []nestedRealDumpMarker{
@@ -189,9 +189,7 @@ func TestNestedRealDumpMintsNineDistinctKeysAtSchema8(t *testing.T) {
 // version branch survives in dump/index.go: see generation.go:199's own comment
 // that the derivation "moved again"), so this is not a call to old code; it is the
 // key list measured by building the v1.19.0 tag (dafe4969) over a
-// byte-identical copy of this same fixture. It exists so that a future change
-// which accidentally widens schema 8 back towards schema 7's behaviour on THIS
-// dump has something concrete to fail against.
+// byte-identical copy of this same fixture.
 func TestNestedRealDumpCollidedAtSchema7(t *testing.T) {
 	seen := make(map[string][]string, len(nestedRealDumpMarkers))
 	for _, m := range nestedRealDumpMarkers {
@@ -229,7 +227,7 @@ func TestNestedRealDumpCollidedAtSchema7(t *testing.T) {
 		t.Fatalf("found %d colliding keys, measured v1.19.0 gave %d", collisions, len(wantCollisions))
 	}
 
-	// Positive control: the recalculation and dimension-table paths collided at
+	// Positive control: the recalculation paths collided at
 	// v1.19.0 precisely because subdirSegmentNames did not know Recalculations,
 	// Tables, Cubes or DimensionTables yet, and dumpDirNames did not know
 	// ExternalDataSources. If a future edit widens either table so widely that the

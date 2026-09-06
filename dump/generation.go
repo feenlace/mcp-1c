@@ -229,8 +229,7 @@ const (
 	// .bsl and moves none, so a configuration with a calculation register or an
 	// external data source computes the SAME signature before and after. Without the
 	// bump its warm generation stays current and keeps serving the collapsed keys,
-	// under which only one of the files sharing a key is reachable at all. Those are
-	// precisely the installations the change exists for.
+	// under which only one of the files sharing a key is reachable at all.
 	dumpIndexSchemaVersion = 8
 
 	// zapSegmentVersion is the scorch zap segment format version used by every

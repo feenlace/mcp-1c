@@ -13,12 +13,8 @@ import (
 // A nested kind has no top-level dump directory, so its module path carries an
 // extra "<КаталогВыгрузки>/<Имя>" pair inside the parent's directory.
 // subdirSegmentNames is what turns such a pair into a ".<Вид>.<Имя>." infix, and a
-// pair the table does not know contributes NOTHING to the key. The parent and every
-// one of its nested children then arrive at the SAME key, and loadBSLFiles writes
-// plain maps, so the second file under a key overwrites the first and its content
-// is genuinely unreachable.
+// pair the table does not know contributes NOTHING to the key.
 //
-// EVERY PATH IN THIS FILE IS BUILT FROM THE FIXTURE, never from a typed kind name.
 // The names live in testdata/nested_kind_dirs.txt, which cites them; a literal here
 // would be a second copy free to drift away from the first, and a "fix" that edited
 // only the copy would make these tests pass without moving a single key.
@@ -161,10 +157,7 @@ func TestNestedKindPathsDoNotCollideWithTheirParent(t *testing.T) {
 }
 
 // TestEveryFormOfANestedObjectKeysDistinctly is what forbids widening
-// subdirSegmentNames on its own. The derivation returns on the FIRST subdirectory it
-// recognises, so with the table widened and the return left in place two forms of one
-// nested object both key as that object and the collision merely moves one level
-// down. Every ordered pair of nested kinds is swept, so the test cannot be satisfied
+// subdirSegmentNames on its own. Every ordered pair of nested kinds is swept, so the test cannot be satisfied
 // by teaching the derivation about one pair.
 func TestEveryFormOfANestedObjectKeysDistinctly(t *testing.T) {
 	rows := readNestedKindDirs(t)
@@ -223,9 +216,7 @@ func TestDoublyNestedKindsKeyDistinctlyFromTheirParent(t *testing.T) {
 
 // TestAWrappedNestedKindPathStillAnchors is the anchor scan over the same class. A
 // --dump pointed one level too high must derive the same key as a correctly pointed
-// one; for a nested kind it does not today, because the shape check admits an object
-// exactly two or four segments above its "Ext" and a nested path is deeper than that.
-// The wrapper is then read as the kind and the kind as the object.
+// one.
 func TestAWrappedNestedKindPathStillAnchors(t *testing.T) {
 	rows := readNestedKindDirs(t)
 

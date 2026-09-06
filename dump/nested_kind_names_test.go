@@ -16,19 +16,10 @@ import (
 // A nested kind is one that never gets a top-level dump directory: it lives
 // inside its parent's directory, so a path through it carries an extra
 // "<КаталогВыгрузки>/<Имя>" pair. subdirSegmentNames is the table that turns such
-// a pair into the ".<Вид>.<Имя>." infix of a module key, and today it knows two:
-// Forms and Commands.
+// a pair into the ".<Вид>.<Имя>." infix of a module key.
 //
-// EVERY OTHER NESTED KIND IS CURRENTLY INVISIBLE TO THAT TABLE, and a path
-// through one keys as though the pair were not there at all. That is how a
-// calculation register's own record-set module and the record-set module of its
-// nested recalculation arrive at ONE key.
-//
-// This file does not fix that. It fixes the thing that has to come first: a
-// Russian name written without a source is an invention, and the names the fix
-// needs are not in this tree yet. So the names are CITED here, from the platform
-// type reference, and checked against what the tree already believes, BEFORE any
-// of them is used to derive a key.
+// So the names are CITED here, from the platform
+// type reference, and checked against what the tree already believes.
 // ---------------------------------------------------------------------------
 
 // nestedKindDirsFixture pairs each nested kind with the parent property that owns
@@ -173,9 +164,7 @@ func TestNestedKindNamesAreCitedAndOwnedByTheirParent(t *testing.T) {
 	}
 
 	// 3. Where the segment dictionary already knows the directory, the cited name
-	// must be exactly what the dictionary emits. This is the half that catches a
-	// name typed from knowledge: it has to agree with a table that is already
-	// shipping keys.
+	// must be exactly what the dictionary emits.
 	if bad := segmentNameMismatches(subdirSegmentNames, rows); len(bad) > 0 {
 		t.Errorf("rows %v cite a Russian singular that disagrees with subdirSegmentNames. "+
 			"That table is what a shipped key already carries, so a disagreement is a name "+
@@ -233,9 +222,7 @@ func TestNestedKindNamesAreCitedAndOwnedByTheirParent(t *testing.T) {
 
 // TestNestedKindCheckersRejectAPluralAndAWrongOwner is the negative control for
 // both checkers above. A green verdict from a checker that has not been shown to go
-// red proves nothing, and the specific error each one exists to catch is a PLURAL
-// standing where a singular belongs: «Формы» is the parent's property, «Форма» is
-// the kind, and the two are one letter apart.
+// red proves nothing.
 func TestNestedKindCheckersRejectAPluralAndAWrongOwner(t *testing.T) {
 	rows := readNestedKindDirs(t)
 	props := kindProperties(t)
