@@ -554,8 +554,7 @@ const bslUnwrappedCorpusDigest = "8394584424212621c7a38b7bd520201f3837e7424e25f0
 // IT MOVED ACROSS 7 -> 8, and both halves of that bump could have moved it, so the
 // two were separated by measurement rather than by argument. Six rows were added
 // for the nested kinds, and rows alone move a digest without saying anything about
-// derivation. So the guard is answering to the
-// derivation, which is what makes it a guard at all.
+// derivation.
 const (
 	bslKeyCorpusDigest              = "9d5960b720a0fb81fd25153435f443b96ffd9d27c2abcb20145e0f3447eca017"
 	pinnedSchemaVersionForKeyDigest = 8

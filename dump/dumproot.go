@@ -140,10 +140,6 @@ type DumpRootInspection struct {
 // ABSTAINING IS NOT VETOING. A directory that reaches the threshold on other kinds
 // is still a root when one of these sits beside them, and a manifest still decides
 // on its own; both are asserted rather than described.
-//
-// What it cannot cost nothing for is a configuration whose
-// ONLY kinds are these and which carries no manifest; that dump would now need its
-// manifest.
 var ambiguousKindDirs = map[string]bool{
 	"IntegrationServices": true,
 	"WebSocketClients":    true,

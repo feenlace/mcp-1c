@@ -3,8 +3,7 @@ package dump
 import "testing"
 
 // TestAnchorKindOKRefusesOddDistance pins the odd-distance conjunct in
-// anchorKindOK: a path whose kind-to-Ext distance is odd must not anchor,
-// so the wrapper segment keeps the key rather than being read as an object name.
+// anchorKindOK.
 func TestAnchorKindOKRefusesOddDistance(t *testing.T) {
 	tests := []struct {
 		name string
