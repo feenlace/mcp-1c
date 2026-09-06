@@ -78,20 +78,34 @@ type CollapsedKeyState struct {
 	Sample []string
 }
 
-// collapsedKeysOf derives the report from a name slice. It is a pure function of
-// its argument so it can be checked against hand-counted inputs without building
-// an Index, and so every caller gets the same arithmetic.
-func collapsedKeysOf(names []string) CollapsedKeyState {
-	if len(names) == 0 {
-		return CollapsedKeyState{}
-	}
+// keyMultiplicityOf returns, for every distinct name in names, how many times
+// it occurs. It is the pure multiset collapsedKeysOf itself walks, exposed on
+// its own so KeyMultiplicity and the collapse report are provably one
+// arithmetic rather than two passes that could drift apart.
+//
+// The returned map holds EVERY key, not only the colliding ones: a key absent
+// from the map and a key present with count 1 must read differently (0 vs 1),
+// and a map that dropped unique keys could not tell them apart without a
+// second, locked lookup against pathByName — precisely the lock KeyMultiplicity
+// exists to avoid.
+func keyMultiplicityOf(names []string) map[string]int {
 	seen := make(map[string]int, len(names))
 	for _, n := range names {
 		seen[n]++
 	}
+	return seen
+}
+
+// collapsedKeysOfMultiplicity derives the report from an already-computed
+// multiplicity map, so a caller that has one (noteCollapsedKeys) does not pay
+// for building it twice.
+func collapsedKeysOfMultiplicity(mult map[string]int) CollapsedKeyState {
+	if len(mult) == 0 {
+		return CollapsedKeyState{}
+	}
 	var st CollapsedKeyState
 	var colliding []string
-	for n, c := range seen {
+	for n, c := range mult {
 		if c > 1 {
 			st.Files += c - 1
 			st.Keys++
@@ -109,6 +123,23 @@ func collapsedKeysOf(names []string) CollapsedKeyState {
 	return st
 }
 
+// collapsedKeysOf derives the report from a name slice. It is a pure function of
+// its argument so it can be checked against hand-counted inputs without building
+// an Index, and so every caller gets the same arithmetic.
+func collapsedKeysOf(names []string) CollapsedKeyState {
+	return collapsedKeysOfMultiplicity(keyMultiplicityOf(names))
+}
+
+// collapseRecord is what noteCollapsedKeys publishes: the collapse report and
+// the per-key multiplicity it was computed from, as one value, so a reader can
+// never pair a count from one load with a map from another. See the doc
+// comment on Index.collapsed in index.go for why this is one atomic and not
+// two.
+type collapseRecord struct {
+	state CollapsedKeyState
+	mult  map[string]int // every key of the installed multiset -> files deriving it
+}
+
 // noteCollapsedKeys publishes the report for a freshly installed name slice.
 //
 // It is called where a name slice is INSTALLED rather than on every read, because
@@ -123,8 +154,11 @@ func collapsedKeysOf(names []string) CollapsedKeyState {
 // the lock for it. That matters because the reader here is every MCP tool
 // response.
 func (idx *Index) noteCollapsedKeys(names []string) {
-	st := collapsedKeysOf(names)
-	idx.collapsed.Store(&st)
+	mult := keyMultiplicityOf(names)
+	idx.collapsed.Store(&collapseRecord{
+		state: collapsedKeysOfMultiplicity(mult),
+		mult:  mult,
+	})
 	// The wrap report is published HERE and nowhere else, deliberately.
 	//
 	// It is a second measurement of the same freshly installed state, and it was
@@ -149,9 +183,27 @@ func (idx *Index) CollapsedKeys() CollapsedKeyState {
 		return CollapsedKeyState{}
 	}
 	if p := idx.collapsed.Load(); p != nil {
-		return *p
+		return p.state
 	}
 	return CollapsedKeyState{}
+}
+
+// KeyMultiplicity reports how many dump files derived docID in the load
+// currently published: 0 for a key the index does not hold, 1 for a unique
+// key, n for a collided one. One atomic load, no lock — the same reason
+// CollapsedKeys avoids idx.mu — and NFC-normalises its argument exactly as
+// GetContent does, because the map is NFC-keyed at every chokepoint that
+// installs it (loadFromManifestAndDiff, loadNamesReadOnly, swapGeneration).
+func (idx *Index) KeyMultiplicity(docID string) int {
+	if idx == nil {
+		return 0
+	}
+	docID = NFC(docID)
+	p := idx.collapsed.Load()
+	if p == nil {
+		return 0
+	}
+	return p.mult[docID]
 }
 
 // CollapsedKeyCount returns the number of dump FILES whose content was lost to an

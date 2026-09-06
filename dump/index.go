@@ -1141,7 +1141,13 @@ type Index struct {
 	// background build goroutine and by a reload's generation swap, and read on
 	// every MCP tool request goroutine. An atomic keeps that read off mu, so a tool
 	// call never contends with a reload for it. See collapsed_keys.go.
-	collapsed atomic.Pointer[CollapsedKeyState]
+	//
+	// The pointee is collapseRecord and not CollapsedKeyState directly: it also
+	// carries the per-key multiplicity map KeyMultiplicity reads. Both are derived
+	// from the SAME names slice in one pass and published together as ONE value,
+	// so a reader between two separate stores could never see the new report
+	// paired with the old map (or vice versa) the way two atomics would allow.
+	collapsed atomic.Pointer[collapseRecord]
 	// wrapped carries how many indexed files were keyed from a path carrying
 	// directory levels above the dump root, in the load currently published. Same
 	// atomic, same reason, same recompute-never-persist argument; see
