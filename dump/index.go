@@ -393,7 +393,7 @@ var moduleNameSuffixes = map[string]string{
 // The four kinds below Commands are NESTED KINDS: they have no top-level dump
 // directory, so their only home is inside the parent's, and a path through one
 // carries the extra pair whether or not this table knows it. Until they were added
-// the pair contributed nothing and the child arrived at its parent's own key, so a
+// the pair contributed nothing, so a
 // calculation register's record-set module and the record-set module of each of its
 // recalculations were ONE key and only one of those files stayed reachable.
 //

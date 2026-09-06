@@ -601,8 +601,7 @@ func TestBslKeyDerivationPinnedToSchemaVersion(t *testing.T) {
 // what they were.
 //
 // This is the number the BUMP PROTOCOL cares about. bslKeyCorpusDigest above now
-// also covers rows the scan deliberately moves, so it will change whenever the
-// scan changes; this one changing means a real dump's keys changed, and that is
+// also covers rows the scan deliberately moves; this one changing means a real dump's keys changed, and that is
 // what forces dumpIndexSchemaVersion up.
 func TestUnwrappedCorpusDigestDidNotMoveWithTheAnchorScan(t *testing.T) {
 	got, table := digestOf(unwrappedKeyDigestCorpus)

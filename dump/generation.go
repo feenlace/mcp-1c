@@ -217,7 +217,7 @@ const (
 	// v8: the docID derivation again, and back inside bslPathToModuleName. Four
 	// nested metadata kinds (Recalculations, Tables, Cubes, DimensionTables) had no
 	// entry in subdirSegmentNames, so the "<КаталогВыгрузки>/<Имя>" pair their paths
-	// carry contributed nothing and every child arrived at its PARENT's key. The
+	// carry contributed nothing. The
 	// derivation now accumulates one such pair per nesting level instead of stopping
 	// at the first, and reads them only at even offsets from the kind, which also
 	// stops an object literally named Forms or Tables being read as a nested kind.

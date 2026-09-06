@@ -228,9 +228,7 @@ func TestNestedRealDumpCollidedAtSchema7(t *testing.T) {
 	}
 
 	// Positive control: the recalculation paths collided at
-	// v1.19.0 precisely because subdirSegmentNames did not know Recalculations,
-	// Tables, Cubes or DimensionTables yet, and dumpDirNames did not know
-	// ExternalDataSources. If a future edit widens either table so widely that the
+	// v1.19.0. If a future edit widens either table so widely that the
 	// pinned schema-7 keys stop matching what the real *v1.19.0 binary* produced,
 	// this whole test is comparing against a moved target, not a stable measurement
 	// of a tagged release; the digest guard in module_key_guard_test.go is the
