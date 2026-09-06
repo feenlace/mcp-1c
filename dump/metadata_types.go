@@ -202,16 +202,10 @@ func init() {
 	// serviceKindEnToRu (subsystem_kinds.go) already maps ExternalDataSource to, and
 	// the test asserts the two agree rather than trusting the copy.
 	//
-	// THE DIRECTORY NAMES ARE STILL A CONVENTION, and this is the same trade rather than a new one: no dump on
-	// this machine holds any of the three directories, so the English plural below
-	// follows the rule every other entry uses and nothing has confirmed it.
-	//
 	// A NARROWER DECISION ABOUT THE SAME TWO KINDS IS REVERSED HERE, not overlooked.
 	// The tree used to hold that an unconfirmed directory name was reason enough to
 	// keep the entry out. The Bots entry already settled that question the other
 	// way, and these three now follow it.
-	// Nothing about the evidence changed: the folder names are exactly as
-	// unconfirmed as they were.
 	//
 	// The integration service gets a dump directory here and NOTHING in
 	// serviceKindEnToRu, where the universe-classification pin still forbids it.
