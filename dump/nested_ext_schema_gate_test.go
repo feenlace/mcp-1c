@@ -33,9 +33,7 @@ import (
 //
 // AND IT MEASURES IT ON THE TREE OF ISSUE 46, which is not incidental. On a dump
 // whose keys are the same on both sides of the bump, a green says a cache was
-// rebuilt and says nothing about what the rebuild delivered. Here the two versions
-// disagree about the key, so these arms can assert WHICH key is served rather than
-// only that something on disk changed.
+// rebuilt and says nothing about what the rebuild delivered.
 //
 // HOW THE PRE-FIX CACHE IS MANUFACTURED, stated because it is not what an upgrade
 // does. The flat arms below build the cache with the extension's manifest ABSENT
@@ -212,8 +210,7 @@ func TestASchemaStaleFlatCacheIsRebuiltAndDeliversTheNestedExtensionKey(t *testi
 // Same tree, same manufactured pre-fix cache, one difference: the stamp is left
 // CURRENT. The cache is then reused, its stored docID is replayed, and the running
 // binary answers with the base configuration's key for a module that belongs to an
-// extension. That is the state an installation holding a warm cache would have been
-// left in had this branch shipped its code change without the version bump.
+// extension.
 func TestACurrentStampedFlatCacheReplaysThePreFixKey(t *testing.T) {
 	root, cacheDir, cpath := staleFlatCacheOfIssue46(t)
 

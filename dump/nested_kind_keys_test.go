@@ -214,9 +214,7 @@ func TestDoublyNestedKindsKeyDistinctlyFromTheirParent(t *testing.T) {
 	}
 }
 
-// TestAWrappedNestedKindPathStillAnchors is the anchor scan over the same class. A
-// --dump pointed one level too high must derive the same key as a correctly pointed
-// one.
+// TestAWrappedNestedKindPathStillAnchors is the anchor scan over the same class.
 func TestAWrappedNestedKindPathStillAnchors(t *testing.T) {
 	rows := readNestedKindDirs(t)
 

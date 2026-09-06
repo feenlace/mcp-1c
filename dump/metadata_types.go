@@ -163,7 +163,7 @@ func init() {
 	// Bots stands apart, and the difference is stated rather than hidden.
 	//
 	// It is a genuine configuration child class, but it is absent from the ERP
-	// manifest measured above, so it is not in the fixture, and it is the ONE kind
+	// manifest measured above, so it is not in the fixture, and it is the kind
 	// here whose Russian singular is not copied from a subsystem table: no subsystem
 	// table lists a bot.
 	//
@@ -187,10 +187,6 @@ func init() {
 	// that can never be the top of a configuration dump.
 	dumpDirNames["Bots"] = "Бот"
 
-	// Three kinds that kept their raw English prefix. the cross-check in
-	// TestDumpDirRussianNamesMatchTheKindTables does not reach them;
-	// TestTheNewPrefixesAreCitedNotTyped stands in its place and asserts the source
-	// of each name individually.
 	//
 	// СервисИнтеграции and WebSocketКлиент are cited from the platform type
 	// reference, whose «ОбъектМетаданных: <Вид>» property tables are snapshotted in

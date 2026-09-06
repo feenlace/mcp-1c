@@ -242,7 +242,7 @@ func TestDumpDirNamesCoversDeclaredChildObjectKinds(t *testing.T) {
 // what canonicalises subsystem membership against the live 1C platform full name,
 // so agreeing with them is agreeing with the platform.
 //
-// Bots is the single documented exception and is asserted separately below: its
+// Bots is asserted separately below: its
 // source is the platform TYPE reference rather than a subsystem table.
 func TestDumpDirRussianNamesMatchTheKindTables(t *testing.T) {
 	pairs := readConfigChildObjectDirs(t)
