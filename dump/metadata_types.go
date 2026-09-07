@@ -163,9 +163,7 @@ func init() {
 	// Bots stands apart, and the difference is stated rather than hidden.
 	//
 	// It is a genuine configuration child class, but it is absent from the ERP
-	// manifest measured above, so it is not in the fixture, and it is the kind
-	// here whose Russian singular is not copied from a subsystem table: no subsystem
-	// table lists a bot.
+	// manifest measured above, so it is not in the fixture.
 	//
 	// IT IS READ ALL THE SAME, and the wording here used to say otherwise. The
 	// platform type reference carries a page titled «ОбъектМетаданных: Бот»,
