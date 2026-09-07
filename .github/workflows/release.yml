@@ -102,6 +102,6 @@ jobs:
           files: |
             dist/mcp-1c-*
             dist/checksums.txt
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}

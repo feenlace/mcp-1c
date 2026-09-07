@@ -5,7 +5,7 @@
 ## Перед тегированием
 
 1. Убедиться, что все PR, которые должны попасть в релиз, смержены.
-2. Проверить заголовки смерженных PR: release notes собираются из них автоматически (`generate_release_notes: true` в `.github/workflows/release.yml`). Отдельного `CHANGELOG.md` в репозитории нет.
+2. Просмотреть заголовки смерженных PR: они пригодятся при ручном написании текста релиза. Отдельного `CHANGELOG.md` в репозитории нет.
 3. Проверить, что `ConfigurationExtensionCompatibilityMode` в `extension/src/Configuration.xml` соответствует минимально поддерживаемой платформе (сейчас `Version8_3_14`).
 
 ## Тегирование и публикация Go-бинарей
@@ -67,7 +67,9 @@
    gh release upload vX.Y.Z checksums.txt --clobber
    ```
 
-7. Добавить в описание релиза блок про установку через Конфигуратор. Сохранить текст ниже в файл `release-block.md`:
+7. Написать описание релиза на русском вручную и записать его вместо пустого, которое оставляет workflow. `generate_release_notes` в `.github/workflows/release.yml` выключен: релиз создаётся без блока «What's Changed» и «Full Changelog», дописывать в описании нечего, оно пишется с нуля.
+
+   Блок про установку через Конфигуратор сохранить, как и раньше, в файл `release-block.md`:
    ```markdown
    ## Установка расширения 1С через Конфигуратор
 
@@ -85,26 +87,20 @@
    может потребоваться снять «Защиту от опасных действий» в свойствах расширения.
    ```
 
-   Дальше этот блок нужно **дописать** к уже существующему описанию, а не подставить вместо него. Причина: `gh release edit --notes-file` заменяет описание целиком, а не дополняет его (`gh release edit --help`: «Read release notes from file», пример подписан «Update the release notes from the content of a file»). При этом описание релиза формируется автоматически из заголовков смерженных PR (`generate_release_notes: true` в `.github/workflows/release.yml`) и служит единственным списком изменений проекта: отдельного `CHANGELOG.md` в репозитории нет. Если передать `--notes-file` с одним только блоком, список изменений будет молча стёрт. Поэтому описание сначала вычитывается, потом дополняется, и только потом записывается обратно:
+   Собрать в `release-notes.md` три части подряд: пару предложений на русском о том, что вошло в релиз, этот блок и ссылку на сравнение тегов под русской подписью вместо английской «Full Changelog», например:
 
-   ```bash
-   # macOS / Linux
-   gh release view vX.Y.Z --json body -q .body > release-notes.md &&
-     printf '\n\n' >> release-notes.md &&
-     cat release-block.md >> release-notes.md
+   ```
+   **Полный список изменений**: https://github.com/feenlace/mcp-1c/compare/v1.19.0...v1.20.0
    ```
 
+   В PowerShell файл писать явным вызовом `WriteAllText` в UTF-8 без BOM, а не через `>` или `Set-Content`: в Windows PowerShell 5.1 оператор `>` создаёт файл в UTF-16LE, а `Set-Content` по умолчанию пишет в кодировке `Default` (Windows-1252 для en-US), и описание релиза приедет на GitHub нечитаемым:
    ```powershell
    # Windows (PowerShell)
-   $body = (gh release view vX.Y.Z --json body -q .body) -join "`n"
-   if ($LASTEXITCODE -ne 0) { throw 'не удалось прочитать текущее описание релиза' }
-   $notes = $body + "`n`n" + (Get-Content release-block.md -Raw)
+   $notes = Get-Content release-notes.md -Raw
    [System.IO.File]::WriteAllText((Join-Path $PWD 'release-notes.md'), $notes, (New-Object System.Text.UTF8Encoding($false)))
    ```
 
-   Здесь важны две детали, и обе неочевидны. Цепочка через `&&` намеренная: если чтение текущего описания не удалось, файл не будет дособран и в релиз ничего не уедет. В PowerShell файл пишется явным вызовом `WriteAllText` в UTF-8 без BOM, а не через `>` или `Set-Content`: в Windows PowerShell 5.1 оператор `>` создаёт файл в UTF-16LE, а `Set-Content` по умолчанию пишет в кодировке `Default` (Windows-1252 для en-US), и описание релиза приедет на GitHub нечитаемым.
-
-   Открыть получившийся `release-notes.md` и убедиться, что в нём есть и автоматический раздел «What's Changed», и новый блок. Только после этого записать описание обратно:
+   Открыть получившийся `release-notes.md`, проверить, что в нём русский текст о содержимом релиза, блок про установку и ссылка на сравнение, и только тогда записать его вместо описания релиза целиком:
    ```bash
    gh release edit vX.Y.Z --notes-file release-notes.md
    ```
@@ -115,7 +111,7 @@
 
 - `.cfe` собирается **только локально** на машине мейнтейнера. GitHub Actions платформу 1С не запускает.
 - `.cfe` **не коммитится** в репозиторий — только в Releases.
-- `gh release edit --notes-file` **заменяет** описание релиза целиком. Автосгенерированный список изменений это единственный changelog проекта, поэтому шаг 7 обязан читать текущее описание и дописывать блок к нему. Сокращать шаг до одного вызова `--notes-file` нельзя.
+- `gh release edit --notes-file` **заменяет** описание релиза целиком, поэтому шаг 7 записывает готовый текст одним вызовом. Отдельного `CHANGELOG.md` в репозитории нет; список изменений в описании релиза теперь пишется вручную.
 - Минимальная сборочная платформа должна совпадать с объявленным `ConfigurationExtensionCompatibilityMode` в `extension/src/Configuration.xml`.
 - Забытый `.cfe` ловит workflow `.github/workflows/verify-release-assets.yml` (шаг 8 выше). Он запускается вручную и только мейнтейнером: внутри релизного workflow такая проверка была бы красной всегда, потому что на момент сборки тега `.cfe` ещё не загружен. Закрывать связанные issues (#17 и аналогичные) только после зелёного прогона этой проверки.
 
