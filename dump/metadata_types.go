@@ -163,9 +163,7 @@ func init() {
 	// Bots stands apart, and the difference is stated rather than hidden.
 	//
 	// It is a genuine configuration child class, but it is absent from the ERP
-	// manifest measured above, so it is not in the fixture, and it is the ONE kind
-	// here whose Russian singular is not copied from a subsystem table: no subsystem
-	// table lists a bot.
+	// manifest measured above, so it is not in the fixture.
 	//
 	// IT IS READ ALL THE SAME, and the wording here used to say otherwise. The
 	// platform type reference carries a page titled «ОбъектМетаданных: Бот»,
@@ -179,15 +177,36 @@ func init() {
 	// The DIRECTORY name is the half that is still a convention rather than an
 	// observation: no dump on this machine holds a Bots directory and dumps/dump_2's
 	// Configuration.xml declares no such kind, so the plural English spelling below
-	// follows the same rule every other entry uses and nothing has confirmed it. If
-	// it is wrong the entry is inert, not harmful: no folder matches it and the kind
-	// keeps the raw-English prefix it has today.
+	// follows the same rule every other entry uses and nothing has confirmed it.
 	//
 	// ExternalDataProcessors is deliberately NOT here. It is not a configuration
 	// child class at all but a standalone root mdclass, and its projects carry no
 	// Configuration.mdo; admitting it would make dumpRootMarker accept a directory
 	// that can never be the top of a configuration dump.
 	dumpDirNames["Bots"] = "Бот"
+
+	//
+	// СервисИнтеграции and WebSocketКлиент are cited from the platform type
+	// reference, whose «ОбъектМетаданных: <Вид>» property tables are snapshotted in
+	// testdata/metadata_kind_properties.txt. Both pages give the singular directly,
+	// so neither name is a plural with its ending taken off.
+	//
+	// ВнешнийИсточникДанных is not a new name at all: it is a copy of the string
+	// serviceKindEnToRu (subsystem_kinds.go) already maps ExternalDataSource to, and
+	// the test asserts the two agree rather than trusting the copy.
+	//
+	// A NARROWER DECISION ABOUT THE SAME TWO KINDS IS REVERSED HERE, not overlooked.
+	// The tree used to hold that an unconfirmed directory name was reason enough to
+	// keep the entry out. The Bots entry already settled that question the other
+	// way, and these three now follow it.
+	//
+	// The integration service gets a dump directory here and NOTHING in
+	// serviceKindEnToRu, where the universe-classification pin still forbids it.
+	// The two tables answer different questions, and only that one feeds the
+	// orphans universe.
+	dumpDirNames["IntegrationServices"] = "СервисИнтеграции"
+	dumpDirNames["WebSocketClients"] = "WebSocketКлиент"
+	dumpDirNames["ExternalDataSources"] = "ВнешнийИсточникДанных"
 
 	// LAST, and the position is the point: every entry above has to be in place
 	// before the set is taken, and a table completed after this line would leave

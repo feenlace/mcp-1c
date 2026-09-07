@@ -124,6 +124,28 @@ type DumpRootInspection struct {
 	Entries  int
 }
 
+// ambiguousKindDirs are metadata kind directories whose names are ordinary English
+// compounds an unrelated codebase can hold side by side. They stay in dumpDirNames,
+// where they give a module its Russian prefix and where dumpRootMarker reads them
+// for the anchor scan; what they must not do is VOTE on whether a directory with no
+// manifest is a dump root.
+//
+// THE VOTE IS THE WHOLE PROBLEM, because minKindDirsForRoot is 2 and there are three
+// of them. Measured on a directory holding IntegrationServices/ and
+// WebSocketClients/ beside cmd/, internal/ and pkg/: it inspected as a dump root,
+// and the same directory inspects as one no longer with these three abstaining. It
+// is an ordinary Go service tree, and the three names were added to dumpDirNames for
+// the key prefix alone.
+//
+// ABSTAINING IS NOT VETOING. A directory that reaches the threshold on other kinds
+// is still a root when one of these sits beside them, and a manifest still decides
+// on its own; both are asserted rather than described.
+var ambiguousKindDirs = map[string]bool{
+	"IntegrationServices": true,
+	"WebSocketClients":    true,
+	"ExternalDataSources": true,
+}
+
 // rootnessOf decides both branches from one already-read listing, and returns the
 // child directories in the order the listing gave them.
 func rootnessOf(ents []os.DirEntry) (isRoot bool, childDirs []string) {
@@ -138,7 +160,7 @@ func rootnessOf(ents []os.DirEntry) (isRoot bool, childDirs []string) {
 			continue
 		}
 		childDirs = append(childDirs, name)
-		if _, ok := dumpDirNames[name]; ok {
+		if _, ok := dumpDirNames[name]; ok && !ambiguousKindDirs[name] {
 			kinds++
 		}
 	}

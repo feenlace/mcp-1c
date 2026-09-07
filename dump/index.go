@@ -389,9 +389,21 @@ var moduleNameSuffixes = map[string]string{
 // names its child in a module name. A path passing through such a subdirectory
 // gets an extra ".<segment>.<childName>." inserted (e.g. Forms/ФормаДок ->
 // ".Форма.ФормаДок.").
+//
+// The four kinds below Commands are NESTED KINDS: they have no top-level dump
+// directory, so their only home is inside the parent's, and a path through one
+// carries the extra pair whether or not this table knows it.
+//
+// Every Russian name here is the one testdata/nested_kind_dirs.txt cites from the
+// platform type reference, and TestNestedKindNamesAreCitedAndOwnedByTheirParent
+// compares the two.
 var subdirSegmentNames = map[string]string{
-	"Forms":    "Форма",
-	"Commands": "Команда",
+	"Forms":           "Форма",
+	"Commands":        "Команда",
+	"Recalculations":  "Перерасчет",
+	"Tables":          "Таблица",
+	"Cubes":           "Куб",
+	"DimensionTables": "ТаблицаИзмерения",
 }
 
 // plainModuleDirs lists the dump directories whose object stores its OWN module
@@ -434,11 +446,21 @@ var subdirSegmentNames = map[string]string{
 //
 // Membership here only ever narrows a suffix from "МодульФормы" to "Модуль"; the
 // prefix is unaffected.
+// IntegrationServices and WebSocketClients are the fifth and sixth members, and
+// they arrive by the rule rather than by being noticed: «ОбъектМетаданных:
+// СервисИнтеграции» carries Модуль and no Формы, and so does «ОбъектМетаданных:
+// WebSocketКлиент». Both pages are snapshotted in the fixture the rule test reads.
+//
+// ExternalDataSources is deliberately NOT here, and by the same rule: its kind has
+// no «Модуль» property, so its Ext/Module.bsl is not an object module and the entry
+// would be an invention. It gets a dumpDirNames prefix and nothing else.
 var plainModuleDirs = map[string]bool{
-	"CommonModules": true,
-	"HTTPServices":  true,
-	"WebServices":   true,
-	"Bots":          true,
+	"CommonModules":       true,
+	"HTTPServices":        true,
+	"WebServices":         true,
+	"Bots":                true,
+	"IntegrationServices": true,
+	"WebSocketClients":    true,
 }
 
 // configModuleDirName is the top-level dump directory that holds the modules of
@@ -605,11 +627,13 @@ func dumpRootMarker(s string) bool {
 // a kind directory, an object name, the object's "Ext", and a module file — or
 // the configuration-module root form "Ext/<one of the four files>".
 //
-// The distance d from the kind to the object's "Ext" is the discriminator. It is
-// 2 for a plain object module (Kind/Имя/Ext/File.bsl) and 4 for one reached
-// through a Forms or Commands subdirectory (Kind/Имя/Forms/Ф/Ext/Form/Module.bsl);
-// anything else is not a dump shape. The last segment must be a module file name
-// the package already knows.
+// The distance d from the kind to the object's "Ext" is the discriminator. It is 2
+// for a plain object module (Kind/Имя/Ext/File.bsl) and grows by two for each
+// nested kind on the way down (Kind/Имя/Forms/Ф/Ext/Form/Module.bsl at 4,
+// ExternalDataSources/И/Cubes/К/DimensionTables/Т/Ext/ManagerModule.bsl at 6). An
+// odd distance is not a dump shape, and neither is an even one whose pairs do not
+// all open with a subdirectory subdirSegmentNames knows. The last segment must be a
+// module file name the package already knows.
 func anchorKindOK(r []string) bool {
 	if len(r) == 0 {
 		return false
@@ -644,13 +668,16 @@ func anchorKindOK(r []string) bool {
 			break
 		}
 	}
-	if d != 2 && d != 4 {
+	// Every segment between the object and its Ext arrives in PAIRS, one nested
+	// kind plus one child name, so an odd distance is not a dump shape at all. Each
+	// pair must open with a subdirectory this package can name; anything else is a
+	// directory that merely happens to sit there, and reading it as a kind is how a
+	// wrapper above the root gets mistaken for one.
+	if d < 2 || d%2 != 0 {
 		return false
 	}
-	if d == 4 {
-		// The only thing that legitimately adds two segments between the object
-		// and its Ext is a Forms/Commands subdirectory plus the child's name.
-		if _, ok := subdirSegmentNames[r[2]]; !ok {
+	for i := 2; i < d; i += 2 {
+		if _, ok := subdirSegmentNames[r[i]]; !ok {
 			return false
 		}
 	}
@@ -837,16 +864,31 @@ func baseConfigModuleName(parts []string) string {
 		}
 	}
 
-	// If the path has a Forms/Commands subdirectory, include the form/command
-	// name as an extra segment (e.g. ".Форма.ФормаДок." or ".Команда.Печать.").
-	for i, p := range parts {
-		if kind, ok := subdirSegmentNames[p]; ok && i+1 < len(parts) {
-			childName := parts[i+1]
-			return prefix + "." + objectName + "." + kind + "." + childName + "." + suffix
+	// Every nested kind on the way down contributes its own ".<Вид>.<Имя>." to the
+	// key (e.g. ".Форма.ФормаДок." or ".Куб.К.ТаблицаИзмерения.Т."). The pairs are
+	// ACCUMULATED rather than returned on the first one: a path can carry two of
+	// them, and stopping at the first re-creates the very collapse this loop exists
+	// to prevent, one level further down. Two forms of one external data source
+	// table would then key alike.
+	//
+	// THE SCAN IS POSITIONAL AND THAT IS A SAFETY CONDITION, NOT A TIDINESS. A pair
+	// can only begin at an even offset from the kind, because parts[1] is the object
+	// name and every pair below it is two segments long. Scanning every index instead
+	// reads an OBJECT whose own name happens to be Tables or Forms as a nested kind
+	// and mints "Справочник.Forms.Форма.Ext.МодульОбъекта" for
+	// Catalogs/Forms/Ext/ObjectModule.bsl, where the object's Ext lands in the child
+	// slot. The loop stops at the first segment that is not a known kind, which for
+	// a well-formed path is the object's own "Ext".
+	var infix strings.Builder
+	for i := 2; i+1 < len(parts); i += 2 {
+		kind, ok := subdirSegmentNames[parts[i]]
+		if !ok {
+			break
 		}
+		infix.WriteString("." + kind + "." + parts[i+1])
 	}
 
-	return prefix + "." + objectName + "." + suffix
+	return prefix + "." + objectName + infix.String() + "." + suffix
 }
 
 // SearchMode determines the search strategy.

@@ -213,7 +213,23 @@ const (
 	// otherwise call current, and goes on answering with the pre-fix keys until an
 	// operator runs --reindex. The population whose keys are wrong today would be the
 	// one population the fix does not reach.
-	dumpIndexSchemaVersion = 7
+	//
+	// v8: the docID derivation again, and back inside bslPathToModuleName. Four
+	// nested metadata kinds (Recalculations, Tables, Cubes, DimensionTables) had no
+	// entry in subdirSegmentNames. The
+	// derivation now accumulates one such pair per nesting level instead of stopping
+	// at the first, and reads them only at even offsets from the kind, which also
+	// stops an object literally named Forms or Tables being read as a nested kind.
+	//
+	// IT TAKES A BUMP FOR THE REASON THE v4 ENTRY GIVES, and the affected population
+	// is the sharp part. A DocID is PERSISTED: buildManifest writes one per file and
+	// readGenerationNames reads it back rather than re-deriving it. genSig hashes
+	// relpaths, mtimes, sizes and the three version integers, and this change adds no
+	// .bsl and moves none, so a configuration with a calculation register or an
+	// external data source computes the SAME signature before and after. Without the
+	// bump its warm generation stays current and keeps serving the collapsed keys,
+	// under which only one of the files sharing a key is reachable at all.
+	dumpIndexSchemaVersion = 8
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and
