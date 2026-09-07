@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -569,6 +570,8 @@ func TestRenderFailure_NoDashes(t *testing.T) {
 		lineForeignContentTypeUnusable,
 		fmt.Sprintf(lineTransport, "http://server"),
 		lineTransportNoBase,
+		fmt.Sprintf(lineTransportDeadline, 300*time.Second),
+		lineTransportDeadlineNoValue,
 		lineRequest,
 		lineGeneric,
 		untrustedTextNotice,
@@ -577,7 +580,7 @@ func TestRenderFailure_NoDashes(t *testing.T) {
 		captionOnecError, captionDenialError, captionCause, captionNetwork,
 		remedyDenialEnvelope,
 		remedyQueryRejected, remedyQueryBodyRejected, remedyForeignBody, remedyForeignBodyTruncated,
-		remedyUnreachable, remedyEventLogNoRight, remedyEventLogUserFilterUnresolved,
+		remedyUnreachable, remedyOwnDeadline, remedyEventLogNoRight, remedyEventLogUserFilterUnresolved,
 		queryMarkerHint, queryReadOnlyReassurance,
 		fmt.Sprintf(bodyTruncatedNotice, 65536),
 		fmt.Sprintf(detailTruncatedNotice, 1200, 5000),
@@ -590,6 +593,9 @@ func TestRenderFailure_NoDashes(t *testing.T) {
 		renderFailure(headingMetadata, &onec.StatusError{StatusCode: 401, BodyKind: onec.BodyKindForeign, ContentType: "text/html", BodyBytes: 99}),
 		renderFailure(headingMetadata, &onec.StatusError{StatusCode: 500, BodyKind: onec.BodyKindForeign, ContentType: "text/html", BodyBytes: 65535, Truncated: true}),
 		renderFailure(headingEventLog, &onec.TransportError{Base: "http://server", Endpoint: "/eventlog", Err: errors.New("connection refused")}),
+		renderFailure(headingQuery, &onec.TransportError{Base: "http://server", Endpoint: "/query",
+			Err:     &url.Error{Op: "Post", URL: "http://server/query", Err: context.DeadlineExceeded},
+			Timeout: 300 * time.Second}),
 		renderFailure(headingEventLog, &onec.StatusError{StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: eventLogRightsRefusalPrefix}),
 		renderFailure(headingEventLog, &onec.StatusError{StatusCode: 403, BodyKind: onec.BodyKindExtension, Detail: eventLogUserFilterRefusalPrefix}),
 		renderFailure(headingEventLog, &onec.StatusError{StatusCode: 403, BodyKind: onec.BodyKindDenial, Detail: "env forbidden"}),
