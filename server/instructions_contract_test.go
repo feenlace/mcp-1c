@@ -259,10 +259,7 @@ func TestInstructionsLimitSentenceMatchesTheSchemas(t *testing.T) {
 //
 // WHY THE REMEDY IS THERE AT ALL. The sentence it replaced told the model to
 // compare the number of shown records against «Всего» and conclude from the two
-// whether anything had been dropped. That inference is invalid:
-// ЖурналРегистрацииPOST in the bundled extension inserts a default ДатаНачала
-// BEFORE ВыгрузитьЖурналРегистрации and counts ВсегоЗаписей after it, so «Всего»
-// counts a window rather than the log. Asked «were there errors last month», a
+// whether anything had been dropped. Asked «were there errors last month», a
 // model applying the check the server told it to apply sees 3 of 3 and reports
 // three errors about a period it never read. The comparison is gone; naming the
 // two parameters is what is left, and it is only a remedy while they exist.

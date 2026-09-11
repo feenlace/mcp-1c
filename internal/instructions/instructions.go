@@ -25,10 +25,7 @@
 // The first version of this text cut the seven-day window and kept the sentence
 // that only made sense while the window was absent: «сравнивай число показанных
 // записей с «Всего» сам». Nothing in that sentence names BSL, and its whole
-// value rested on a BSL fact. ЖурналРегистрацииPOST inserts the default
-// ДатаНачала BEFORE ВыгрузитьЖурналРегистрации and takes ВсегоЗаписей after it,
-// so «Всего» counts a window rather than the log, and a model told to read the
-// two numbers as a completeness check reports a period it never read. The
+// value rested on a BSL fact. The
 // comparison is gone; what is left says where the number comes from and stops.
 // The same reading removed one more dependency: «считает он результаты, а не
 // байты» said how the far side counts limit, which is Лимит in Module.bsl for
