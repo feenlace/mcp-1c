@@ -28,7 +28,7 @@ func readBSLModule(t *testing.T) string {
 // TestExpectedExtensionVersion_MatchesBSL keeps the Go constant and the BSL
 // module in lockstep on the extension version.
 func TestExpectedExtensionVersion_MatchesBSL(t *testing.T) {
-	const want = "0.4.7"
+	const want = "0.4.8"
 
 	if expectedExtensionVersion != want {
 		t.Errorf("expectedExtensionVersion = %q, want %q", expectedExtensionVersion, want)

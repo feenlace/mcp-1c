@@ -164,7 +164,7 @@ func hasError(log string) bool { return strings.Contains(log, "level=ERROR") }
 // The old check compared for equality, so it reported that healthy, supported,
 // officially-fine deployment as an ERROR on every single start.
 func TestVersionProbe_SupportedPairingIsNotAnError(t *testing.T) {
-	for _, newer := range []string{"0.7.4", "0.4.7", "1.0.0", "0.5.0-beta"} {
+	for _, newer := range []string{"0.7.4", "0.4.8", "1.0.0", "0.5.0-beta"} {
 		t.Run(newer, func(t *testing.T) {
 			got := versionAnswer(t, newer)
 			if hasError(got) {
