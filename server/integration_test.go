@@ -190,25 +190,54 @@ func mock1CHandler() http.Handler {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+		// The event filter is APPLIED here rather than ignored, because a fixture
+		// that answers the same records whatever it is asked cannot tell a filter
+		// that arrived from one that was dropped on the way.
+		//
+		// The one representation here is the platform's own: the standard library
+		// pairs _$Session$_.Start with «Сеанс. Начало» in the common module
+		// ЗащитаПерсональныхДанных, next to Аутентификация and Завершение. The
+		// other record carries none, which is what a record whose representation
+		// the base does not supply looks like.
+		var req struct {
+			Event []string `json:"event"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+
+		events := []map[string]any{
+			{
+				"date":     "2026-03-07T10:00:00",
+				"level":    "Ошибка",
+				"event":    "_$Data$_.Update",
+				"user":     "Администратор",
+				"metadata": "Документ.РеализацияТоваровУслуг",
+				"comment":  "Ошибка при записи документа",
+			},
+			{
+				"date":               "2026-03-07T09:30:00",
+				"level":              "Информация",
+				"event":              "_$Session$_.Start",
+				"event_presentation": "Сеанс. Начало",
+				"user":               "Бухгалтер",
+			},
+		}
+		if len(req.Event) > 0 {
+			var kept []map[string]any
+			for _, e := range events {
+				for _, want := range req.Event {
+					if e["event"] == want {
+						kept = append(kept, e)
+						break
+					}
+				}
+			}
+			events = kept
+		}
+
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(map[string]any{
-			"events": []map[string]any{
-				{
-					"date":     "2026-03-07T10:00:00",
-					"level":    "Ошибка",
-					"event":    "_$Data$_.Update",
-					"user":     "Администратор",
-					"metadata": "Документ.РеализацияТоваровУслуг",
-					"comment":  "Ошибка при записи документа",
-				},
-				{
-					"date":  "2026-03-07T09:30:00",
-					"level": "Информация",
-					"event": "_$Session$_.Start",
-					"user":  "Бухгалтер",
-				},
-			},
-			"total": 2,
+			"events": events,
+			"total":  len(events),
 		})
 	})
 
@@ -976,6 +1005,59 @@ func TestIntegration_EventLog(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("expected %q in response, got:\n%s", want, text)
 		}
+	}
+}
+
+// TestIntegration_EventLogByEvent drives the event filter end to end.
+//
+// Two properties, and the second is the one the whole filter exists for: the
+// names the caller asked for have to REACH 1С, and the phrase 1С prints for an
+// event has to reach the caller. A filter this side drops arrives as no filter at
+// all, and the log that comes back then reads exactly like the answer.
+func TestIntegration_EventLogByEvent(t *testing.T) {
+	session, cleanup := setupIntegration(t)
+	defer cleanup()
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "get_event_log",
+		Arguments: map[string]any{
+			"event": []string{"_$Session$_.Start"},
+			"limit": 10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error: %v", err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected non-empty content")
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+
+	// The record that was asked for, with the identifier AND the phrase.
+	for _, want := range []string{"_$Session$_.Start", "Сеанс. Начало"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q in the answer, got:\n%s", want, text)
+		}
+	}
+	// And nothing else. The fixture holds a second record under another event; if
+	// it comes back, the filter never reached 1С.
+	if strings.Contains(text, "_$Data$_.Update") {
+		t.Errorf("the answer carries a record the filter excluded, so the filter did not reach "+
+			"1С and the whole log came back:\n%s", text)
+	}
+
+	// CONTROL: that second record IS reachable, so its absence above is the filter
+	// working and not the fixture being empty.
+	all, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "get_event_log",
+		Arguments: map[string]any{"limit": 10},
+	})
+	if err != nil {
+		t.Fatalf("CallTool error on the unfiltered control: %v", err)
+	}
+	if !strings.Contains(all.Content[0].(*mcp.TextContent).Text, "_$Data$_.Update") {
+		t.Error("CONTROL: the unfiltered call does not carry _$Data$_.Update either, so the " +
+			"filtered call proved nothing")
 	}
 }
 

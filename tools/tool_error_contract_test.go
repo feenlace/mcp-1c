@@ -64,19 +64,21 @@ const (
 	// NewAnalyzeSubsystemsHandlerWithSource, plus the two sites the unhonoured
 	// request repair added: the decode check NewMetadataHandler was missing
 	// altogether, and the level check NewEventLogHandler owed its own schema,
-	// plus one for the namespace enum search_code declares and now enforces.
-	wantSites = 36
+	// plus one for the namespace enum search_code declares and now enforces,
+	// plus one for the empty event name get_event_log refuses before the call.
+	wantSites = 37
 
 	// wantProtocolSites: 8 decode failures plus the 2 recovered-panic marks. The
 	// eighth decode failure is metadata's, which used to be discarded.
 	wantProtocolSites = 10
 
-	// wantOperationalSites: wantSites - wantProtocolSites. Two were added for the
-	// same reason: get_event_log refusing a level outside its declared enum and
-	// search_code refusing a namespace outside its declared enum. Both sit on the
-	// operational side for the reason ProtocolError's doc gives, that a VALUE the
-	// caller chose is a mistake the caller can only fix from text it can read.
-	wantOperationalSites = 26
+	// wantOperationalSites: wantSites - wantProtocolSites. Three were added for
+	// the same reason: get_event_log refusing a level outside its declared enum,
+	// search_code refusing a namespace outside its declared enum, and get_event_log
+	// refusing an empty event name. All three sit on the operational side for the
+	// reason ProtocolError's doc gives, that a VALUE the caller chose is a mistake
+	// the caller can only fix from text it can read.
+	wantOperationalSites = 27
 
 	// wantToolHandlerFuncs is every top-level func in the package returning
 	// mcp.ToolHandler, INCLUDING the two wrappers that are not constructors. It is
@@ -104,7 +106,7 @@ const (
 var wantPerConstructor = map[string]siteClasses{
 	"NewAnalyzeSubsystemsHandlerWithSource": {protocol: 2, operational: 5},
 	"NewConfigurationInfoHandler":           {protocol: 0, operational: 1},
-	"NewEventLogHandler":                    {protocol: 1, operational: 2},
+	"NewEventLogHandler":                    {protocol: 1, operational: 3},
 	"NewFormStructureHandler":               {protocol: 1, operational: 4},
 	"NewMetadataHandler":                    {protocol: 1, operational: 1},
 	"NewObjectStructureHandlerWithSource":   {protocol: 2, operational: 3},

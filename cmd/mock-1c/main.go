@@ -463,14 +463,22 @@ func handleEventLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Level string `json:"level"`
-		Limit int    `json:"limit"`
+		Level string   `json:"level"`
+		Event []string `json:"event"`
+		Limit int      `json:"limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON body"})
 		return
 	}
 
+	// ONE record carries event_presentation and two do not, and that is the shape
+	// rather than an omission. «Сеанс. Начало» is the platform's own phrase for
+	// _$Session$_.Start: the standard library pairs the two in the common module
+	// ЗащитаПерсональныхДанных, next to Аутентификация and Завершение. No such
+	// pairing was found for _$Data$_.Update or _$Data$_.Post, so this stand in
+	// prints no phrase for them rather than inventing one, and a caller reading
+	// them sees exactly what a record with no representation looks like.
 	events := []map[string]any{
 		{
 			"date":     "2026-03-07T14:30:00",
@@ -489,11 +497,28 @@ func handleEventLog(w http.ResponseWriter, r *http.Request) {
 			"comment":  "Отрицательный остаток по регистру ТоварыНаСкладах",
 		},
 		{
-			"date":  "2026-03-07T14:00:00",
-			"level": "Информация",
-			"event": "_$Session$_.Start",
-			"user":  "Администратор",
+			"date":               "2026-03-07T14:00:00",
+			"level":              "Информация",
+			"event":              "_$Session$_.Start",
+			"event_presentation": "Сеанс. Начало",
+			"user":               "Администратор",
 		},
+	}
+
+	// The event filter is applied, not ignored. A stand-in that answered the same
+	// records whatever it was asked would let a filter go missing between here and
+	// the caller without any test noticing.
+	if len(req.Event) > 0 {
+		var kept []map[string]any
+		for _, e := range events {
+			for _, want := range req.Event {
+				if e["event"] == want {
+					kept = append(kept, e)
+					break
+				}
+			}
+		}
+		events = kept
 	}
 
 	if req.Level != "" {

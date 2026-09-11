@@ -53,6 +53,13 @@ const (
 // could honour must not look like the answer to the question that was asked.
 var eventLogLevels = []string{"Ошибка", "Предупреждение", "Информация", "Примечание"}
 
+// eventPresentationLabel is the line the readable event name is printed on.
+//
+// It is NOT «Событие»: the header line of every record already carries the
+// technical identifier, and giving the two the same label would leave a reader
+// unable to tell which of them the filter takes.
+const eventPresentationLabel = "Представление события"
+
 // EventLogTool returns the MCP tool definition for get_event_log.
 func EventLogTool() *mcp.Tool {
 	return &mcp.Tool{
@@ -60,7 +67,8 @@ func EventLogTool() *mcp.Tool {
 		Title: "Журнал регистрации",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Прочитать журнал регистрации 1С — лог ошибок, действий пользователей и системных событий. " +
-			"Фильтрация по дате, уровню важности (Ошибка/Предупреждение/Информация/Примечание) и пользователю.",
+			"Фильтрация по дате, уровню важности (Ошибка/Предупреждение/Информация/Примечание), " +
+			"пользователю и событию.",
 		// The "enum" below and eventLogLevels are pinned to each other by
 		// TestDeclaredEnumsAreEnforced, which reads this schema rather than a
 		// copy of it.
@@ -79,6 +87,11 @@ func EventLogTool() *mcp.Tool {
 					"type": "string",
 					"description": "Уровень важности: Ошибка, Предупреждение, Информация, Примечание",
 					"enum": ["Ошибка", "Предупреждение", "Информация", "Примечание"]
+				},
+				"event": {
+					"type": "array",
+					"items": {"type": "string"},
+					"description": "Имена событий. Имя это технический идентификатор, а не то, что написано в колонке Событие окна журнала регистрации: окно показывает представление вроде «Сеанс. Начало», а отбор принимает «_$Session$_.Start». Системные имена такого вида: _$Session$_.Start, _$Session$_.Finish, _$Session$_.Authentication, _$Data$_.Update, _$Access$_.Access. Список не закрыт: прикладной код пишет свои события через ЗаписьЖурналаРегистрации и называет их сам, в имени бывают точки, и такие имена тут тоже допустимы. Представление каждой записи приходит в ответе рядом с именем, так что одно по другому и находится. Имя, которого в базе нет, отклоняется с этим именем в тексте отказа, а не игнорируется."
 				},
 				"user": {
 					"type": "string",
@@ -107,6 +120,21 @@ func NewEventLogHandler(client *onec.Client) mcp.ToolHandler {
 			return nil, fmt.Errorf("неизвестный уровень важности %q (допустимо: %s)",
 				body.Level, strings.Join(eventLogLevels, ", "))
 		}
+		// An empty name is the one thing about `event` this side can settle. The
+		// NAMES cannot be checked here: the list of them lives in the base, and
+		// ЖурналРегистрацииPOST reads it and refuses a name that is not in it. An
+		// empty string is in no base's list, so refusing it here costs the caller a
+		// round trip less and says the same thing.
+		//
+		// Operational, not InvalidParams, for the same reason as the level check
+		// above: this is a VALUE the caller chose, and a caller can only correct a
+		// value from text it can read.
+		for i, name := range body.Event {
+			if strings.TrimSpace(name) == "" {
+				return nil, fmt.Errorf("имя события в позиции %d пустое; уберите его или "+
+					"поставьте идентификатор, например _$Session$_.Start", i+1)
+			}
+		}
 		body.Limit = clampLimit(body.Limit, defaultEventLogLimit, maxEventLogLimit)
 
 		var result onec.EventLogResult
@@ -132,6 +160,13 @@ func formatEventLog(r *onec.EventLogResult) string {
 			b.WriteString("\n---\n\n")
 		}
 		fmt.Fprintf(&b, "**%s** | %s | %s\n", e.Date, e.Level, e.Event)
+		// The identifier is on the header line above and the phrase the 1С window
+		// prints is here, under its own label. They are two names for one event and
+		// only the identifier is accepted by the filter, so the reader has to be
+		// able to tell which is which.
+		if e.EventPresentation != "" {
+			fmt.Fprintf(&b, "- %s: %s\n", eventPresentationLabel, e.EventPresentation)
+		}
 		fmt.Fprintf(&b, "- Пользователь: %s\n", e.User)
 		if e.Computer != "" {
 			fmt.Fprintf(&b, "- Компьютер: %s\n", e.Computer)

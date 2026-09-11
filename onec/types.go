@@ -136,8 +136,16 @@ type EventLogRequest struct {
 	StartDate string `json:"start_date,omitempty"`
 	EndDate   string `json:"end_date,omitempty"`
 	Level     string `json:"level,omitempty"`
-	User      string `json:"user,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	// Event names the record must carry one of. A LIST rather than one name,
+	// because the platform's own filter key takes a list and an incident is
+	// normally read across several events at once.
+	//
+	// omitempty is load-bearing: ЖурналРегистрацииPOST refuses an event member
+	// that is present and empty, so sending one on a call that asks for no event
+	// filter would turn a plain read of the log into a refusal.
+	Event []string `json:"event,omitempty"`
+	User  string   `json:"user,omitempty"`
+	Limit int      `json:"limit,omitempty"`
 }
 
 // EventLogResult is the response from the eventlog endpoint.
@@ -157,13 +165,17 @@ type ConfigurationInfo struct {
 
 // EventLogEntry represents a single event log record.
 type EventLogEntry struct {
-	Date        string `json:"date"`
-	Level       string `json:"level"`
-	Event       string `json:"event"`
-	User        string `json:"user"`
-	Computer    string `json:"computer,omitempty"`
-	Metadata    string `json:"metadata,omitempty"`
-	Data        string `json:"data,omitempty"`
-	Comment     string `json:"comment,omitempty"`
-	Transaction string `json:"transaction,omitempty"`
+	Date  string `json:"date"`
+	Level string `json:"level"`
+	Event string `json:"event"`
+	// EventPresentation is the phrase the 1С event log window prints for Event,
+	// which is the only name most readers have: Event itself is a technical
+	// identifier and is the only thing the filter accepts.
+	EventPresentation string `json:"event_presentation,omitempty"`
+	User              string `json:"user"`
+	Computer          string `json:"computer,omitempty"`
+	Metadata          string `json:"metadata,omitempty"`
+	Data              string `json:"data,omitempty"`
+	Comment           string `json:"comment,omitempty"`
+	Transaction       string `json:"transaction,omitempty"`
 }

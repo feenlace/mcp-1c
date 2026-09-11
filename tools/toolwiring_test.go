@@ -156,6 +156,16 @@ func operationalSites() []operationalSite {
 			heading: headingEventLog, wants: []string{"Критическая", "Ошибка", "Примечание"},
 		},
 		{
+			// Same shape as the level row above and for the same reason: the 1C
+			// server this builds would ANSWER, and the refusal has to happen before
+			// the call. An empty name is in no base's event list, so the round trip
+			// could only end in the far side's own refusal.
+			name: "eventlog empty event name", site: `eventlog.go "имя события в позиции"`,
+			build:   func(t *testing.T) mcp.ToolHandler { return NewEventLogHandler(envelope1C(t, 500, oops)) },
+			args:    `{"event":["_$Session$_.Start",""]}`,
+			heading: headingEventLog, wants: []string{"имя события в позиции 2", "_$Session$_.Start"},
+		},
+		{
 			name: "form required args", site: `form.go "object_type and object_name are required"`,
 			build: func(t *testing.T) mcp.ToolHandler {
 				return NewFormStructureHandler(envelope1C(t, 500, oops), "")
