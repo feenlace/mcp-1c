@@ -57,6 +57,10 @@ import (
 // THE LIST IS WHAT IS ESTABLISHED, NOT WHAT EXISTS. A column nothing here has had a
 // reason to read is simply absent from it, so a new name has to be grounded the same
 // way rather than typed in.
+//
+// ASKED OF THE PLATFORM ITSELF 2026-09-12, on one live 1С 8.3.27 base:
+// ВыгрузитьЖурналРегистрации fills a table of 21 columns there, and all 17 above are
+// among them. One base on one day, so this dates the list rather than closing it.
 var eventLogColumns = []string{
 	"ВспомогательныйIPПорт",
 	"Данные",
