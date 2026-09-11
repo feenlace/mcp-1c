@@ -121,8 +121,7 @@ var wantPerConstructor = map[string]siteClasses{
 //
 // This list is load-bearing rather than documentary. WithToolErrors has exactly
 // the handler type and its own body contains two (nil, err) returns; a walk
-// without the enclosing-declaration rule counts them and reports 37/10/27 instead
-// of 35/10/25, MISCLASSIFYING the classifier itself. Measured both ways on this
+// without the enclosing-declaration rule counts them, MISCLASSIFYING the classifier itself. Measured both ways on this
 // tree. withIndexProtectionNotice is excluded by being unexported.
 var wantNonConstructorHandlerFuncs = []string{"WithToolErrors", "withIndexProtectionNotice"}
 
