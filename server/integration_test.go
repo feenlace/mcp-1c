@@ -196,7 +196,7 @@ func mock1CHandler() http.Handler {
 				{
 					"date":     "2026-03-07T10:00:00",
 					"level":    "Ошибка",
-					"event":    "Данные.Запись",
+					"event":    "_$Data$_.Update",
 					"user":     "Администратор",
 					"metadata": "Документ.РеализацияТоваровУслуг",
 					"comment":  "Ошибка при записи документа",
@@ -204,7 +204,7 @@ func mock1CHandler() http.Handler {
 				{
 					"date":  "2026-03-07T09:30:00",
 					"level": "Информация",
-					"event": "Сеанс.Начало",
+					"event": "_$Session$_.Start",
 					"user":  "Бухгалтер",
 				},
 			},

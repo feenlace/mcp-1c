@@ -475,7 +475,7 @@ func handleEventLog(w http.ResponseWriter, r *http.Request) {
 		{
 			"date":     "2026-03-07T14:30:00",
 			"level":    "Ошибка",
-			"event":    "Данные.Запись",
+			"event":    "_$Data$_.Update",
 			"user":     "Администратор",
 			"metadata": "Документ.РеализацияТоваровУслуг",
 			"comment":  "Ошибка при записи: поле Контрагент не заполнено",
@@ -483,7 +483,7 @@ func handleEventLog(w http.ResponseWriter, r *http.Request) {
 		{
 			"date":     "2026-03-07T14:25:00",
 			"level":    "Предупреждение",
-			"event":    "Данные.Проведение",
+			"event":    "_$Data$_.Post",
 			"user":     "Бухгалтер",
 			"metadata": "Документ.ПоступлениеТоваровУслуг",
 			"comment":  "Отрицательный остаток по регистру ТоварыНаСкладах",
@@ -491,7 +491,7 @@ func handleEventLog(w http.ResponseWriter, r *http.Request) {
 		{
 			"date":  "2026-03-07T14:00:00",
 			"level": "Информация",
-			"event": "Сеанс.Начало",
+			"event": "_$Session$_.Start",
 			"user":  "Администратор",
 		},
 	}

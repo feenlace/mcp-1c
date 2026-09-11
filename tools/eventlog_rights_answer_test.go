@@ -83,7 +83,7 @@ func TestEventLogRefusalIsNotAnAnswer(t *testing.T) {
 	// is a property of the refusal and not of the assertion.
 	ok := formatEventLog(&onec.EventLogResult{
 		Events: []onec.EventLogEntry{{Date: "2026-08-03T00:00:00", Level: "Информация",
-			Event: "Данные.Запись", User: "Demo"}},
+			Event: "_$Data$_.Update", User: "Demo"}},
 		Total: 1,
 	})
 	for _, want := range []string{"## Журнал регистрации\n", "\nВсего: ", "- Пользователь: "} {

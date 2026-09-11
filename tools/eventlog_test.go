@@ -32,7 +32,7 @@ func TestFormatEventLog(t *testing.T) {
 			{
 				Date:     "2026-03-07T10:00:00",
 				Level:    "Ошибка",
-				Event:    "Данные.Запись",
+				Event:    "_$Data$_.Update",
 				User:     "Администратор",
 				Metadata: "Документ.РеализацияТоваровУслуг",
 				Comment:  "Ошибка записи документа",
@@ -40,7 +40,7 @@ func TestFormatEventLog(t *testing.T) {
 			{
 				Date:  "2026-03-07T09:30:00",
 				Level: "Информация",
-				Event: "Сеанс.Начало",
+				Event: "_$Session$_.Start",
 				User:  "Бухгалтер",
 			},
 		},
@@ -80,7 +80,7 @@ func TestFormatEventLog_OptionalFields(t *testing.T) {
 			{
 				Date:        "2026-03-07T10:00:00",
 				Level:       "Ошибка",
-				Event:       "Данные.Запись",
+				Event:       "_$Data$_.Update",
 				User:        "Администратор",
 				Computer:    "SERVER01",
 				Metadata:    "Документ.Тест",
@@ -113,7 +113,7 @@ func TestNewEventLogHandler(t *testing.T) {
 			{
 				"date": "2026-03-07T10:00:00",
 				"level": "Ошибка",
-				"event": "Данные.Запись",
+				"event": "_$Data$_.Update",
 				"user": "Администратор",
 				"metadata": "Документ.РеализацияТоваровУслуг"
 			}
