@@ -120,6 +120,29 @@ func NewEventLogHandler(client *onec.Client) mcp.ToolHandler {
 			return nil, fmt.Errorf("неизвестный уровень важности %q (допустимо: %s)",
 				body.Level, strings.Join(eventLogLevels, ", "))
 		}
+		// AN EXPLICITLY EMPTY LIST IS A DIFFERENT QUESTION FROM NO LIST AT ALL,
+		// and the encoding cannot carry the difference. omitempty fires on
+		// len == 0 rather than on nil, so an empty array leaves this process as a
+		// body with no event member, and the answer comes back byte for byte the
+		// answer to a call that asked for no filter. That is the very thing this
+		// endpoint refuses elsewhere rather than allows: a filter that cannot be
+		// applied is declined, because a dropped one is indistinguishable from an
+		// absent one and the caller has no way to tell which question was
+		// answered.
+		//
+		// The DECODE keeps the distinction that the encode loses: {} leaves Event
+		// nil and {"event": []} leaves it non-nil and empty. This is therefore the
+		// last place the difference can be read at all. ЖурналРегистрацииPOST
+		// refuses the same state in the same words, and with the member erased it
+		// was never reachable from here.
+		//
+		// Operational, not InvalidParams, for the same reason as the checks either
+		// side of it: this is a VALUE the caller chose, and a caller can only
+		// correct a value from text it can read.
+		if body.Event != nil && len(body.Event) == 0 {
+			return nil, fmt.Errorf("список имён событий в `event` пуст; уберите `event`, " +
+				"чтобы прочитать журнал без отбора по событию")
+		}
 		// An empty name is the one thing about `event` this side can settle. The
 		// NAMES cannot be checked here: the list of them lives in the base, and
 		// ЖурналРегистрацииPOST reads it and refuses a name that is not in it. An

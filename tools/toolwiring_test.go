@@ -166,6 +166,18 @@ func operationalSites() []operationalSite {
 			heading: headingEventLog, wants: []string{"имя события в позиции 2", "_$Session$_.Start"},
 		},
 		{
+			// An EMPTY array, which is not the row above: that one carries a name
+			// and this one carries none. It has to refuse before the call for a
+			// reason the other rows do not have. omitempty erases an empty array,
+			// so the 1C server this builds would never see the member and would
+			// answer the whole log, and the caller could not tell that answer from
+			// the one it asked for.
+			name: "eventlog empty event filter", site: `eventlog.go "список имён событий"`,
+			build:   func(t *testing.T) mcp.ToolHandler { return NewEventLogHandler(envelope1C(t, 500, oops)) },
+			args:    `{"event":[]}`,
+			heading: headingEventLog, wants: []string{"список имён событий", "без отбора по событию"},
+		},
+		{
 			name: "form required args", site: `form.go "object_type and object_name are required"`,
 			build: func(t *testing.T) mcp.ToolHandler {
 				return NewFormStructureHandler(envelope1C(t, 500, oops), "")
