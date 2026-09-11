@@ -508,9 +508,7 @@ const remedyEventLogUserFilterUnresolved = "Так расширение отве
 // reaching this refusal says the list itself never arrived.
 //
 // IT DOES NOT ADVISE RETRYING WITHOUT `event`, and that is the point of the
-// separate text rather than a nicety. Dropping the filter WOULD make the call
-// succeed, and it would answer a different question: the whole log instead of the
-// events that were asked for. A reader investigating an incident who is told to
+// separate text rather than a nicety. A reader investigating an incident who is told to
 // retry without the filter gets records that look like the answer.
 //
 // Customer-facing RU: no тире.
@@ -523,7 +521,7 @@ const remedyEventLogEventFilterUnresolved = "Так расширение отв�
 	"регистрации, и он говорит, почему список не получен.\n" +
 	"2. Версию расширения в базе: список имён событий читает обработчик, а он приходит вместе " +
 	"с расширением.\n" +
-	"3. Повторять тот же вызов без `event` не стоит: он выполнится, но ответит на другой " +
+	"3. Повторять тот же вызов без `event` не стоит: он ответит на другой " +
 	"вопрос, отдав журнал целиком вместо событий, о которых спрашивали.\n"
 
 // lineDumpLegReason reports the second leg's failure when both legs failed.
