@@ -11,11 +11,13 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// ONE HANDLER, TWO 403s, AND NOTHING TOLD THEM APART.
+// ONE HANDLER, SEVERAL 403s, AND NOTHING TOLD THEM APART.
 //
-// ЖурналРегистрацииPOST answers 403 twice. The first is the rights gate at the
-// top: ПравоДоступа is false, the account may not read the journal at all. The
-// second is further down: the user filter could not be resolved, and it is
+// ЖурналРегистрацииPOST answers 403 at four sites in three classes. The first is
+// the rights gate at the top: ПравоДоступа is false, the account may not read the
+// journal at all. The second is further down: the user filter could not be
+// resolved. The other two are the event filter's, and they fire when the base's
+// own list of event names could not be obtained. Every one but the first is
 // reachable ONLY AFTER the gate has passed, i.e. only by a caller who HAS the
 // right. The module says so itself, and calls the rights cause «единственная
 // заведомо исключённая» there.
@@ -72,7 +74,7 @@ func eventLogRefusals(t *testing.T) []bslRefusal {
 		}
 	}
 	if start < 0 || end < 0 {
-		t.Fatal("ЖурналРегистрацииPOST was not found in the shipped module; the two refusals " +
+		t.Fatal("ЖурналРегистрацииPOST was not found in the shipped module; its refusals " +
 			"cannot be read and nothing below measures anything")
 	}
 
@@ -109,11 +111,12 @@ func TestEventLogRefusalsAreAnsweredByTheirOwnCause(t *testing.T) {
 	}
 
 	const (
-		rightsMarker = "Это отказ по правам учётной записи, а не по отбору"
-		filterMarker = "поиск пользователя для отбора не состоялся"
+		rightsMarker      = "Это отказ по правам учётной записи, а не по отбору"
+		filterMarker      = "поиск пользователя для отбора не состоялся"
+		eventFilterMarker = "не смогло получить у базы список имён событий"
 	)
 
-	rights, filter := 0, 0
+	rights, filter, eventFilter := 0, 0, 0
 	for _, r := range refusals {
 		if r.code != eventLogRefusalStatus {
 			continue
@@ -152,14 +155,33 @@ func TestEventLogRefusalsAreAnsweredByTheirOwnCause(t *testing.T) {
 					"caller that retrying without the filter is pointless:\n%s",
 					bslModule, r.line, text)
 			}
+		case isEventLogEventFilterRefusal(r.text):
+			eventFilter++
+			if !strings.Contains(text, eventFilterMarker) {
+				t.Errorf("%s:%d answers %d %q, the event filter refusal, but the answer does not "+
+					"carry the remedy written for it:\n%s", bslModule, r.line, r.code, r.text, text)
+			}
+			// Same defect as above, one filter along: this line too stands after
+			// the rights gate, so naming the right names the one cause that is
+			// already excluded.
+			if strings.Contains(text, rightsMarker) {
+				t.Errorf("%s:%d is reachable only after the rights gate has passed, so the caller "+
+					"HAS the right, and the answer still says it is a rights refusal:\n%s",
+					bslModule, r.line, text)
+			}
+			if strings.Contains(text, filterMarker) {
+				t.Errorf("%s:%d is about the list of EVENT names and is answered with the user "+
+					"filter remedy:\n%s", bslModule, r.line, text)
+			}
 		default:
 			t.Errorf("%s:%d answers %d %q, and this repository classifies it as neither the "+
-				"rights refusal nor the user filter refusal. It will be answered with no cause "+
+				"rights refusal, the user filter refusal nor the event filter refusal. It will be "+
+				"answered with no cause "+
 				"at all, which may be the wrong advice.", bslModule, r.line, r.code, r.text)
 		}
 	}
 
-	// Both classes must actually occur. A module that lost one of them would
+	// Every class must actually occur. A module that lost one of them would
 	// satisfy every check above by never entering its branch.
 	if rights != 1 {
 		t.Errorf("the module has %d rights refusals at status %d, want exactly one; "+
@@ -171,8 +193,20 @@ func TestEventLogRefusalsAreAnsweredByTheirOwnCause(t *testing.T) {
 		t.Errorf("the module has %d user filter refusals at status %d, want exactly one",
 			filter, eventLogRefusalStatus)
 	}
+	// TWO, and the number is the shape rather than an accident. The handler can
+	// fail to obtain the list of event names in two ways: the platform call
+	// raised, or it answered something the names cannot be looked up in. Both are
+	// the same thing to the caller and both carry the same prefix, which is why
+	// one remedy serves them; a count that drifted off two means a site was added
+	// or lost without anyone deciding which of the two it is.
+	if eventFilter != 2 {
+		t.Errorf("the module has %d event filter refusals at status %d, want exactly two: the "+
+			"platform call raising, and it answering a shape the names cannot be looked up in",
+			eventFilter, eventLogRefusalStatus)
+	}
 	t.Logf("drove %d literal refusals from ЖурналРегистрацииPOST; %d rights, %d user filter, "+
-		"at status %d", len(refusals), rights, filter, eventLogRefusalStatus)
+		"%d event filter, at status %d",
+		len(refusals), rights, filter, eventFilter, eventLogRefusalStatus)
 }
 
 // TestEventLogRefusalPinCanFail is the positive control for the pin above.
@@ -182,18 +216,39 @@ func TestEventLogRefusalsAreAnsweredByTheirOwnCause(t *testing.T) {
 // is entered, so the predicates are exercised here against inputs where they
 // MUST report a difference.
 func TestEventLogRefusalPinCanFail(t *testing.T) {
-	// The two predicates must not be true of each other's text, otherwise the
-	// switch above lands both refusals in the same branch and cannot tell them
-	// apart at all.
+	// The predicates must not be true of each other's text, otherwise the switch
+	// above lands two refusals in the same branch and cannot tell them apart at
+	// all.
 	if isEventLogRightsRefusal(eventLogUserFilterRefusalPrefix) {
-		t.Error("isEventLogRightsRefusal accepts the user filter diagnostic, so the two 403s are " +
-			"still indistinguishable")
+		t.Error("isEventLogRightsRefusal accepts the user filter diagnostic, so those two 403s " +
+			"are still indistinguishable")
 	}
 	if isEventLogUserFilterRefusal(eventLogRightsRefusalPrefix) {
-		t.Error("isEventLogUserFilterRefusal accepts the rights diagnostic, so the two 403s are " +
-			"still indistinguishable")
+		t.Error("isEventLogUserFilterRefusal accepts the rights diagnostic, so those two 403s " +
+			"are still indistinguishable")
 	}
-	// Neither may be true of everything.
+	// The third is checked against both of the others, in both directions. The
+	// user filter and the event filter diagnostics differ in their FIRST WORD
+	// only, so a predicate that matched on «filter cannot be resolved» would
+	// accept both and land them in one branch.
+	for _, c := range []struct {
+		name string
+		got  bool
+	}{
+		{"isEventLogEventFilterRefusal accepts the rights diagnostic",
+			isEventLogEventFilterRefusal(eventLogRightsRefusalPrefix)},
+		{"isEventLogEventFilterRefusal accepts the user filter diagnostic",
+			isEventLogEventFilterRefusal(eventLogUserFilterRefusalPrefix)},
+		{"isEventLogRightsRefusal accepts the event filter diagnostic",
+			isEventLogRightsRefusal(eventLogEventFilterRefusalPrefix)},
+		{"isEventLogUserFilterRefusal accepts the event filter diagnostic",
+			isEventLogUserFilterRefusal(eventLogEventFilterRefusalPrefix)},
+	} {
+		if c.got {
+			t.Errorf("%s, so the three 403s on this endpoint are not told apart", c.name)
+		}
+	}
+	// None may be true of everything.
 	for _, notARefusal := range []string{"", "   ", "что угодно", "limit must be a number"} {
 		if isEventLogRightsRefusal(notARefusal) {
 			t.Errorf("isEventLogRightsRefusal(%q) = true, so the classifier accepts anything",
@@ -201,6 +256,10 @@ func TestEventLogRefusalPinCanFail(t *testing.T) {
 		}
 		if isEventLogUserFilterRefusal(notARefusal) {
 			t.Errorf("isEventLogUserFilterRefusal(%q) = true, so the classifier accepts anything",
+				notARefusal)
+		}
+		if isEventLogEventFilterRefusal(notARefusal) {
+			t.Errorf("isEventLogEventFilterRefusal(%q) = true, so the classifier accepts anything",
 				notARefusal)
 		}
 	}

@@ -73,8 +73,10 @@ func eventLogFunctionLines(t *testing.T) []string {
 // carries. THE REFUSAL IS FOUND BY THIS AND NOT BY «the first 403 after the
 // check», which is what it used to be found by and what made the guard blind.
 //
-// ЖурналРегистрацииPOST answers 403 TWICE, and both stand before the dump: the
-// rights gate here, and the user filter refusal further down. A walk that took
+// ЖурналРегистрацииPOST answers 403 at FOUR sites, and every one of them stands
+// before the dump: the rights gate here, the user filter refusal further down,
+// and the two the event filter answers when the base's own list of event names
+// could not be obtained. A walk that took
 // the first `ОтветОшибка(403,` it met simply latched onto the other one once this
 // refusal stopped being a 403, and every ordering assertion below stayed true of
 // a refusal that is not the subject of this test. Measured: changing this site to

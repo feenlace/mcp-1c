@@ -141,6 +141,9 @@ func bslCallArguments(src, name string) ([]string, bool) {
 // a wrong name is silently empty and looks exactly like a record that has no
 // value for that field. Nothing on the 1С side and nothing on the Go side can
 // tell the two apart, which is why the check has to be on the NAME.
+//
+// The floor below is the count of fields the handler fills this way, and it moves
+// with the handler: it was four, and event_presentation made it five.
 func TestEventLogAsksForColumnsTheTableHas(t *testing.T) {
 	body := strings.Join(eventLogFunctionLines(t), "\n")
 
@@ -183,9 +186,9 @@ func TestEventLogAsksForColumnsTheTableHas(t *testing.T) {
 
 	// CONTROL: the walk found the calls. Every assertion above is satisfied by
 	// finding none.
-	if asked < 4 {
+	if asked < 5 {
 		t.Fatalf("CONTROL: only %d ПолучитьКолонкуЖурнала call(s) were read out of "+
-			"ЖурналРегистрацииPOST; the handler fills four fields that way", asked)
+			"ЖурналРегистрацииPOST; the handler fills five fields that way", asked)
 	}
 	t.Logf("checked %d column names against a vocabulary of %d", asked, len(eventLogColumns))
 }

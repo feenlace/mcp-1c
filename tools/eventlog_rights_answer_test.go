@@ -111,7 +111,7 @@ func TestEventLogRefusalBlamesTheAccountNotTheFilter(t *testing.T) {
 	}
 
 	// The text from 1С is still shown, framed as data. Losing it would hide which
-	// of the two 403s fired.
+	// of this endpoint's 403s fired.
 	if !strings.Contains(text, "no records are returned") {
 		t.Errorf("the diagnostic from 1С is no longer shown:\n%s", text)
 	}
