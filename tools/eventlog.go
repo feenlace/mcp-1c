@@ -133,7 +133,7 @@ func NewEventLogHandler(client *onec.Client) mcp.ToolHandler {
 		// The DECODE keeps the distinction that the encode loses: {} leaves Event
 		// nil and {"event": []} leaves it non-nil and empty. This is therefore the
 		// last place the difference can be read at all. ЖурналРегистрацииPOST
-		// refuses the same state in the same words, and with the member erased it
+		// refuses the same state, and with the member erased it
 		// was never reachable from here.
 		//
 		// Operational, not InvalidParams, for the same reason as the checks either
