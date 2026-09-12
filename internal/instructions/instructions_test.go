@@ -1486,10 +1486,7 @@ func TestTextCannotForgeAServerBlock(t *testing.T) {
 // replaced it, and each is false.
 var retiredClaims = []struct{ fragment, why string }{
 	{"сравнивай число показанных записей",
-		"«Всего» is not a completeness oracle. ЖурналРегистрацииPOST inserts a default ДатаНачала " +
-			"before ВыгрузитьЖурналРегистрации and takes ВсегоЗаписей after it, so the number counts a " +
-			"window rather than the log, and a model applying the comparison reports a period it never " +
-			"read. What the number counts is decided in Module.bsl, which is versioned separately from " +
+		"«Всего» is not a completeness oracle. What the number counts is decided in Module.bsl, which is versioned separately from " +
 			"this binary, so no rewording of the comparison is safe either."},
 	{"вся категория целиком",
 		"NewMetadataHandler runs filterNoise before the filter branch, so a filtered answer is missing " +

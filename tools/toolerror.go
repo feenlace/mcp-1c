@@ -392,7 +392,7 @@ const queryMarkerHint = "Позицию, на которой разбор ост
 // disconnecting the remedy.
 const eventLogRefusalStatus = 403
 
-// THE HANDLER ANSWERS 403 TWICE AND THE TWO ARE DIFFERENT FAILURES.
+// THE HANDLER ANSWERS 403 IN THREE CLASSES AND THEY ARE DIFFERENT FAILURES.
 //
 // eventLogRightsRefusalPrefix is the gate at the top of ЖурналРегистрацииPOST:
 // ПравоДоступа("Администрирование", Метаданные) is false and the account may not
@@ -405,9 +405,17 @@ const eventLogRefusalStatus = 403
 //
 // Prefixes rather than whole strings because the module splits both diagnostics
 // across source lines and appends ОписаниеОшибки() to the second.
+// eventLogEventFilterRefusalPrefix is the THIRD, and it is reachable the same
+// way as the second: only after the gate, and only when an event filter was
+// given. ЖурналРегистрацииPOST asks the base for its own list of event names
+// before it applies the filter, so that a name the base does not know is refused
+// instead of dropped; this is what it answers when that list could not be
+// obtained at all, which is a different thing from a name that is not in it. A
+// name that is not in it is a 400, because the caller chose it.
 const (
-	eventLogRightsRefusalPrefix     = "reading the event log requires the Администрирование right"
-	eventLogUserFilterRefusalPrefix = "user filter cannot be resolved"
+	eventLogRightsRefusalPrefix      = "reading the event log requires the Администрирование right"
+	eventLogUserFilterRefusalPrefix  = "user filter cannot be resolved"
+	eventLogEventFilterRefusalPrefix = "event filter cannot be resolved"
 )
 
 // isEventLogRightsRefusal reports whether the extension refused because the
@@ -421,6 +429,13 @@ func isEventLogRightsRefusal(detail string) bool {
 // provoke.
 func isEventLogUserFilterRefusal(detail string) bool {
 	return strings.HasPrefix(strings.TrimSpace(detail), eventLogUserFilterRefusalPrefix)
+}
+
+// isEventLogEventFilterRefusal reports whether the extension refused because it
+// could not obtain the base's list of event names, which only a caller who sent
+// an event filter can provoke.
+func isEventLogEventFilterRefusal(detail string) bool {
+	return strings.HasPrefix(strings.TrimSpace(detail), eventLogEventFilterRefusalPrefix)
 }
 
 // remedyEventLogNoRight is shown for a 403 that the EXTENSION itself produced on
@@ -479,6 +494,35 @@ const remedyEventLogUserFilterUnresolved = "Так расширение отве
 	"2. Тот же вызов без `user`: журнал читается и без отбора, и этот отказ там не возникает.\n" +
 	"3. Текст ошибки выше: его вернул поиск в списке пользователей информационной базы, и он " +
 	"говорит, почему поиск не состоялся.\n"
+
+// remedyEventLogEventFilterUnresolved is the third 403 on this endpoint, and it
+// exists for the same reason as the second: the other two texts are false on
+// this path.
+//
+// ЖурналРегистрацииPOST answers it when it could not obtain the base's own list
+// of event names, which it reads BEFORE applying the filter so that a name the
+// base does not know is refused rather than dropped. The caller HAS the
+// Администрирование right, because the gate at the top of the handler stands
+// before this line. The value in `event` is not what failed either: a name that
+// is merely absent from the list is answered 400 with that name in the text, so
+// reaching this refusal says the list itself never arrived.
+//
+// IT DOES NOT ADVISE RETRYING WITHOUT `event`, and that is the point of the
+// separate text rather than a nicety. A reader investigating an incident who is told to
+// retry without the filter gets records that look like the answer.
+//
+// Customer-facing RU: no тире.
+const remedyEventLogEventFilterUnresolved = "Так расширение отвечает, когда не смогло получить у " +
+	"базы список имён событий. Право Администрирование у учётной записи есть: без него " +
+	"обработчик отказал бы раньше и другим текстом. Значение `event` тут тоже ни при чём: имя, " +
+	"которого в списке нет, отклоняется кодом 400, и это имя названо в тексте отказа.\n\n" +
+	"Проверьте:\n" +
+	"1. Текст ошибки выше: его вернула сама база на запрос значений отбора журнала " +
+	"регистрации, и он говорит, почему список не получен.\n" +
+	"2. Версию расширения в базе: список имён событий читает обработчик, а он приходит вместе " +
+	"с расширением.\n" +
+	"3. Повторять тот же вызов без `event` не стоит: он ответит на другой " +
+	"вопрос, отдав журнал целиком вместо событий, о которых спрашивали.\n"
 
 // lineDumpLegReason reports the second leg's failure when both legs failed.
 //
@@ -937,10 +981,11 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 	}
 	// A 403 the extension itself built on this endpoint gets the advice written
 	// for the refusal that produced it. THE STATUS ALONE DOES NOT SAY WHICH ONE:
-	// ЖурналРегистрацииPOST answers 403 twice, the rights gate at the top and the
-	// user filter further down, and the second is reachable only by a caller who
-	// passed the first. Keying on the status alone therefore told a caller who HAS
-	// the right that the right is missing.
+	// ЖурналРегистрацииPOST answers 403 in three classes: the rights gate at the
+	// top, the user filter further down, and the event filter after it. Every class
+	// but the first is reachable only by a caller who passed the gate. Keying on the
+	// status alone therefore told a caller who HAS the right that the right is
+	// missing.
 	//
 	// A detail that matches NEITHER gets no cause at all, on purpose. Both texts
 	// state where the caller stands relative to the gate, and a body this side
@@ -952,6 +997,8 @@ func renderStatusError(p *paragraphs, heading string, se *onec.StatusError) {
 			p.add(remedyEventLogNoRight)
 		case isEventLogUserFilterRefusal(se.Detail):
 			p.add(remedyEventLogUserFilterUnresolved)
+		case isEventLogEventFilterRefusal(se.Detail):
+			p.add(remedyEventLogEventFilterUnresolved)
 		}
 	}
 	if heading == headingQuery {

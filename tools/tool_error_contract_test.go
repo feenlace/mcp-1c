@@ -64,19 +64,23 @@ const (
 	// NewAnalyzeSubsystemsHandlerWithSource, plus the two sites the unhonoured
 	// request repair added: the decode check NewMetadataHandler was missing
 	// altogether, and the level check NewEventLogHandler owed its own schema,
-	// plus one for the namespace enum search_code declares and now enforces.
-	wantSites = 36
+	// plus one for the namespace enum search_code declares and now enforces,
+	// plus one for the empty event name get_event_log refuses before the call,
+	// plus one for the empty event LIST it refuses there too.
+	wantSites = 38
 
 	// wantProtocolSites: 8 decode failures plus the 2 recovered-panic marks. The
 	// eighth decode failure is metadata's, which used to be discarded.
 	wantProtocolSites = 10
 
-	// wantOperationalSites: wantSites - wantProtocolSites. Two were added for the
-	// same reason: get_event_log refusing a level outside its declared enum and
-	// search_code refusing a namespace outside its declared enum. Both sit on the
-	// operational side for the reason ProtocolError's doc gives, that a VALUE the
-	// caller chose is a mistake the caller can only fix from text it can read.
-	wantOperationalSites = 26
+	// wantOperationalSites: wantSites - wantProtocolSites. Four were added for
+	// the same reason: get_event_log refusing a level outside its declared enum,
+	// search_code refusing a namespace outside its declared enum, get_event_log
+	// refusing an empty event name, and get_event_log refusing an event list that
+	// is present and empty. All four sit on the operational side for the reason
+	// ProtocolError's doc gives, that a VALUE the caller chose is a mistake the
+	// caller can only fix from text it can read.
+	wantOperationalSites = 28
 
 	// wantToolHandlerFuncs is every top-level func in the package returning
 	// mcp.ToolHandler, INCLUDING the two wrappers that are not constructors. It is
@@ -104,7 +108,7 @@ const (
 var wantPerConstructor = map[string]siteClasses{
 	"NewAnalyzeSubsystemsHandlerWithSource": {protocol: 2, operational: 5},
 	"NewConfigurationInfoHandler":           {protocol: 0, operational: 1},
-	"NewEventLogHandler":                    {protocol: 1, operational: 2},
+	"NewEventLogHandler":                    {protocol: 1, operational: 4},
 	"NewFormStructureHandler":               {protocol: 1, operational: 4},
 	"NewMetadataHandler":                    {protocol: 1, operational: 1},
 	"NewObjectStructureHandlerWithSource":   {protocol: 2, operational: 3},
@@ -119,8 +123,7 @@ var wantPerConstructor = map[string]siteClasses{
 //
 // This list is load-bearing rather than documentary. WithToolErrors has exactly
 // the handler type and its own body contains two (nil, err) returns; a walk
-// without the enclosing-declaration rule counts them and reports 37/10/27 instead
-// of 35/10/25, MISCLASSIFYING the classifier itself. Measured both ways on this
+// without the enclosing-declaration rule counts them, MISCLASSIFYING the classifier itself. Measured both ways on this
 // tree. withIndexProtectionNotice is excluded by being unexported.
 var wantNonConstructorHandlerFuncs = []string{"WithToolErrors", "withIndexProtectionNotice"}
 

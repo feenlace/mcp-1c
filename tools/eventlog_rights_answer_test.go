@@ -83,7 +83,7 @@ func TestEventLogRefusalIsNotAnAnswer(t *testing.T) {
 	// is a property of the refusal and not of the assertion.
 	ok := formatEventLog(&onec.EventLogResult{
 		Events: []onec.EventLogEntry{{Date: "2026-08-03T00:00:00", Level: "Информация",
-			Event: "Данные.Запись", User: "Demo"}},
+			Event: "_$Data$_.Update", User: "Demo"}},
 		Total: 1,
 	})
 	for _, want := range []string{"## Журнал регистрации\n", "\nВсего: ", "- Пользователь: "} {
@@ -111,7 +111,7 @@ func TestEventLogRefusalBlamesTheAccountNotTheFilter(t *testing.T) {
 	}
 
 	// The text from 1С is still shown, framed as data. Losing it would hide which
-	// of the two 403s fired.
+	// of this endpoint's 403s fired.
 	if !strings.Contains(text, "no records are returned") {
 		t.Errorf("the diagnostic from 1С is no longer shown:\n%s", text)
 	}

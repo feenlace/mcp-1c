@@ -156,6 +156,28 @@ func operationalSites() []operationalSite {
 			heading: headingEventLog, wants: []string{"Критическая", "Ошибка", "Примечание"},
 		},
 		{
+			// Same shape as the level row above and for the same reason: the 1C
+			// server this builds would ANSWER, and the refusal has to happen before
+			// the call. An empty name is in no base's event list, so the round trip
+			// could only end in the far side's own refusal.
+			name: "eventlog empty event name", site: `eventlog.go "имя события в позиции"`,
+			build:   func(t *testing.T) mcp.ToolHandler { return NewEventLogHandler(envelope1C(t, 500, oops)) },
+			args:    `{"event":["_$Session$_.Start",""]}`,
+			heading: headingEventLog, wants: []string{"имя события в позиции 2", "_$Session$_.Start"},
+		},
+		{
+			// An EMPTY array, which is not the row above: that one carries a name
+			// and this one carries none. It has to refuse before the call for a
+			// reason the other rows do not have. omitempty erases an empty array,
+			// so the 1C server this builds would never see the member and would
+			// answer the whole log, and the caller could not tell that answer from
+			// the one it asked for.
+			name: "eventlog empty event filter", site: `eventlog.go "список имён событий"`,
+			build:   func(t *testing.T) mcp.ToolHandler { return NewEventLogHandler(envelope1C(t, 500, oops)) },
+			args:    `{"event":[]}`,
+			heading: headingEventLog, wants: []string{"список имён событий", "без отбора по событию"},
+		},
+		{
 			name: "form required args", site: `form.go "object_type and object_name are required"`,
 			build: func(t *testing.T) mcp.ToolHandler {
 				return NewFormStructureHandler(envelope1C(t, 500, oops), "")
@@ -326,6 +348,48 @@ func TestToolWiring_OperationalSitesAreToolResults(t *testing.T) {
 		t.Errorf("%d of %d operational sites fired", fired, len(sites))
 	}
 	t.Logf("operational sites driven: %d", fired)
+}
+
+// TestToolWiring_OperationalTextCarriesNoForbiddenDash reads the answer a
+// handler builds for itself.
+//
+// dashViolations was driven over the remedy texts in toolerror.go and over the
+// wrapped notice, and over nothing else. The text a handler writes at the
+// refusal itself was read by no one, so a dash there reached the caller with
+// the package green. These are the rows the test above drives, read for the
+// house rule instead of for the cause, which covers every handler's operational
+// refusals rather than one tool's.
+func TestToolWiring_OperationalTextCarriesNoForbiddenDash(t *testing.T) {
+	// CONTROL: the instrument fires. A dashViolations that reported nothing
+	// would satisfy every assertion below without reading a single answer.
+	if len(dashViolations("\u0442\u0438\u0440\u0435 \u2014 \u0437\u0434\u0435\u0441\u044c")) == 0 {
+		t.Fatal("CONTROL: dashViolations reports nothing for a planted em dash, so the scan below cannot fail")
+	}
+
+	sites := operationalSites()
+	if len(sites) == 0 {
+		t.Fatal("CONTROL: there are no operational sites, so this guard reads nothing")
+	}
+
+	read := 0
+	for _, s := range sites {
+		t.Run(s.name, func(t *testing.T) {
+			res, err := drive(t, s.build(t), s.args)
+			text := failureText(t, res, err)
+			if text == "" {
+				t.Fatalf("site %s rendered no text, so the scan reads nothing", s.site)
+			}
+			if v := dashViolations(text); len(v) != 0 {
+				t.Errorf("site %s answers the caller with a dash the house rule forbids: %v\n%s",
+					s.site, v, text)
+			}
+			read++
+		})
+	}
+	if read != len(sites) {
+		t.Errorf("%d of %d operational sites were read", read, len(sites))
+	}
+	t.Logf("operational answers scanned for dashes: %d", read)
 }
 
 // protocolSite is one row of the other half: a request that never became a valid

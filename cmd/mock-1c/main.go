@@ -455,6 +455,29 @@ func handleValidateQuery(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// knownEventNames is this stand-in's answer to the list ЖурналРегистрацииPOST
+// asks the base for before it applies an event filter.
+//
+// It is WIDER than the set of names the records below actually carry, and that
+// is the point: a name in here with nothing logged under it answers an empty
+// log, a name outside it is refused. Collapse the two and «no records» stops
+// meaning anything.
+var knownEventNames = map[string]bool{
+	"_$Session$_.Start":  true,
+	"_$Session$_.Finish": true,
+	"_$Access$_.Access":  true,
+	"_$Data$_.Update":    true,
+	"_$Data$_.Post":      true,
+}
+
+// knownUsers stands for ПользователиИнформационнойБазы, which the shipped
+// handler searches before it filters: a name it does not find is refused with
+// that name in the text.
+var knownUsers = map[string]bool{
+	"Администратор": true,
+	"Бухгалтер":     true,
+}
+
 func handleEventLog(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s", r.Method, r.URL.Path)
 	if r.Method != http.MethodPost {
@@ -463,19 +486,28 @@ func handleEventLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Level string `json:"level"`
-		Limit int    `json:"limit"`
+		Level string   `json:"level"`
+		Event []string `json:"event"`
+		User  string   `json:"user"`
+		Limit int      `json:"limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON body"})
 		return
 	}
 
+	// ONE record carries event_presentation and two do not, and that is the shape
+	// rather than an omission. «Сеанс. Начало» is the platform's own phrase for
+	// _$Session$_.Start: the standard library pairs the two in the common module
+	// ЗащитаПерсональныхДанных, next to Аутентификация and Завершение. No such
+	// pairing was found for _$Data$_.Update or _$Data$_.Post, so this stand in
+	// prints no phrase for them rather than inventing one, and a caller reading
+	// them sees exactly what a record with no representation looks like.
 	events := []map[string]any{
 		{
 			"date":     "2026-03-07T14:30:00",
 			"level":    "Ошибка",
-			"event":    "Данные.Запись",
+			"event":    "_$Data$_.Update",
 			"user":     "Администратор",
 			"metadata": "Документ.РеализацияТоваровУслуг",
 			"comment":  "Ошибка при записи: поле Контрагент не заполнено",
@@ -483,17 +515,79 @@ func handleEventLog(w http.ResponseWriter, r *http.Request) {
 		{
 			"date":     "2026-03-07T14:25:00",
 			"level":    "Предупреждение",
-			"event":    "Данные.Проведение",
+			"event":    "_$Data$_.Post",
 			"user":     "Бухгалтер",
 			"metadata": "Документ.ПоступлениеТоваровУслуг",
 			"comment":  "Отрицательный остаток по регистру ТоварыНаСкладах",
 		},
 		{
-			"date":  "2026-03-07T14:00:00",
-			"level": "Информация",
-			"event": "Сеанс.Начало",
-			"user":  "Администратор",
+			"date":               "2026-03-07T14:00:00",
+			"level":              "Информация",
+			"event":              "_$Session$_.Start",
+			"event_presentation": "Сеанс. Начало",
+			"user":               "Администратор",
 		},
+	}
+
+	// The event filter is applied, not ignored. A stand-in that answered the same
+	// records whatever it was asked would let a filter go missing between here and
+	// the caller without any test noticing.
+	//
+	// A VALUE THE BASE DOES NOT LIST IS REFUSED, not answered with an empty log,
+	// because those are answers to two different questions: «nothing of this kind
+	// was logged» and «there is no such kind». knownEventNames stands for the list
+	// ЖурналРегистрацииPOST asks the base for, and it is deliberately wider than
+	// the records below so both answers remain producible.
+	if req.Event != nil {
+		if len(req.Event) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "event is empty; leave it out to read the log without an event filter",
+			})
+			return
+		}
+		for _, want := range req.Event {
+			if strings.TrimSpace(want) == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "event must hold event names, and one of the values in it is not a name",
+				})
+				return
+			}
+			if !knownEventNames[want] {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "unknown event: " + want + ". This base lists no event under that name",
+				})
+				return
+			}
+		}
+		var kept []map[string]any
+		for _, e := range events {
+			for _, want := range req.Event {
+				if e["event"] == want {
+					kept = append(kept, e)
+					break
+				}
+			}
+		}
+		events = kept
+	}
+
+	// The user filter, for the same reason as the event filter above: it was
+	// accepted and never read, so every call carrying one got the whole log back,
+	// which is exactly what a filter lost in transit looks like.
+	if req.User != "" {
+		if !knownUsers[req.User] {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "unknown infobase user: " + req.User,
+			})
+			return
+		}
+		var filtered []map[string]any
+		for _, e := range events {
+			if e["user"] == req.User {
+				filtered = append(filtered, e)
+			}
+		}
+		events = filtered
 	}
 
 	if req.Level != "" {
@@ -506,18 +600,24 @@ func handleEventLog(w http.ResponseWriter, r *http.Request) {
 		events = filtered
 	}
 
-	total := len(events)
 	limit := req.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	if limit < total {
+	if limit < len(events) {
 		events = events[:limit]
 	}
 
+	// total is counted AFTER the limit, because the shipped handler counts the
+	// records of the answer it is sending rather than the records the filter
+	// matched. Counting the matches here would print a number the product never
+	// prints, and a reader comparing the two would take the product for broken.
+	if events == nil {
+		events = []map[string]any{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"events": events,
-		"total":  total,
+		"total":  len(events),
 	})
 }
 
@@ -534,7 +634,12 @@ func handleConfiguration(w http.ResponseWriter, r *http.Request) {
 
 func handleVersion(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s", r.Method, r.URL.Path)
-	writeJSON(w, http.StatusOK, map[string]string{"version": "0.3.0"})
+	// The number the shipped extension answers with. It is written out here
+	// rather than read, because this stand-in is a binary that runs anywhere and
+	// the module it stands in for is not beside it. The copy is held to the
+	// original by TestHandleVersion_AnswersWhatTheExtensionAnswers, which reads
+	// the module and fails as soon as the two differ.
+	writeJSON(w, http.StatusOK, map[string]string{"version": "0.4.8"})
 }
 
 func main() {

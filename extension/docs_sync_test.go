@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"unicode"
@@ -346,5 +347,203 @@ func TestBSLStatementReducerWorks(t *testing.T) {
 	}
 	if d := firstDifference([]string{tight}, []string{loose}); d == "" {
 		t.Error("firstDifference finds nothing between two statements that differ inside a literal")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// THE PER-FILE HEADER IS PART OF THE INSTALL PATH, NOT A COURTESY.
+//
+// docs/bsl/README.md step 5 does not list the helpers itself. It says «Скопируйте
+// вспомогательные функции, которые названы в шапке каждого файла», so the header
+// note of each file IS the list an installer works from. A helper the handler
+// calls and the header does not name is a routine that never gets copied, and the
+// documented install fails at the first call to it.
+//
+// Nothing compared the two before. TestDocsBSLMatchesShippedModule reads every
+// file in this directory, but it compares ROUTINE BODIES against the shipped
+// module and never looks above the first declaration, which is exactly where the
+// note lives.
+// ---------------------------------------------------------------------------
+
+// bslCallRE matches an identifier in call position.
+var bslCallRE = regexp.MustCompile(`([\p{L}_][\p{L}\p{Nd}_]*)\s*\(`)
+
+// bslWithoutLiterals removes every string literal from an already-reduced
+// statement, so a routine name printed inside a diagnostic is not read as a call
+// to that routine.
+func bslWithoutLiterals(stmt string) string {
+	var b strings.Builder
+	rs := []rune(stmt)
+	for i := 0; i < len(rs); i++ {
+		if rs[i] != '"' {
+			b.WriteRune(rs[i])
+			continue
+		}
+		for i++; i < len(rs); i++ {
+			if rs[i] == '"' {
+				if i+1 < len(rs) && rs[i+1] == '"' {
+					i++
+					continue
+				}
+				break
+			}
+		}
+	}
+	return b.String()
+}
+
+// docsBSLHeader returns everything a file carries above its first routine, which
+// is the note README.md step 5 sends the installer to.
+func docsBSLHeader(src string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(src, "\n") {
+		if bslDeclRE.MatchString(line) {
+			break
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// bslHelpersCalled returns the routines of universe that src calls and does not
+// itself define.
+func bslHelpersCalled(src string, universe map[string]bool) []string {
+	local := bslRoutines(src)
+	seen := map[string]bool{}
+	var out []string
+	for _, body := range local {
+		for _, stmt := range body {
+			for _, m := range bslCallRE.FindAllStringSubmatch(bslWithoutLiterals(stmt), -1) {
+				name := m[1]
+				// PRESENCE, not a non-nil body: a routine with no statements in it
+				// reduces to a nil slice, so a value comparison would report a
+				// routine the file defines itself as one it has to be told to copy.
+				_, isLocal := local[name]
+				if !universe[name] || isLocal || seen[name] {
+					continue
+				}
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestDocsBSLNotesNameEveryHelperTheyCall fails when a documented handler calls a
+// routine of the shipped module that its own header does not name.
+func TestDocsBSLNotesNameEveryHelperTheyCall(t *testing.T) {
+	raw, err := Source.ReadFile(embeddedModul)
+	if err != nil {
+		t.Fatalf("read embedded %s: %v", embeddedModul, err)
+	}
+	universe := map[string]bool{}
+	for name := range bslRoutines(string(raw)) {
+		universe[name] = true
+	}
+	// CONTROL: the module parsed. Every assertion below is satisfied by an empty
+	// universe, because nothing would then be required of any header.
+	if len(universe) < 20 {
+		t.Fatalf("the shipped module parsed into %d routines; with a universe that small "+
+			"nothing is required of any header and this walk measures nothing", len(universe))
+	}
+	if !universe["ОтветJSON"] {
+		t.Fatal("CONTROL: ОтветJSON is not among the routines the shipped module defines, so " +
+			"the universe is not the module's own helpers")
+	}
+
+	entries, err := os.ReadDir(docsBSLDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", docsBSLDir, err)
+	}
+
+	files, required, widest := 0, 0, 0
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".bsl" {
+			continue
+		}
+		files++
+		path := filepath.Join(docsBSLDir, e.Name())
+		doc, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		header := docsBSLHeader(string(doc))
+		need := bslHelpersCalled(string(doc), universe)
+		if len(need) > widest {
+			widest = len(need)
+		}
+		for _, name := range need {
+			required++
+			if !strings.Contains(header, name) {
+				t.Errorf("%s calls %s and its header does not name it. README.md step 5 sends "+
+					"an installer to that header for the helpers to copy, so a documented "+
+					"install is missing the routine and fails at the first call to it",
+					path, name)
+			}
+		}
+	}
+
+	// The counts are asserted because every check above is an "if it is missing"
+	// check, and a walk that finds no file and no call satisfies all of them.
+	if files < 10 {
+		t.Errorf("walked %d .bsl files under %s, expected at least 10", files, docsBSLDir)
+	}
+	if required < 20 {
+		t.Errorf("found %d helper calls to check across %d files, expected at least 20; the "+
+			"call extractor has stopped finding calls", required, files)
+	}
+	// AND IT MUST DISCRIMINATE. An extractor that reported every routine of the
+	// module as called by every file would satisfy both counts above while saying
+	// nothing about any file.
+	if widest >= len(universe) {
+		t.Errorf("the widest file requires %d of the %d routines the module defines; the "+
+			"extractor is returning the universe rather than the calls", widest, len(universe))
+	}
+	t.Logf("checked %d helper calls across %d files against %d module routines; widest file "+
+		"requires %d", required, files, len(universe), widest)
+}
+
+// TestBSLHelpersCalledReadsCallsNotText is the positive control for the extractor
+// the guard above rests on.
+func TestBSLHelpersCalledReadsCallsNotText(t *testing.T) {
+	universe := map[string]bool{"ОтветJSON": true, "ОтветОшибка": true, "ЕстьКоллекция": true}
+	src := "// шапка называет ЕстьКоллекция\n" +
+		"Функция ПримерGET(Запрос)\n" +
+		"    Если Ложь Тогда\n" +
+		"        Возврат ОтветОшибка(400, \"ЕстьКоллекция недоступна\");\n" +
+		"    КонецЕсли;\n" +
+		"    Возврат ОтветJSON(Результат); // ЕстьКоллекция\n" +
+		"КонецФункции\n"
+
+	got := bslHelpersCalled(src, universe)
+	want := []string{"ОтветJSON", "ОтветОшибка"}
+	if len(got) != len(want) {
+		t.Fatalf("extracted %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("call %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// A routine the file DEFINES is not a helper it has to be told to copy.
+	self := "Функция ОтветJSON(Значение)\nКонецФункции\n" +
+		"Функция ПримерGET(Запрос)\n    Возврат ОтветJSON(Результат);\nКонецФункции\n"
+	if n := len(bslHelpersCalled(self, universe)); n != 0 {
+		t.Errorf("a file defining the routine it calls still owes %d helpers", n)
+	}
+
+	// The header reader stops at the first declaration, or the note would be
+	// satisfied by any mention anywhere in the file.
+	head := docsBSLHeader(src)
+	if !strings.Contains(head, "ЕстьКоллекция") {
+		t.Errorf("the header reader lost the note text:\n%s", head)
+	}
+	if strings.Contains(head, "ОтветJSON") {
+		t.Errorf("the header reader read past the first declaration, so a name used in the "+
+			"body would satisfy the note:\n%s", head)
 	}
 }

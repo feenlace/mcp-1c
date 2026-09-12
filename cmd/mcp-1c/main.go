@@ -28,7 +28,7 @@ import (
 //	go build -ldflags "-X main.version=0.4.2-beta" ./cmd/mcp-1c
 var version = "dev"
 
-const expectedExtensionVersion = "0.4.7"
+const expectedExtensionVersion = "0.4.8"
 
 func main() {
 	// realStderr is fd 2 as the process was launched with, captured before any
@@ -918,7 +918,7 @@ func compareExtensionVersions(a, b string) (int, bool) {
 //     therefore make the NEXT start discard the operator's whole history.
 //
 // The number is set against what a version actually is. The longest this
-// repository produces or names are the extension's own 0.4.7 and platform builds
+// repository produces or names are the extension's own 0.4.8 and platform builds
 // like 8.3.27.2130, eleven bytes; a pre-release suffix such as 0.5.0-beta adds a
 // few more. 128 bytes is an order of magnitude above the longest of those and
 // still one line in a log. A value over it is not shortened into a version, it is
