@@ -350,6 +350,48 @@ func TestToolWiring_OperationalSitesAreToolResults(t *testing.T) {
 	t.Logf("operational sites driven: %d", fired)
 }
 
+// TestToolWiring_OperationalTextCarriesNoForbiddenDash reads the answer a
+// handler builds for itself.
+//
+// dashViolations was driven over the remedy texts in toolerror.go and over the
+// wrapped notice, and over nothing else. The text a handler writes at the
+// refusal itself was read by no one, so a dash there reached the caller with
+// the package green. These are the rows the test above drives, read for the
+// house rule instead of for the cause, which covers every handler's operational
+// refusals rather than one tool's.
+func TestToolWiring_OperationalTextCarriesNoForbiddenDash(t *testing.T) {
+	// CONTROL: the instrument fires. A dashViolations that reported nothing
+	// would satisfy every assertion below without reading a single answer.
+	if len(dashViolations("\u0442\u0438\u0440\u0435 \u2014 \u0437\u0434\u0435\u0441\u044c")) == 0 {
+		t.Fatal("CONTROL: dashViolations reports nothing for a planted em dash, so the scan below cannot fail")
+	}
+
+	sites := operationalSites()
+	if len(sites) == 0 {
+		t.Fatal("CONTROL: there are no operational sites, so this guard reads nothing")
+	}
+
+	read := 0
+	for _, s := range sites {
+		t.Run(s.name, func(t *testing.T) {
+			res, err := drive(t, s.build(t), s.args)
+			text := failureText(t, res, err)
+			if text == "" {
+				t.Fatalf("site %s rendered no text, so the scan reads nothing", s.site)
+			}
+			if v := dashViolations(text); len(v) != 0 {
+				t.Errorf("site %s answers the caller with a dash the house rule forbids: %v\n%s",
+					s.site, v, text)
+			}
+			read++
+		})
+	}
+	if read != len(sites) {
+		t.Errorf("%d of %d operational sites were read", read, len(sites))
+	}
+	t.Logf("operational answers scanned for dashes: %d", read)
+}
+
 // protocolSite is one row of the other half: a request that never became a valid
 // tool invocation, or a fault inside this server.
 type protocolSite struct {
