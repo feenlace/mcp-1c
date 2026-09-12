@@ -634,7 +634,12 @@ func handleConfiguration(w http.ResponseWriter, r *http.Request) {
 
 func handleVersion(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s", r.Method, r.URL.Path)
-	writeJSON(w, http.StatusOK, map[string]string{"version": "0.3.0"})
+	// The number the shipped extension answers with. It is written out here
+	// rather than read, because this stand-in is a binary that runs anywhere and
+	// the module it stands in for is not beside it. The copy is held to the
+	// original by TestHandleVersion_AnswersWhatTheExtensionAnswers, which reads
+	// the module and fails as soon as the two differ.
+	writeJSON(w, http.StatusOK, map[string]string{"version": "0.4.8"})
 }
 
 func main() {
