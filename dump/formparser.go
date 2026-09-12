@@ -1297,12 +1297,22 @@ func isTransparentContainerTag(tag string) bool {
 }
 
 // elementTypeDisplayName maps XML element types to Russian display names.
+//
+// Every value here is a real 1C platform name: a member of the managed-form
+// element-kind enumeration the corresponding XML tag encodes (ВидПоляФормы,
+// ВидГруппыФормы, ВидКнопкиФормы or ВидДекорацииФормы), or one of the five
+// base element types those enumerations describe. See
+// TestElementTypeDisplayNamesResolveToPlatformVocabulary for the vocabulary
+// and where it was sourced. NumberField carries the same value as InputField
+// because the platform's own field-kind enumeration has no numeric-specific
+// member: a numeric edit box is, at this level, an input field like any
+// other.
 var elementTypeDisplayName = map[string]string{
 	"InputField":               "ПолеВвода",
 	"LabelField":               "ПолеНадписи",
-	"CheckBoxField":            "ФлажокПоле",
+	"CheckBoxField":            "ПолеФлажка",
 	"RadioButtonField":         "ПолеПереключателя",
-	"NumberField":              "ПолеЧисла",
+	"NumberField":              "ПолеВвода",
 	"TextDocumentField":        "ПолеТекстовогоДокумента",
 	"SpreadsheetDocumentField": "ПолеТабличногоДокумента",
 	"PictureField":             "ПолеКартинки",
@@ -1313,8 +1323,8 @@ var elementTypeDisplayName = map[string]string{
 	"Pages":                    "Страницы",
 	"Page":                     "Страница",
 	"CommandBar":               "КоманднаяПанель",
-	"LabelDecoration":          "ДекорацияНадпись",
-	"PictureDecoration":        "ДекорацияКартинка",
+	"LabelDecoration":          "Надпись",
+	"PictureDecoration":        "Картинка",
 	"Hyperlink":                "Гиперссылка",
 }
 
