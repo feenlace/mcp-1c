@@ -147,8 +147,7 @@ func TestEventLogHandlerRefusesAnExplicitlyEmptyEventFilter(t *testing.T) {
 			"comparing two answers")
 	}
 	if strings.Contains(absent.wireBody, `"event"`) {
-		t.Errorf("a call with no event filter still carries an event member, and the extension "+
-			"refuses an empty one:\n%s", absent.wireBody)
+		t.Errorf("a call with no event filter still carries an event member:\n%s", absent.wireBody)
 	}
 	for _, want := range []string{"_$Session$_.Start", "_$Data$_.Post", "_$Data$_.Update"} {
 		if !strings.Contains(absent.answer, want) {

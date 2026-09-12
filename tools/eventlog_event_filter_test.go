@@ -188,8 +188,7 @@ func TestEventLogHandlerOmitsAnAbsentEventFilter(t *testing.T) {
 		t.Fatal("CONTROL: the handler sent no body at all")
 	}
 	if strings.Contains(rawBody, `"event"`) {
-		t.Errorf("a call with no event filter still carries an event member, and the extension "+
-			"refuses an empty one:\n%s", rawBody)
+		t.Errorf("a call with no event filter still carries an event member:\n%s", rawBody)
 	}
 }
 

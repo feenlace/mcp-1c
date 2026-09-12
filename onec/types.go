@@ -140,9 +140,7 @@ type EventLogRequest struct {
 	// because the platform's own filter key takes a list and an incident is
 	// normally read across several events at once.
 	//
-	// omitempty is load-bearing: ЖурналРегистрацииPOST refuses an event member
-	// that is present and empty, so sending one on a call that asks for no event
-	// filter would turn a plain read of the log into a refusal.
+	// omitempty is load-bearing.
 	Event []string `json:"event,omitempty"`
 	User  string   `json:"user,omitempty"`
 	Limit int      `json:"limit,omitempty"`
