@@ -17,7 +17,7 @@ func ConfigurationInfoTool() *mcp.Tool {
 		Title: "Информация о конфигурации",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Получить общую информацию о базе 1С: название конфигурации, версия, поставщик, платформа, режим работы. " +
-			"Используй первым делом чтобы понять с какой конфигурацией работаешь.",
+			"Используй, когда нужно знать, с какой конфигурацией и версией платформы идёт работа.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 	}
 }
