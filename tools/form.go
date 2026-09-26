@@ -643,8 +643,7 @@ func formUnknownElementsNote(unknown []dump.FormUnknownElement) string {
 		total += u.Count
 	}
 	return fmt.Sprintf("> В файле формы есть элементы незнакомого серверу вида, всего %d: %s. "+
-		"Они включены в таблицу элементов выше, в колонке «Тип» стоит имя тега из Form.xml. "+
-		"Свойства, особые для такого вида, не разобраны.\n", total, strings.Join(parts, ", "))
+		"Они включены в таблицу элементов выше, в колонке «Тип» стоит имя тега из Form.xml.\n", total, strings.Join(parts, ", "))
 }
 
 // dumpLegReason names WHY the dump leg could not answer.
