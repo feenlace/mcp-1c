@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -89,6 +90,23 @@ type FormInfo struct {
 	// forms have none, and an empty slice here says the form declares no dynamic
 	// list rather than that the section went unread.
 	DynamicLists []FormDynamicList
+
+	// UnknownElements lists, by tag, the elements under <ChildItems> whose XML
+	// tag this parser does not recognise, with how many of each the form holds.
+	// Sorted by tag. Empty when every element was recognised.
+	//
+	// Such elements are NOT dropped: each one is in Elements with its raw tag as
+	// Type, and its own nested ChildItems are read as usual. This field exists
+	// so a caller can say that the form holds element kinds the parser does not
+	// know, instead of presenting them as if they were ordinary ones.
+	UnknownElements []FormUnknownElement
+}
+
+// FormUnknownElement is one unrecognised element tag and the number of
+// elements with that tag in the form.
+type FormUnknownElement struct {
+	Tag   string
+	Count int
 }
 
 // FormDynamicList describes one dynamic list declared as a form attribute.
@@ -598,16 +616,20 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 				case "Events":
 					form.Handlers = parseEventsSection(decoder, &depth)
 				case "ChildItems":
-					form.Elements = parseChildItemsRecursive(decoder, &depth)
+					form.Elements = append(form.Elements, parseChildItemsRecursive(decoder, &depth)...)
 				case "Commands":
 					form.Commands = parseCommandsSection(decoder, &depth)
 				case "Attributes":
 					form.DynamicLists = parseAttributesSection(decoder, &depth, namespaceScope(formNS, t))
 				default:
-					if isFormElementTag(local) {
+					if isTransparentContainerTag(local) {
+						// The form's own AutoCommandBar: the bar itself is not
+						// recorded, but its buttons are, the same as for a
+						// table's command bar in parseFormElement.
+						form.Elements = append(form.Elements, descendIntoChildItems(decoder, &depth)...)
+					} else if isFormElementTag(local) {
 						// Form has a direct UI child without a <ChildItems>
-						// wrapper (rare but possible - AutoCommandBar lives
-						// here too, but it is filtered by isFormElementTag).
+						// wrapper (rare but possible).
 						appendElement(&form.Elements, t, decoder, &depth)
 					} else {
 						skipElement(decoder, &depth)
@@ -620,7 +642,29 @@ func parseFormXMLData(data []byte) (*FormInfo, error) {
 		}
 	}
 
+	form.UnknownElements = unknownElements(form.Elements)
 	return form, nil
+}
+
+// unknownElements counts the recorded elements whose tag is not in
+// formElementTags. Only parseChildItemsRecursive records such elements, so
+// every entry here came from inside a <ChildItems> block.
+func unknownElements(elements []FormElementInfo) []FormUnknownElement {
+	counts := make(map[string]int)
+	for _, e := range elements {
+		if !isFormElementTag(e.Type) {
+			counts[e.Type]++
+		}
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make([]FormUnknownElement, 0, len(counts))
+	for tag, n := range counts {
+		out = append(out, FormUnknownElement{Tag: tag, Count: n})
+	}
+	slices.SortFunc(out, func(a, b FormUnknownElement) int { return strings.Compare(a.Tag, b.Tag) })
+	return out
 }
 
 // parseChildItemsRecursive reads a <ChildItems> block and flattens every
@@ -652,8 +696,10 @@ func parseChildItemsRecursive(decoder *xml.Decoder, depth *int) []FormElementInf
 			case isFormElementTag(local):
 				appendElement(&elements, t, decoder, depth)
 			default:
-				// Unknown tag inside ChildItems: skip without recording.
-				skipElement(decoder, depth)
+				// Unknown tag inside ChildItems: record it under its raw tag
+				// rather than drop it, so the form is not shown smaller than it
+				// is. FormInfo.UnknownElements reports it separately.
+				appendElement(&elements, t, decoder, depth)
 			}
 
 		case xml.EndElement:
@@ -1229,7 +1275,15 @@ func attr(start xml.StartElement, name string) string {
 }
 
 // formElementTags lists XML tag names that represent meaningful form elements.
-// Listed elements are recorded; everything else inside ChildItems is skipped.
+// Service tags and transparent containers are handled separately; any other
+// tag inside ChildItems is still recorded and reported in
+// FormInfo.UnknownElements.
+//
+// The spelling is the one DumpConfigToFiles writes: SpreadSheetDocumentField
+// with a capital S in Sheet. The table used to carry only
+// "SpreadsheetDocumentField", which no measured dump contains, so every
+// spreadsheet field was dropped. The old spelling is kept as an alias so a
+// caller passing it to DisplayType gets the same answer as before.
 var formElementTags = map[string]bool{
 	"InputField":               true,
 	"LabelField":               true,
@@ -1237,7 +1291,11 @@ var formElementTags = map[string]bool{
 	"RadioButtonField":         true,
 	"NumberField":              true,
 	"TextDocumentField":        true,
+	"SpreadSheetDocumentField": true,
 	"SpreadsheetDocumentField": true,
+	"PDFDocumentField":         true,
+	"GraphicalSchemaField":     true,
+	"GeographicalSchemaField":  true,
 	"PictureField":             true,
 	"Table":                    true,
 	"FormattedDocumentField":   true,
@@ -1314,7 +1372,11 @@ var elementTypeDisplayName = map[string]string{
 	"RadioButtonField":         "ПолеПереключателя",
 	"NumberField":              "ПолеВвода",
 	"TextDocumentField":        "ПолеТекстовогоДокумента",
+	"SpreadSheetDocumentField": "ПолеТабличногоДокумента",
 	"SpreadsheetDocumentField": "ПолеТабличногоДокумента",
+	"PDFDocumentField":         "ПолеPDFДокумента",
+	"GraphicalSchemaField":     "ПолеГрафическойСхемы",
+	"GeographicalSchemaField":  "ПолеГеографическойСхемы",
 	"PictureField":             "ПолеКартинки",
 	"Table":                    "ТаблицаФормы",
 	"Button":                   "Кнопка",

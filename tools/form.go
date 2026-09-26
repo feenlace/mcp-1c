@@ -275,6 +275,9 @@ func NewFormStructureHandler(client *onec.Client, dumpDir string) mcp.ToolHandle
 		if dumpRead.noFormRoot {
 			text += formNoFormRootNote(bodyHasComposition)
 		}
+		if len(dumpRead.unknownElements) > 0 {
+			text += formUnknownElementsNote(dumpRead.unknownElements)
+		}
 		// Last, so that when a parse outcome above already explained the cause,
 		// the reading order is cause first and the form_name consequence second.
 		// It also stands alone, for the form that is simply empty in the dump:
@@ -625,6 +628,25 @@ func formNoFormRootNote(bodyHasComposition bool) string {
 		"Проверьте полноту выгрузки конфигурации, указанной в `--dump`.\n"
 }
 
+// formUnknownElementsNote is appended when the dump's Form.xml holds elements
+// whose XML tag the parser does not recognise (dump.FormInfo.UnknownElements).
+// Those elements are not dropped: they are in the element table above, with
+// the raw tag in the type column. Whenever the dump supplied any element the
+// merge takes the dump's element list whole, and a form with an unknown
+// element has at least one, so the elements this note names are always on
+// screen above it.
+func formUnknownElementsNote(unknown []dump.FormUnknownElement) string {
+	parts := make([]string, 0, len(unknown))
+	total := 0
+	for _, u := range unknown {
+		parts = append(parts, fmt.Sprintf("`%s` (%d)", u.Tag, u.Count))
+		total += u.Count
+	}
+	return fmt.Sprintf("> В файле формы есть элементы незнакомого серверу вида, всего %d: %s. "+
+		"Они включены в таблицу элементов выше, в колонке «Тип» стоит имя тега из Form.xml. "+
+		"Свойства, особые для такого вида, не разобраны.\n", total, strings.Join(parts, ", "))
+}
+
 // dumpLegReason names WHY the dump leg could not answer.
 //
 // IT IS A CLOSED SET AND THAT IS THE POINT. The alternative, forwarding the
@@ -796,6 +818,11 @@ type dumpFormRead struct {
 	// The two flags above are mutually exclusive at the source (dump.FormInfo
 	// sets NoFormRoot only on a clean end of document), so at most one is true.
 
+	// unknownElements: element tags the parser did not recognise, with counts
+	// (dump.FormInfo.UnknownElements). Those elements are in the element list
+	// under their raw tag; this only lets the answer say so.
+	unknownElements []dump.FormUnknownElement
+
 	// autoChosenForm is the form the dump leg picked BY ITSELF, set only when the
 	// caller named none and the object has more than one form. otherForms lists
 	// the rest, in the same order the pick was made from, and is never empty when
@@ -896,10 +923,11 @@ func formFromDump(dumpDir, objectType, objectName, formName string) (*onec.FormS
 	}
 
 	return convertDumpForm(selectedName, parsed), dumpFormRead{
-		partial:        parsed.ParseIncomplete,
-		noFormRoot:     parsed.NoFormRoot,
-		autoChosenForm: autoChosen,
-		otherForms:     otherForms,
+		partial:         parsed.ParseIncomplete,
+		noFormRoot:      parsed.NoFormRoot,
+		unknownElements: parsed.UnknownElements,
+		autoChosenForm:  autoChosen,
+		otherForms:      otherForms,
 	}, parsed.DynamicLists, nil
 }
 
