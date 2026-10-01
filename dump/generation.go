@@ -457,22 +457,22 @@ func openReadOnlyFrom(dumpDir, cacheDir, genDir string, held *readerRegistration
 // (idx.cancel(); <-idx.done) is well-defined even if the open never succeeds: it
 // blocks until FinishServeOpen closes done. FinishServeOpen MUST be called exactly
 // once on the returned Index. The struct literal is kept identical to
-// openReadOnlyFrom's so the two paths can never drift in what a placeholder/opened
-// serve Index initializes, with ONE deliberate exception: cacheDir is not known
-// here (the caller passes it to FinishServeOpen, which records it there), so a
-// placeholder carries an empty cacheDir until the open finishes.
+// openReadOnlyFrom's for the fields that describe an opened index. A placeholder
+// additionally records its start time for dump.json build_seconds, and cacheDir is
+// not known here (the caller passes it to FinishServeOpen, which records it there).
 func NewServePlaceholder(dumpDir string) *Index {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Index{
-		dir:           dumpDir,
-		alias:         bleve.NewIndexAlias(),
-		contentByName: make(map[string]cachedModule),
-		pathByName:    make(map[string]string),
-		pathToDocID:   make(map[string]string),
-		readOnly:      true,
-		ctx:           ctx,
-		cancel:        cancel,
-		done:          make(chan struct{}),
+		dir:            dumpDir,
+		serveStartedAt: time.Now(),
+		alias:          bleve.NewIndexAlias(),
+		contentByName:  make(map[string]cachedModule),
+		pathByName:     make(map[string]string),
+		pathToDocID:    make(map[string]string),
+		readOnly:       true,
+		ctx:            ctx,
+		cancel:         cancel,
+		done:           make(chan struct{}),
 	}
 }
 
@@ -573,6 +573,13 @@ func (idx *Index) FinishServeOpen(cacheDir string, gen *ServeGeneration, prepErr
 		return
 	}
 	idx.pathIndex = NewPathIndex(idx.names)
+	// Issue #53: ordinary serve opens bypass BuildCache, so record the same
+	// top-level dump-to-cache mapping here once the read-only index is complete.
+	// writeDumpInfo is deliberately best-effort, so a metadata write failure cannot
+	// turn a successful serve open into a failed index.
+	writeDumpInfo(cpath, idx.dir, idx.ModuleCount(), time.Since(idx.serveStartedAt))
+	// Publish readiness after the mapping: Reload must not swap in a new
+	// generation and write its mapping before this initial write finishes.
 	idx.ready.Store(true) // release: publishes shards+names to acquire-side readers
 
 	slog.Info("Finished async serve index open",

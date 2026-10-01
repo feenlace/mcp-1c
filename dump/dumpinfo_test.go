@@ -2,6 +2,7 @@ package dump
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -281,5 +282,41 @@ func TestWriteDumpInfo_VersionField(t *testing.T) {
 	}
 	if info.Version != "v1.8.0-test" {
 		t.Errorf("mcp_1c_version = %q, want %q", info.Version, "v1.8.0-test")
+	}
+}
+
+func TestWriteDumpInfoConcurrentReadersSeeCompleteJSON(t *testing.T) {
+	cpath := t.TempDir()
+	path := filepath.Join(cpath, "dump.json")
+	writeDumpInfo(cpath, cpath, 1, time.Second)
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 1000; i++ {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				done <- err
+				return
+			}
+			var info dumpInfo
+			if err := json.Unmarshal(data, &info); err != nil {
+				done <- err
+				return
+			}
+			if info.Schema != 1 || info.Modules < 1 || info.Modules > 100 {
+				done <- fmt.Errorf("incomplete metadata: %+v", info)
+				return
+			}
+		}
+		done <- nil
+	}()
+	for i := 1; i <= 100; i++ {
+		writeDumpInfo(cpath, cpath, i, time.Second)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(cpath, ".dump-info-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("temporary mappings leaked: %v, %v", leftovers, err)
 	}
 }

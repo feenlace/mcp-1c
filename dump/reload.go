@@ -198,6 +198,13 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	// and reporting it as work.
 	if sigBefore != "" && sigAfter == sigBefore {
 		rep.Elapsed = time.Since(start)
+		// A successful no-op also restores a removed mapping. The snapshot above
+		// is protected by mu, and reloadMu keeps this publication serial with swaps.
+		if cpath, err := cachePath(idx.dir, cacheDir); err == nil {
+			writeDumpInfo(cpath, idx.dir, before, rep.Elapsed)
+		} else {
+			slog.Warn("dump: could not resolve cache for dump.json", "error", err)
+		}
 		return rep, nil
 	}
 
@@ -340,6 +347,10 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	rep.Changed = true
 	rep.ModulesAfter = len(names)
 	rep.Elapsed = time.Since(start)
+	// names belongs to the successfully published generation. Do not read the
+	// live index's mutable maps here; reloadMu serializes this write with Reload
+	// and Close, and every failure above leaves the previous mapping untouched.
+	writeDumpInfo(cpath, idx.dir, len(names), rep.Elapsed)
 	slog.Info("dump: reloaded index generation",
 		"from", sigBefore, "to", sigAfter,
 		"modules_before", rep.ModulesBefore, "modules_after", rep.ModulesAfter,

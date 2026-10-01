@@ -1207,6 +1207,9 @@ type Index struct {
 	// to tell "nothing changed on disk" from "a rebuild is needed"; an empty
 	// value therefore always rebuilds. Written under mu by the swap.
 	gensig string
+	// serveStartedAt records when a serve placeholder was created so its mapping
+	// metadata can report the full cold-open duration once the index is ready.
+	serveStartedAt time.Time
 	// reloadMu serialises Reload against itself and against Close, so two
 	// reloads never race to swap the shards and Close never frees shards a
 	// reload is publishing. It is NOT taken by any read path.
@@ -1701,8 +1704,10 @@ func BuildCache(dir, cacheDir string, reindex bool) error {
 
 // BuildVersion is the mcp-1c binary version string (the same value printed by
 // `mcp-1c version`, injected via -ldflags "-X main.version=..."). main sets it at
-// startup. It is recorded in dump.json so a cache folder's mapping file shows
-// which build produced it. The dump package cannot import main, hence this var;
+// startup, before opening any indexes, and must leave it unchanged while they
+// are live. Serve opens and successful Reload calls also refresh dump.json;
+// library consumers must set this once to retain their binary version in those
+// mappings. The dump package cannot import main, hence this var;
 // it is empty for non-main callers (e.g. tests), in which case the field is
 // omitted from the JSON.
 var BuildVersion string
@@ -1747,10 +1752,33 @@ func writeDumpInfo(cpath, dumpDir string, modules int, elapsed time.Duration) {
 		return
 	}
 	out := filepath.Join(cpath, "dump.json")
-	if err := os.WriteFile(out, data, 0o644); err != nil {
+	// Multiple serving processes share this mapping. Replace a complete sibling
+	// file so readers never observe truncated JSON and failed writes retain the
+	// previous mapping. Each writer owns its unique temporary file.
+	if err := replaceDumpInfo(cpath, out, data); err != nil {
 		slog.Warn("dump: could not write dump.json; cache folder mapping skipped",
 			"path", out, "error", err)
 	}
+}
+
+func replaceDumpInfo(cpath, out string, data []byte) error {
+	f, err := os.CreateTemp(cpath, ".dump-info-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), out)
 }
 
 // setBuildErr stores a build error atomically.
