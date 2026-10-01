@@ -401,6 +401,7 @@ func OpenGenerationReadOnly(dir, cacheDir, gensig string) (*Index, error) {
 // held is a claim the caller already took on genDir, or nil; see
 // attachReadOnlyShards, which owns it from here on either way.
 func openReadOnlyFrom(dumpDir, cacheDir, genDir string, held *readerRegistration) (*Index, error) {
+	start := time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	idx := &Index{
 		dir:           dumpDir,
@@ -415,7 +416,14 @@ func openReadOnlyFrom(dumpDir, cacheDir, genDir string, held *readerRegistration
 		done:          make(chan struct{}),
 	}
 
+	cpath, err := cachePath(dumpDir, cacheDir)
+	if err == nil {
+		idx.metadata, _ = openDumpInfoMetadata(cpath, dumpDir)
+	}
 	if err := idx.attachReadOnlyShards(genDir, held); err != nil {
+		if idx.metadata != nil {
+			idx.metadata.Close()
+		}
 		cancel()
 		return nil, err
 	}
@@ -427,6 +435,7 @@ func openReadOnlyFrom(dumpDir, cacheDir, genDir string, held *readerRegistration
 			return
 		}
 		idx.pathIndex = NewPathIndex(idx.names)
+		writeDumpInfo(cpath, idx.dir, len(idx.names), time.Since(start))
 		idx.ready.Store(true)
 		slog.Info("Opened read-only index generation",
 			"shards", len(idx.shards), "modules", len(idx.names), "gen", filepath.Base(genDir))
@@ -554,6 +563,7 @@ func (idx *Index) FinishServeOpen(cacheDir string, gen *ServeGeneration, prepErr
 		idx.setBuildErr(fmt.Errorf("serve open: resolve cache path: %w", err))
 		return
 	}
+	idx.metadata, _ = openDumpInfoMetadata(cpath, idx.dir)
 	genDir := generationDir(cpath, gensig)
 	if !generationReadyDir(genDir) {
 		idx.setBuildErr(fmt.Errorf("serve open: generation %q is not ready (no %s sentinel at %s)",

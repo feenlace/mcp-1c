@@ -2,7 +2,6 @@ package dump
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -1201,6 +1200,7 @@ type Index struct {
 	// replacement generation under the SAME cache the current one lives in;
 	// re-resolving it from the environment could pick a different directory.
 	cacheDir string
+	metadata *DumpInfoMetadata // retains supplemental fields until Close
 	// gensig names the immutable generation currently attached, or "" when the
 	// index serves a legacy flat cache or an in-memory build (those have no
 	// generation). Reload compares it against a freshly computed dump signature
@@ -1404,6 +1404,9 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 
 	cpath, cacheErr := cachePath(dir, cacheDir)
 	useCache := cacheErr == nil
+	if useCache {
+		idx.metadata, _ = openDumpInfoMetadata(cpath, dir)
+	}
 
 	if !useCache {
 		// No writable cache location: os.UserCacheDir() failed and no
@@ -1738,7 +1741,7 @@ func writeDumpInfo(cpath, dumpDir string, modules int, elapsed time.Duration) {
 	if abs, err := filepath.Abs(dumpDir); err == nil {
 		absDir = abs
 	}
-	data, err := json.MarshalIndent(dumpInfo{
+	err := publishDumpInfo(cpath, dumpInfo{
 		Schema:       1,
 		DumpPath:     absDir,
 		Modules:      modules,
@@ -1746,16 +1749,12 @@ func writeDumpInfo(cpath, dumpDir string, modules int, elapsed time.Duration) {
 		BuiltAt:      time.Now().Format(time.RFC3339),
 		Version:      BuildVersion,
 		Platform:     runtime.GOOS,
-	}, "", "  ")
-	if err != nil {
-		slog.Warn("dump: could not encode dump.json; cache folder mapping skipped", "error", err)
-		return
-	}
+	})
 	out := filepath.Join(cpath, "dump.json")
 	// Multiple serving processes share this mapping. Replace a complete sibling
 	// file so readers never observe truncated JSON and failed writes retain the
 	// previous mapping. Each writer owns its unique temporary file.
-	if err := replaceDumpInfo(cpath, out, data); err != nil {
+	if err != nil {
 		slog.Warn("dump: could not write dump.json; cache folder mapping skipped",
 			"path", out, "error", err)
 	}
@@ -3629,6 +3628,9 @@ func (idx *Index) Close() error {
 	idx.reloadMu.Lock()
 	defer idx.reloadMu.Unlock()
 	idx.closed.Store(true)
+	if idx.metadata != nil {
+		idx.metadata.Close()
+	}
 	// Read the registration under mu (adoptClaim and swapGeneration write it there)
 	// and close it OUTSIDE, because that Close waits for the heartbeat goroutine and
 	// the heartbeat takes mu to report a lost claim.
