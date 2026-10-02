@@ -2,6 +2,7 @@ package dump
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -336,17 +337,47 @@ func (l extensionLayout) moduleKey(relPath string) string {
 // drop a manifest into an already-indexed tree, and the remedy is the one that
 // already exists for every such case, `--reindex`.
 func detectExtensionLayout(dir string) extensionLayout {
-	var l extensionLayout
+	return detectExtensionLayoutMode(dir, nil)
+}
 
-	ents, err := os.ReadDir(dir)
+// Form lookup must prove its source unique. Keep roots whose manifest names
+// collide, and record every bounded descent skipped without a verdict.
+func detectExtensionLayoutMode(dir string, bound *os.Root) extensionLayout {
+	strict := bound != nil
+	var l extensionLayout
+	readDir := func(path string) ([]os.DirEntry, error) {
+		if bound == nil {
+			return os.ReadDir(path)
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return nil, err
+		}
+		return readDirInRoot(bound, rel)
+	}
+	verdictOf := func(path string, cost *extensionScanCost) (manifestVerdict, string, layoutDoubtReason) {
+		if bound == nil {
+			return manifestVerdictOf(path, cost)
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return manifestUndecided, "", doubtManifestUnreadable
+		}
+		return manifestVerdictInRoot(bound, rel, cost)
+	}
+
+	ents, err := readDir(dir)
 	if err != nil {
+		if strict {
+			l.doubts = append(l.doubts, layoutDoubt{reason: doubtManifestUnreadable})
+		}
 		// Unreadable root: not an extension and not the parent of one. The path
 		// itself is a question dumpPathFault in cmd/mcp-1c already answers.
 		return l
 	}
 	l.cost.ReadDirs++
 
-	switch verdict, name, reason := manifestVerdictOf(dir, &l.cost); verdict {
+	switch verdict, name, reason := verdictOf(dir, &l.cost); verdict {
 	case manifestExtension:
 		l.self = name
 	case manifestUndecided:
@@ -368,7 +399,7 @@ func detectExtensionLayout(dir string) extensionLayout {
 			break
 		}
 		scanned++
-		switch verdict, name, reason := manifestVerdictOf(filepath.Join(dir, child), &l.cost); verdict {
+		switch verdict, name, reason := verdictOf(filepath.Join(dir, child), &l.cost); verdict {
 		case manifestExtension:
 			if l.byDir == nil {
 				l.byDir = make(map[string]string, 4)
@@ -390,13 +421,15 @@ func detectExtensionLayout(dir string) extensionLayout {
 			// into one would cost a ReadDir per kind directory and an Lstat per
 			// object below it, on every start, which is the growth
 			// TestLayoutDetectionCostIsBounded exists to refuse.
-			if belongsToSelfExtension(child) {
+			if belongsToSelfExtension(child) && !(strict && child == extensionDirName && l.self == "") {
 				continue
 			}
-			l.probeNestedExtensions(dir, child, &probed)
+			l.probeNestedExtensionsMode(dir, child, &probed, strict, readDir, verdictOf)
 		}
 	}
-	l.dropPrefixNameCollisions()
+	if !strict {
+		l.dropPrefixNameCollisions()
+	}
 	return l
 }
 
@@ -452,13 +485,23 @@ func (l *extensionLayout) dropPrefixNameCollisions() {
 // ONE child of the dump root, and records a hit under the two-segment prefix that
 // reaches it. It goes no deeper: depth two below the root is the whole of it.
 func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int) {
+	l.probeNestedExtensionsMode(root, child, budget, false, os.ReadDir, manifestVerdictOf)
+}
+
+func (l *extensionLayout) probeNestedExtensionsMode(root, child string, budget *int, strict bool, readDir func(string) ([]os.DirEntry, error), verdictOf func(string, *extensionScanCost) (manifestVerdict, string, layoutDoubtReason)) {
 	if *budget >= maxNestedProbeChildren {
+		if strict {
+			l.doubts = append(l.doubts, layoutDoubt{dir: child, reason: doubtScanTruncated})
+		}
 		return
 	}
 	path := filepath.Join(root, child)
 
-	ents, err := os.ReadDir(path)
+	ents, err := readDir(path)
 	if err != nil {
+		if strict {
+			l.doubts = append(l.doubts, layoutDoubt{dir: child, reason: doubtManifestUnreadable})
+		}
 		// SILENT, AND THAT MATCHES WHAT THE LEVEL ABOVE ALREADY DID. This branch is
 		// reached only on manifestAbsent, and manifestVerdictOf returned that for
 		// THIS SAME DIRECTORY while recording no doubt. Reporting the directory here
@@ -470,6 +513,9 @@ func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int)
 
 	// THE SIZE OF A DIRECTORY NOBODY HAS CLASSIFIED IS THE COST OF LOOKING IN IT.
 	if len(ents) > maxNestedProbeEntries {
+		if strict {
+			l.doubts = append(l.doubts, layoutDoubt{dir: child, reason: doubtScanTruncated})
+		}
 		return
 	}
 
@@ -478,6 +524,9 @@ func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int)
 			continue
 		}
 		if *budget >= maxNestedProbeChildren {
+			if strict {
+				l.doubts = append(l.doubts, layoutDoubt{dir: child, reason: doubtScanTruncated})
+			}
 			return
 		}
 		grand := e.Name()
@@ -492,7 +541,7 @@ func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int)
 		}
 		*budget++
 		prefix := child + "/" + grand
-		switch verdict, name, reason := manifestVerdictOf(filepath.Join(path, grand), &l.cost); verdict {
+		switch verdict, name, reason := verdictOf(filepath.Join(path, grand), &l.cost); verdict {
 		case manifestExtension:
 			if l.byPrefix == nil {
 				l.byPrefix = make(map[string]string, 2)
@@ -526,6 +575,41 @@ func extensionNameOf(dir string) (string, bool) {
 }
 
 // manifestVerdictOf classifies the extension manifest of dir.
+// Form fallback keeps manifest probes inside the same dump root as form files.
+func manifestVerdictInRoot(root *os.Root, dir string, cost *extensionScanCost) (manifestVerdict, string, layoutDoubtReason) {
+	path := filepath.Join(dir, extManifestClassic)
+	cost.Lstats++
+	lst, err := root.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return manifestAbsent, "", 0
+		}
+		return manifestUndecided, "", doubtManifestUnreadable
+	}
+	cost.ReadDirs++
+	entries, err := readDirInRoot(root, dir)
+	if err != nil {
+		return manifestUndecided, "", doubtManifestUnreadable
+	}
+	if !slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() == extManifestClassic }) {
+		return manifestAbsent, "", 0
+	}
+	if !lst.Mode().IsRegular() {
+		return manifestUndecided, "", doubtManifestNotRegular
+	}
+	cost.Reads++
+	f, err := root.OpenFile(path, os.O_RDONLY|nonblockOpenFlag, 0)
+	if err != nil {
+		return manifestUndecided, "", doubtManifestUnreadable
+	}
+	defer f.Close()
+	head, complete, reason := readManifestFile(f, lst)
+	if reason != 0 {
+		return manifestUndecided, "", reason
+	}
+	return classifyManifest(head, complete)
+}
+
 func manifestVerdictOf(dir string, cost *extensionScanCost) (manifestVerdict, string, layoutDoubtReason) {
 	path := filepath.Join(dir, extManifestClassic)
 	cost.Lstats++
@@ -593,6 +677,10 @@ func readManifestHead(path string, lst os.FileInfo) ([]byte, bool, layoutDoubtRe
 	}
 	defer f.Close()
 
+	return readManifestFile(f, lst)
+}
+
+func readManifestFile(f *os.File, lst os.FileInfo) ([]byte, bool, layoutDoubtReason) {
 	fst, err := f.Stat()
 	if err != nil {
 		return nil, false, doubtManifestUnreadable

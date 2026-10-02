@@ -204,6 +204,10 @@ const commonFormsDumpDir = "CommonForms"
 // never reach the caller. Customer-facing RU: no тире, no absolute path.
 var ErrFormsDirUnreadable = errors.New("каталог форм объекта недоступен")
 
+// ErrFormExtensionUnresolved means no unique extension source could be proven.
+// It carries no filesystem path and includes incomplete bounded enumeration.
+var ErrFormExtensionUnresolved = errors.New("источник формы расширения не определён однозначно")
+
 // ErrFormXMLNotRegular is the path-free RU refusal returned when a form file is
 // not a plain regular file: a symlink, FIFO, socket, device or directory.
 // Customer-facing RU: no тире, no absolute path.
@@ -231,7 +235,7 @@ var ErrFormObjectNameRejected = errors.New("object name rejected before any file
 //
 // THEY ARE ENUMERATED AND NOT COUNTED: ErrFormsDirUnreadable,
 // ErrFormXMLNotRegular, ErrFormObjectNameRejected, ErrFormUnknownObjectType,
-// ErrFormXMLUnreadable, ErrFormXMLTooLarge. This paragraph used to open with
+// ErrFormXMLUnreadable, ErrFormXMLTooLarge, ErrFormExtensionUnresolved. This paragraph used to open with
 // «THE FOUR SENTINELS ABOVE AND THIS ONE», which was wrong in both halves at
 // once: three stood above it, and the file held six. A numeral over a set that
 // grows is a claim nobody re-reads, so the membership is derived rather than
@@ -357,11 +361,48 @@ func FindFormFiles(dumpDir, objectType, objectName string) (map[string]string, e
 	}
 	defer func() { _ = root.Close() }()
 
-	if commonForm {
-		return findCommonFormFile(root, dumpDir, objectName)
+	forms, err := findFormsAtRoot(root, dumpDir, "", dirName, objectName, commonForm)
+	if err != nil || len(forms) != 0 {
+		return forms, err
 	}
 
-	relForms := filepath.Join(dirName, objectName, "Forms")
+	// Existing main forms take precedence. Only a complete extension scan may
+	// supply an otherwise missing object; never merge different objects by name.
+	layout := detectExtensionLayoutMode(dumpDir, root)
+	if len(layout.doubts) != 0 {
+		return nil, ErrFormExtensionUnresolved
+	}
+	prefixes := make([]string, 0, len(layout.byDir)+len(layout.byPrefix))
+	for prefix := range layout.byDir {
+		prefixes = append(prefixes, prefix)
+	}
+	for prefix := range layout.byPrefix {
+		prefixes = append(prefixes, prefix)
+	}
+	slices.Sort(prefixes)
+	var selected map[string]string
+	for _, prefix := range prefixes {
+		candidate, err := findFormsAtRoot(root, dumpDir, filepath.FromSlash(prefix), dirName, objectName, commonForm)
+		if err != nil {
+			return nil, ErrFormExtensionUnresolved
+		}
+		if len(candidate) == 0 {
+			continue
+		}
+		if selected != nil {
+			return nil, ErrFormExtensionUnresolved
+		}
+		selected = candidate
+	}
+	return selected, nil
+}
+
+func findFormsAtRoot(root *os.Root, dumpDir, prefix, dirName, objectName string, commonForm bool) (map[string]string, error) {
+	if commonForm {
+		return findCommonFormFileAt(root, dumpDir, prefix, objectName)
+	}
+
+	relForms := filepath.Join(prefix, dirName, objectName, "Forms")
 	entries, err := readDirInRoot(root, relForms)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -448,7 +489,11 @@ func isCommonFormType(objectType string) bool {
 // listed and the map cannot serve as an existence oracle for anything outside
 // the dump.
 func findCommonFormFile(root *os.Root, dumpDir, objectName string) (map[string]string, error) {
-	relXML := filepath.Join(commonFormsDumpDir, objectName, "Ext", "Form.xml")
+	return findCommonFormFileAt(root, dumpDir, "", objectName)
+}
+
+func findCommonFormFileAt(root *os.Root, dumpDir, prefix, objectName string) (map[string]string, error) {
+	relXML := filepath.Join(prefix, commonFormsDumpDir, objectName, "Ext", "Form.xml")
 
 	st, err := root.Lstat(relXML)
 	if err != nil {

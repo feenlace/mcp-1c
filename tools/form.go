@@ -17,8 +17,8 @@ import (
 // FormStructureTool returns the MCP tool definition for get_form_structure.
 func FormStructureTool() *mcp.Tool {
 	return &mcp.Tool{
-		Name:  "get_form_structure",
-		Title: "Структура формы объекта",
+		Name:        "get_form_structure",
+		Title:       "Структура формы объекта",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Получить структуру управляемой формы объекта 1С: элементы интерфейса, команды, кнопки, обработчики событий и сводку динамических списков формы. " +
 			"Используй когда нужно понять как выглядит форма документа, справочника или обработки. " +
@@ -668,16 +668,18 @@ const (
 	dumpReasonUnreadable
 	dumpReasonTraversalRefused
 	dumpReasonTooLarge
+	dumpReasonExtensionUnresolved
 )
 
 // dumpLegReasonCode is the machine-readable half of the vocabulary.
 var dumpLegReasonCode = map[dumpLegReason]string{
-	dumpReasonUnknownType:      "unknown_type",
-	dumpReasonNotFound:         "not_found",
-	dumpReasonNotRegular:       "not_regular",
-	dumpReasonUnreadable:       "unreadable",
-	dumpReasonTraversalRefused: "traversal_refused",
-	dumpReasonTooLarge:         "too_large",
+	dumpReasonUnknownType:         "unknown_type",
+	dumpReasonNotFound:            "not_found",
+	dumpReasonNotRegular:          "not_regular",
+	dumpReasonUnreadable:          "unreadable",
+	dumpReasonTraversalRefused:    "traversal_refused",
+	dumpReasonTooLarge:            "too_large",
+	dumpReasonExtensionUnresolved: "extension_unresolved",
 }
 
 // dumpLegReasonText is the reader's half, and it says what to do about each
@@ -702,6 +704,10 @@ var dumpLegReasonCode = map[dumpLegReason]string{
 //
 // Customer-facing RU: no тире.
 var dumpLegReasonText = map[dumpLegReason]string{
+	dumpReasonExtensionUnresolved: "источник формы расширения не определён однозначно: " +
+		"найдены формы нескольких расширений либо список расширений прочитан не полностью. " +
+		"Состав формы не выбран. Укажите отдельную выгрузку нужного расширения в `--dump` " +
+		"или проверьте полноту и доступность файлов описания расширений.",
 	dumpReasonUnknownType: "вид объекта из выгрузки не читается. Проверьте значение object_type: " +
 		"формы читаются для прикладных видов и для общей формы.",
 	dumpReasonNotFound: "формы этого объекта в выгрузке нет. Проверьте имя объекта и полноту " +
@@ -760,6 +766,8 @@ func withDumpLegReason(err error, reason dumpLegReason) error {
 // own code and its own text.
 func classifyDumpLegFailure(err error) dumpLegReason {
 	switch {
+	case errors.Is(err, dump.ErrFormExtensionUnresolved):
+		return dumpReasonExtensionUnresolved
 	case errors.Is(err, dump.ErrFormUnknownObjectType):
 		return dumpReasonUnknownType
 	case errors.Is(err, dump.ErrFormObjectNameRejected):

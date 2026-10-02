@@ -51,6 +51,7 @@ func formSentinelSet() []struct {
 		{"ErrFormUnknownObjectType", ErrFormUnknownObjectType},
 		{"ErrFormXMLUnreadable", ErrFormXMLUnreadable},
 		{"ErrFormXMLTooLarge", ErrFormXMLTooLarge},
+		{"ErrFormExtensionUnresolved", ErrFormExtensionUnresolved},
 	}
 }
 
@@ -113,6 +114,20 @@ func TestFormRefusalsCarryTheirOwnSentinel(t *testing.T) {
 			want: "ErrFormUnknownObjectType",
 			produce: func(t *testing.T) error {
 				_, err := FindFormFiles(t.TempDir(), "ЧтоТоНеТо", "Валюты")
+				return err
+			},
+		},
+		{
+			name: "two extensions supply the same object",
+			want: "ErrFormExtensionUnresolved",
+			produce: func(t *testing.T) error {
+				root := t.TempDir()
+				for _, name := range []string{"First", "Second"} {
+					ext := filepath.Join(root, "Расширения", name)
+					mkExtensionDump(t, ext, "Configuration.xml", name)
+					seedExtensionForm(t, ext, "Shared", "Форма", "<Form/>")
+				}
+				_, err := FindFormFiles(root, "DataProcessor", "Shared")
 				return err
 			},
 		},

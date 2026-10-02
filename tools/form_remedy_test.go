@@ -169,12 +169,13 @@ func TestFormRemedy_CarriesNoDash(t *testing.T) {
 // failed on.
 func TestDumpLegReasonsAreAClosedSet(t *testing.T) {
 	want := map[dumpLegReason]string{
-		dumpReasonUnknownType:      "unknown_type",
-		dumpReasonNotFound:         "not_found",
-		dumpReasonNotRegular:       "not_regular",
-		dumpReasonUnreadable:       "unreadable",
-		dumpReasonTraversalRefused: "traversal_refused",
-		dumpReasonTooLarge:         "too_large",
+		dumpReasonUnknownType:         "unknown_type",
+		dumpReasonNotFound:            "not_found",
+		dumpReasonNotRegular:          "not_regular",
+		dumpReasonUnreadable:          "unreadable",
+		dumpReasonTraversalRefused:    "traversal_refused",
+		dumpReasonTooLarge:            "too_large",
+		dumpReasonExtensionUnresolved: "extension_unresolved",
 	}
 	if len(dumpLegReasonText) != len(want) {
 		t.Fatalf("the reason set holds %d values, want %d. It is closed by design: "+
@@ -207,6 +208,7 @@ func TestClassifyDumpLegFailure_MapsEveryCause(t *testing.T) {
 		want dumpLegReason
 	}{
 		{"unknown object type", fmt.Errorf("wrapped: %w", dump.ErrFormUnknownObjectType), dumpReasonUnknownType},
+		{"extension source unresolved", fmt.Errorf("wrapped: %w", dump.ErrFormExtensionUnresolved), dumpReasonExtensionUnresolved},
 		{"name guard", fmt.Errorf("wrapped: %w", dump.ErrFormObjectNameRejected), dumpReasonTraversalRefused},
 		{"forms directory unreadable", fmt.Errorf("wrapped: %w", dump.ErrFormsDirUnreadable), dumpReasonUnreadable},
 		{"form file is not regular", fmt.Errorf("wrapped: %w", dump.ErrFormXMLNotRegular), dumpReasonNotRegular},
