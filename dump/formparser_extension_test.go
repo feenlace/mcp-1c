@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,66 @@ func seedExtensionForm(t *testing.T, root, name, form, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestFindFormFiles_StrictIncompleteManifestNoSourceChoice(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "Расширения", "First")
+	mkExtensionDump(t, first, "Configuration.xml", "First")
+	seedExtensionForm(t, first, "Shared", "Форма", "<Form/>")
+	damaged := filepath.Join(root, "Damaged")
+	mkExtensionDump(t, damaged, "Configuration.xml", "Second")
+	seedExtensionForm(t, damaged, "Shared", "Форма", "<Form/>")
+	body := classicExtensionManifest("Second", true)
+	body = body[:strings.Index(body, "</Properties>")]
+	if err := os.WriteFile(filepath.Join(damaged, "Configuration.xml"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	legacy, _, _ := manifestVerdictOf(damaged, &extensionScanCost{})
+	if legacy != manifestNotExtension {
+		t.Fatalf("ordinary index semantics changed: %v", legacy)
+	}
+	forms, err := FindFormFiles(root, "DataProcessor", "Shared")
+	if len(forms) != 0 {
+		t.Fatalf("incomplete second extension admitted guessed composition: %v", forms)
+	}
+	assertFormSentinel(t, err, "ErrFormExtensionUnresolved")
+}
+
+func TestManifestVerdictInRoot_StrictEOFAndLegacyCompatibility(t *testing.T) {
+	extensionBody := classicExtensionManifest("Addon", true)
+	baseBody := baseConfigManifest()
+	closedProperties := func(s string) string { return s[:strings.Index(s, "</Properties>")+len("</Properties>")] }
+	cases := []struct {
+		name, body     string
+		strict, legacy manifestVerdict
+	}{
+		{"EOF before properties", "<MetaDataObject><Configuration>", manifestUndecided, manifestNotExtension},
+		{"EOF inside properties", extensionBody[:strings.Index(extensionBody, "</Properties>")], manifestUndecided, manifestNotExtension},
+		{"complete extension properties header", closedProperties(extensionBody), manifestExtension, manifestExtension},
+		{"complete base properties header", closedProperties(baseBody), manifestNotExtension, manifestNotExtension},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "Configuration.xml"), []byte(c.body), 0644); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			got, _, _ := manifestVerdictInRoot(root, ".", &extensionScanCost{})
+			if got != c.strict {
+				t.Errorf("strict verdict=%v, want %v", got, c.strict)
+			}
+			got, _, _ = manifestVerdictOf(dir, &extensionScanCost{})
+			if got != c.legacy {
+				t.Errorf("ordinary index verdict=%v, want unchanged %v", got, c.legacy)
+			}
+		})
+	}
 }
 
 func TestFindFormFiles_ExtensionRoots(t *testing.T) {

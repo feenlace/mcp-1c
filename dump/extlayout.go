@@ -607,7 +607,7 @@ func manifestVerdictInRoot(root *os.Root, dir string, cost *extensionScanCost) (
 	if reason != 0 {
 		return manifestUndecided, "", reason
 	}
-	return classifyManifest(head, complete)
+	return classifyManifestMode(head, complete, true)
 }
 
 func manifestVerdictOf(dir string, cost *extensionScanCost) (manifestVerdict, string, layoutDoubtReason) {
@@ -714,6 +714,13 @@ func readManifestFile(f *os.File, lst os.FileInfo) ([]byte, bool, layoutDoubtRea
 // that may end mid-document, which a real parser would reject outright, and the two
 // elements read here are simple text with no attributes and no nesting.
 func classifyManifest(head []byte, complete bool) (manifestVerdict, string, layoutDoubtReason) {
+	return classifyManifestMode(head, complete, false)
+}
+
+// Strict form selection needs a complete properties header even when the file
+// itself ended at EOF. A cut-off export cannot prove another source absent.
+// The ordinary module-index classifier retains its previous negative verdicts.
+func classifyManifestMode(head []byte, complete, strict bool) (manifestVerdict, string, layoutDoubtReason) {
 	const openProps, closeProps = "<Properties>", "</Properties>"
 
 	// A MARKER THAT IS NOT PART OF THE DOCUMENT STRUCTURE IS NOT EVIDENCE, and this
@@ -760,6 +767,9 @@ func classifyManifest(head []byte, complete bool) (manifestVerdict, string, layo
 	i := bytes.Index(head, []byte(openProps))
 	if i < 0 {
 		if complete {
+			if strict {
+				return manifestUndecided, "", doubtManifestMalformed
+			}
 			return manifestNotExtension, "", 0
 		}
 		return manifestUndecided, "", doubtManifestTruncated
@@ -768,6 +778,9 @@ func classifyManifest(head []byte, complete bool) (manifestVerdict, string, layo
 	j := bytes.Index(rest, []byte(closeProps))
 	if j < 0 {
 		if complete {
+			if strict {
+				return manifestUndecided, "", doubtManifestMalformed
+			}
 			return manifestNotExtension, "", 0
 		}
 		return manifestUndecided, "", doubtManifestTruncated
