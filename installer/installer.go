@@ -97,6 +97,10 @@ func parsePlatformVersion(platformExe, overrideVersion string) (major, minor int
 //
 //garble:ignore
 func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser, dbPassword, platformVersion string, stripRoles bool) error {
+	persistent, err := fs.Glob(srcFS, "src/InformationRegisters/*.xml")
+	if err != nil {
+		return fmt.Errorf("checking persistent extension metadata: %w", err)
+	}
 	if platformExe == "" {
 		var err error
 		platformExe, err = FindPlatform()
@@ -116,7 +120,25 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 	if err := extractFS(srcFS, "src", extDir); err != nil {
 		return fmt.Errorf("extracting extension sources: %w", err)
 	}
+	cfgPath := filepath.Join(extDir, "Configuration.xml")
+	if len(persistent) > 0 {
+		if stripRoles {
+			if err := stripDefaultRoles(cfgPath); err != nil {
+				return fmt.Errorf("stripping default roles: %w", err)
+			}
+		}
+		err = installPersistentExtension(extDir, dbPath, serverMode, platformExe, dbUser, dbPassword)
+	} else {
+		err = installLegacyExtension(extDir, dbPath, serverMode, platformExe, dbUser, dbPassword, platformVersion, stripRoles)
+	}
+	if err != nil {
+		return err
+	}
+	printRoleNote(!declaresOurRoleAsDefault(cfgPath))
+	return nil
+}
 
+func installLegacyExtension(extDir, dbPath string, serverMode bool, platformExe, dbUser, dbPassword, platformVersion string, stripRoles bool) error {
 	// Patch XML format version to match the target platform.
 	fmtVer := formatVersionForPlatform(platformExe)
 	if err := patchFormatVersion(extDir, fmtVer); err != nil {
@@ -166,7 +188,7 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 	// directly (optimistic path for fresh installs). If loading fails with
 	// "Уже существует" (object already exists), we delete the old extension and retry.
 	fmt.Println("Loading extension into database...")
-	err = runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+	err := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
 		"/LoadConfigFromFiles", extDir,
 		"-Extension", extensionName,
 	)
@@ -344,10 +366,23 @@ func Install(srcFS embed.FS, dbPath string, serverMode bool, platformExe, dbUser
 		}
 	}
 
-	// Chosen by reading the file that was loaded, not by the flag: three code
-	// paths besides the flag remove the declaration. extDir survives until the
-	// deferred cleanup, so cfgPath is still readable here.
-	printRoleNote(!declaresOurRoleAsDefault(cfgPath))
+	return nil
+}
+
+// Persistent extension data must never enter the legacy delete or XML-downgrade retries.
+func installPersistentExtension(extDir, dbPath string, serverMode bool, platformExe, dbUser, dbPassword string) error {
+	fmt.Println("Loading extension into database...")
+	if err := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+		"/LoadConfigFromFiles", extDir, "-Extension", extensionName,
+	); err != nil {
+		return fmt.Errorf("loading persistent extension in place: %w", err)
+	}
+	fmt.Println("Updating database...")
+	if err := runDesigner(platformExe, dbPath, serverMode, dbUser, dbPassword,
+		"/UpdateDBCfg", "-Extension", extensionName,
+	); err != nil {
+		return fmt.Errorf("applying persistent extension: %w; the load succeeded but the applied database state is not verified; preserve the extension and its data, inspect the database before retrying", err)
+	}
 	return nil
 }
 
