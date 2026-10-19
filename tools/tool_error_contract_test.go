@@ -56,7 +56,7 @@ const (
 	// allowed to report 0 as agreement. Adding a file is legitimate and does not
 	// break it; finding fewer than were there means the walk lost sight of the
 	// package, and every count below would then be measuring nothing.
-	wantCensusFiles = 15
+	wantCensusFiles = 16
 
 	// wantSites is the total number of (nil, err) returns in handler position.
 	// Derivation: 31 at v1.12.1, plus the two InternalError marks the panic
@@ -67,11 +67,11 @@ const (
 	// plus one for the namespace enum search_code declares and now enforces,
 	// plus one for the empty event name get_event_log refuses before the call,
 	// plus one for the empty event LIST it refuses there too.
-	wantSites = 38
+	wantSites = 41
 
 	// wantProtocolSites: 8 decode failures plus the 2 recovered-panic marks. The
 	// eighth decode failure is metadata's, which used to be discarded.
-	wantProtocolSites = 10
+	wantProtocolSites = 11
 
 	// wantOperationalSites: wantSites - wantProtocolSites. Four were added for
 	// the same reason: get_event_log refusing a level outside its declared enum,
@@ -80,18 +80,18 @@ const (
 	// is present and empty. All four sit on the operational side for the reason
 	// ProtocolError's doc gives, that a VALUE the caller chose is a mistake the
 	// caller can only fix from text it can read.
-	wantOperationalSites = 28
+	wantOperationalSites = 30
 
 	// wantToolHandlerFuncs is every top-level func in the package returning
 	// mcp.ToolHandler, INCLUDING the two wrappers that are not constructors. It is
 	// pinned because the enclosing-declaration rule below excludes exactly those
 	// two by name, and a third wrapper appearing without anyone noticing would
 	// silently change what the census counts.
-	wantToolHandlerFuncs = 14
+	wantToolHandlerFuncs = 15
 
 	// wantConstructors is the exported New* subset: the public surface an importer
 	// such as the paid edition registers for itself.
-	wantConstructors = 12
+	wantConstructors = 13
 
 	// wantDelegating: NewAnalyzeSubsystemsHandler and NewObjectStructureHandler
 	// forward to their WithSource twin and must NOT wrap again.
@@ -99,7 +99,7 @@ const (
 
 	// wantDecorated: the remaining constructors, each of which must terminate in
 	// WithToolErrors, alone or inside withIndexProtectionNotice.
-	wantDecorated = 10
+	wantDecorated = 11
 )
 
 // wantPerConstructor is (protocol, operational) per constructor. It is compared
@@ -115,6 +115,7 @@ var wantPerConstructor = map[string]siteClasses{
 	"NewQueryHandler":                       {protocol: 1, operational: 3},
 	"NewReloadDumpHandler":                  {protocol: 0, operational: 1},
 	"NewSearchCodeHandler":                  {protocol: 1, operational: 4},
+	"NewStorageStructureHandler":            {protocol: 1, operational: 2},
 	"NewValidateQueryHandler":               {protocol: 1, operational: 2},
 }
 

@@ -55,6 +55,7 @@ func New(version string, onecClient *onec.Client, dumpIndex *dump.Index) *mcp.Se
 	s.AddTool(tools.ValidateQueryTool(), tools.NewValidateQueryHandler(onecClient))
 	s.AddTool(tools.EventLogTool(), tools.NewEventLogHandler(onecClient))
 	s.AddTool(tools.ConfigurationInfoTool(), tools.NewConfigurationInfoHandler(onecClient))
+	s.AddTool(tools.StorageStructureTool(), tools.NewStorageStructureHandler(onecClient))
 	// analyze_subsystems answers from the dump when present (nil source -> live).
 	s.AddTool(tools.AnalyzeSubsystemsTool(), tools.NewAnalyzeSubsystemsHandlerWithSource(onecClient, tools.DumpSubsystemForestFunc(dumpDir)))
 	tools.RegisterBSLHelp(s)

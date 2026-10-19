@@ -177,3 +177,36 @@ type EventLogEntry struct {
 	Comment           string `json:"comment,omitempty"`
 	Transaction       string `json:"transaction,omitempty"`
 }
+
+// StorageStructure is the answer of GET /storage/{type}/{name}: the DBMS tables
+// the platform keeps one metadata object in, as ПолучитьСтруктуруХраненияБазыДанных
+// reports them with database names (ИменаБазыДанных = Истина).
+type StorageStructure struct {
+	Name     string         `json:"name"`
+	FullName string         `json:"full_name"`
+	Tables   []StorageTable `json:"tables"`
+}
+
+// StorageTable is one DBMS table of a metadata object.
+type StorageTable struct {
+	StorageName string         `json:"storage_name"` // имя таблицы в СУБД, например _Reference441
+	TableName   string         `json:"table_name"`   // имя таблицы в языке запросов, например Справочник.Номенклатура
+	Metadata    string         `json:"metadata"`     // полное имя объекта метаданных, которому таблица принадлежит
+	Purpose     string         `json:"purpose"`      // назначение: Основная, ТабличнаяЧасть, Итоги и т.д.
+	Fields      []StorageField `json:"fields"`
+	Indexes     []StorageIndex `json:"indexes"`
+}
+
+// StorageField is one column of a storage table, or one column of an index.
+type StorageField struct {
+	Name        string `json:"name"`         // имя поля в языке запросов
+	StorageName string `json:"storage_name"` // имя колонки в СУБД
+	Metadata    string `json:"metadata"`     // полное имя реквизита, пустое у служебных колонок
+}
+
+// StorageIndex is one DBMS index of a storage table.
+type StorageIndex struct {
+	Name        string         `json:"name"`
+	StorageName string         `json:"storage_name"`
+	Fields      []StorageField `json:"fields"`
+}
