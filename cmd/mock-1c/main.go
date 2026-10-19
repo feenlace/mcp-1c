@@ -639,7 +639,7 @@ func handleVersion(w http.ResponseWriter, r *http.Request) {
 	// the module it stands in for is not beside it. The copy is held to the
 	// original by TestHandleVersion_AnswersWhatTheExtensionAnswers, which reads
 	// the module and fails as soon as the two differ.
-	writeJSON(w, http.StatusOK, map[string]string{"version": "0.4.8"})
+	writeJSON(w, http.StatusOK, map[string]string{"version": "0.4.9"})
 }
 
 func main() {
@@ -660,6 +660,7 @@ func main() {
 	mux.HandleFunc("/mcp/eventlog", handleEventLog)
 	mux.HandleFunc("/mcp/configuration", handleConfiguration)
 	mux.HandleFunc("/mcp/version", handleVersion)
+	mux.HandleFunc("/mcp/storage/", handleStorage)
 
 	addr := fmt.Sprintf(":%d", *port)
 	logger.Printf("Mock 1C server listening on %s", addr)
@@ -667,4 +668,37 @@ func main() {
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		logger.Fatalf("Server error: %v", err)
 	}
+}
+
+func handleStorage(w http.ResponseWriter, r *http.Request) {
+	log.Printf("%s %s", r.Method, r.URL.Path)
+	path := strings.TrimPrefix(r.URL.Path, "/mcp/storage/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid path. Expected /mcp/storage/{type}/{name}"})
+		return
+	}
+	if _, ok := objects[objectKey{typ: parts[0], name: parts[1]}]; !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Object not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":      parts[1],
+		"full_name": parts[0] + "." + parts[1],
+		"tables": []map[string]any{{
+			"storage_name": "_Reference100",
+			"table_name":   parts[0] + "." + parts[1],
+			"metadata":     parts[0] + "." + parts[1],
+			"purpose":      "Основная",
+			"fields": []map[string]string{
+				{"name": "Ссылка", "storage_name": "_IDRRef", "metadata": ""},
+				{"name": "Код", "storage_name": "_Code", "metadata": ""},
+				{"name": "Наименование", "storage_name": "_Description", "metadata": ""},
+			},
+			"indexes": []map[string]any{{
+				"name": "ByCode", "storage_name": "_Reference100_ByCode",
+				"fields": []map[string]string{{"name": "Код", "storage_name": "_Code", "metadata": ""}},
+			}},
+		}},
+	})
 }

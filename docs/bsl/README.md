@@ -16,6 +16,7 @@
 | `/eventlog` | POST | [eventlog.bsl](eventlog.bsl) | Чтение журнала регистрации |
 | `/configuration` | GET | [configuration.bsl](configuration.bsl) | Информация о конфигурации и платформе |
 | `/extensions` | GET | [extensions.bsl](extensions.bsl) | Бинарные данные (.cfe) всех расширений в base64 |
+| `/storage/{type}/{name}` | GET | [storage.bsl](storage.bsl) | Таблицы, поля и индексы СУБД, в которых хранится объект метаданных |
 
 ## Установка
 
