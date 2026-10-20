@@ -96,6 +96,12 @@ type operationalSite struct {
 func operationalSites() []operationalSite {
 	const oops = "Поле не найдено \"Номенклатура\""
 	return []operationalSite{
+		{name: "count operation refusal", site: `record_count.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler { return NewRecordCountHandler(nil) }, args: `{}`, heading: "Количество доступных записей не получено", wants: []string{"Catalog"}},
+		{name: "metadata summary kind required", site: `metadata_summary.go "kind must be"`, build: func(t *testing.T) mcp.ToolHandler { return NewMetadataSummaryHandler("") }, args: `{}`, heading: "Сводка XML метаданных не получена", wants: []string{"kind must be"}},
+		{name: "metadata summary source failure", site: `metadata_summary.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler { return NewMetadataSummaryHandler("") }, args: `{"kind":"configuration"}`, heading: "Сводка XML метаданных не получена", wants: []string{"source unavailable"}},
+		{name: "passport mode refusal", site: `environment_passport.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler {
+			return NewEnvironmentPassportHandler(nil, PassportContext{Mode: "bad"})
+		}, args: `{}`, heading: "Паспорт среды не получен", wants: []string{"mode must be"}},
 		{
 			name: "analyze_subsystems action is required", site: `analyze_subsystems.go "action is required"`,
 			build:   func(t *testing.T) mcp.ToolHandler { return NewAnalyzeSubsystemsHandler(envelope1C(t, 500, oops)) },
@@ -423,6 +429,8 @@ func protocolSites() []protocolSite {
 		return onec.ObjectStructure{}, true, errDumpSubsystemPanic
 	}
 	return []protocolSite{
+		{"count decode", `record_count.go "parsing input"`, func(t *testing.T) mcp.ToolHandler { return NewRecordCountHandler(nil) }, `not json`, jsonrpc.CodeInvalidParams},
+		{"metadata summary decode", `metadata_summary.go "parsing input"`, func(t *testing.T) mcp.ToolHandler { return NewMetadataSummaryHandler("") }, `not json`, jsonrpc.CodeInvalidParams},
 		{"analyze_subsystems decode", `analyze_subsystems.go "parsing input"`,
 			func(t *testing.T) mcp.ToolHandler { return NewAnalyzeSubsystemsHandler(envelope1C(t, 500, oops)) },
 			`not json`, jsonrpc.CodeInvalidParams},

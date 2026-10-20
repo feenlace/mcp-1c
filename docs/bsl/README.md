@@ -9,6 +9,7 @@
 | `/metadata` | GET | [metadata.bsl](metadata.bsl) | Дерево метаданных конфигурации |
 | `/subsystems` | GET | [subsystems.bsl](subsystems.bsl) | Дерево подсистем и полные имена объектов конфигурации |
 | `/object/{type}/{name}` | GET | [object.bsl](object.bsl) | Структура объекта метаданных |
+| `/count` | POST | [count.bsl](count.bsl) | Количество доступных записей выбранного справочника или документа |
 | `/query` | POST | [query.bsl](query.bsl) | Выполнение запроса (только SELECT) |
 | `/version` | GET | [version.bsl](version.bsl) | Версия расширения |
 | `/form/{type}/{name}` | GET | [form-structure.bsl](form-structure.bsl) | Структура формы объекта |

@@ -334,6 +334,10 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
+			<URLTemplate uuid="7a4a90f7-ebd5-49e1-a6cb-f37e1221dbfd">
+				<Properties><Name>Количество</Name><Synonym/><Comment/><Template>/count</Template></Properties>
+				<ChildObjects><Method uuid="831203a0-a090-4733-811d-df21171613c8"><Properties><Name>POST</Name><Synonym/><Comment/><HTTPMethod>POST</HTTPMethod><Handler>КоличествоPOST</Handler></Properties></Method></ChildObjects>
+			</URLTemplate>
 		</ChildObjects>
 	</HTTPService>
 </MetaDataObject>

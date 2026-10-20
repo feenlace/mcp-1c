@@ -11,7 +11,23 @@ import (
 
 // New creates an MCP server with basic configuration and registers tools.
 // If dumpIndex is provided, the search_code tool will be registered.
+type Options struct {
+	SourceRoot  string
+	ProjectRoot string
+	Passport    tools.PassportContext
+}
+
 func New(version string, onecClient *onec.Client, dumpIndex *dump.Index) *mcp.Server {
+	opts := Options{Passport: tools.PassportContext{Mode: tools.ModeLive, ProductVersion: version, Edition: "Community", Transport: "http"}}
+	if dumpIndex != nil {
+		opts.SourceRoot = dumpIndex.Dir()
+		opts.ProjectRoot = dumpIndex.Dir()
+	}
+	return NewWithOptions(version, onecClient, dumpIndex, opts)
+}
+
+// NewWithOptions adds explicit source/project roots without requiring a code index.
+func NewWithOptions(version string, onecClient *onec.Client, dumpIndex *dump.Index, opts Options) *mcp.Server {
 	s := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    "mcp-1c",
@@ -56,6 +72,17 @@ func New(version string, onecClient *onec.Client, dumpIndex *dump.Index) *mcp.Se
 	s.AddTool(tools.EventLogTool(), tools.NewEventLogHandler(onecClient))
 	s.AddTool(tools.ConfigurationInfoTool(), tools.NewConfigurationInfoHandler(onecClient))
 	s.AddTool(tools.StorageStructureTool(), tools.NewStorageStructureHandler(onecClient))
+	s.AddTool(tools.RecordCountTool(), tools.NewRecordCountHandler(onecClient))
+	s.AddTool(tools.MetadataSummaryTool(), tools.NewMetadataSummaryHandler(opts.SourceRoot))
+	passport := opts.Passport
+	if passport.Mode == "" {
+		passport.Mode = tools.ModeLive
+	}
+	if passport.ProductVersion == "" {
+		passport.ProductVersion = version
+	}
+	passport.SourceRoot = opts.SourceRoot
+	s.AddTool(tools.EnvironmentPassportTool(), tools.NewEnvironmentPassportHandler(onecClient, passport))
 	// analyze_subsystems answers from the dump when present (nil source -> live).
 	s.AddTool(tools.AnalyzeSubsystemsTool(), tools.NewAnalyzeSubsystemsHandlerWithSource(onecClient, tools.DumpSubsystemForestFunc(dumpDir)))
 	tools.RegisterBSLHelp(s)

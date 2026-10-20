@@ -161,4 +161,12 @@
 			<value>true</value>
 		</right>
 	</object>
+	<object>
+		<name>HTTPService.MCPService.URLTemplate.Количество</name>
+		<right><name>Use</name><value>true</value></right>
+	</object>
+	<object>
+		<name>HTTPService.MCPService.URLTemplate.Количество.Method.POST</name>
+		<right><name>Use</name><value>true</value></right>
+	</object>
 </Rights>

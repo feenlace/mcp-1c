@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -11,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/feenlace/mcp-1c/dump"
 	"github.com/feenlace/mcp-1c/extension"
@@ -19,6 +19,7 @@ import (
 	"github.com/feenlace/mcp-1c/internal/config"
 	"github.com/feenlace/mcp-1c/onec"
 	"github.com/feenlace/mcp-1c/server"
+	"github.com/feenlace/mcp-1c/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/term"
 )
@@ -56,6 +57,7 @@ func main() {
 	baseURL := flag.String("base", "", "Base URL of 1C HTTP service")
 	user := flag.String("user", "", "1C HTTP service user")
 	password := flag.String("password", "", "1C HTTP service password")
+	projectRoot := flag.String("project-root", "", "Explicit project directory for local helpers; without --dump, metadata XML can be read here without a code index")
 	dumpDir := flag.String("dump", "", "Path to DumpConfigToFiles output (enables search_code)")
 	cacheDir := flag.String("cache-dir", "", "Directory for index cache and logs (default: platform cache dir)")
 	reindex := flag.Bool("reindex", false, "Force rebuild of search index cache")
@@ -316,6 +318,14 @@ func main() {
 		// Index prepares in the background. ModuleCount is available after Ready().
 	}
 
+	localOptions := localToolOptions(version, *dumpDir, *projectRoot, *baseURL != "" || os.Getenv("MCP_1C_BASE_URL") != "")
+	if *projectRoot != "" {
+		if err := dumpPathFault(*projectRoot); err != nil {
+			reportStartupFailure(realStderr, fmt.Errorf("--project-root requires an existing directory"))
+			return
+		}
+	}
+
 	// The extension version probe runs CONCURRENTLY with serving and is SEQUENCED
 	// against the end of it. Both halves are the point.
 	//
@@ -339,12 +349,13 @@ func main() {
 	versionCtx, versionCancel := context.WithCancel(context.Background())
 	defer versionCancel()
 	versionDone := make(chan struct{})
-	go func() {
-		defer close(versionDone)
-		checkExtensionVersion(versionCtx, client)
-	}()
+	if localOptions.Passport.Mode == tools.ModeOffline {
+		close(versionDone)
+	} else {
+		go func() { defer close(versionDone); checkExtensionVersion(versionCtx, client) }()
+	}
 
-	s := server.New(version, client, dumpIndex)
+	s := server.NewWithOptions(version, client, dumpIndex, localOptions)
 
 	runErr := s.Run(context.Background(), &mcp.StdioTransport{})
 	// Serving has ended: stop any background build now so it cannot wedge shutdown
@@ -385,6 +396,21 @@ func main() {
 		reportStartupFailure(realStderr, fmt.Errorf("mcp-1c error: %w", runErr))
 		os.Exit(1)
 	}
+}
+
+// localToolOptions keeps explicit source selection independent of the code index.
+func localToolOptions(version, sourceRoot, projectRoot string, declaredConnection bool) server.Options {
+	if projectRoot == "" {
+		projectRoot = sourceRoot
+	}
+	if sourceRoot == "" {
+		sourceRoot = projectRoot
+	}
+	mode, transport := tools.ModeLive, "http"
+	if sourceRoot != "" && !declaredConnection {
+		mode, transport = tools.ModeOffline, "offline"
+	}
+	return server.Options{SourceRoot: sourceRoot, ProjectRoot: projectRoot, Passport: tools.PassportContext{Mode: mode, ProductVersion: version, Edition: "Community", Transport: transport}}
 }
 
 // reportStartupFailure delivers a message that must reach a human, on a path
@@ -961,30 +987,43 @@ func versionComponents(v string) ([]int, bool) {
 	return out, true
 }
 
-// versionForLog bounds a far-side value on its way into the log, and says so
-// when it cuts.
-//
-// The cut is ANNOUNCED and carries the full length. A silent cut is read as the
-// whole value, and "the extension answered 999…9" is a different diagnosis from
-// "the extension answered two megabytes of nines"; the second one names the
-// fault. slog quotes the attribute, so the value cannot forge a line either way.
-//
-// The tail of a rune split by the byte cap is dropped rather than written: a
-// half-rune reaches the reader as U+FFFD and looks like something the far side
-// sent.
+// versionForLog reports only the numeric version used by the existing comparator.
+// Opaque suffixes and invalid upstream values never reach the log.
 func versionForLog(v string) string {
-	if len(v) <= maxVersionTextBytes {
-		return v
+	parts, ok := versionComponents(v)
+	if !ok {
+		return "unavailable"
 	}
-	cut := v[:maxVersionTextBytes]
-	for len(cut) > 0 {
-		r, size := utf8.DecodeLastRuneInString(cut)
-		if r != utf8.RuneError || size != 1 {
-			break
+	safe := make([]string, len(parts))
+	for i, n := range parts {
+		safe[i] = strconv.Itoa(n)
+	}
+	return strings.Join(safe, ".")
+}
+
+func versionProbeFailureStatus(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var status *onec.StatusError
+	if errors.As(err, &status) {
+		switch status.StatusCode {
+		case 401, 403:
+			return "denied"
+		case 404, 405, 501:
+			return "unsupported"
+		case 408, 504:
+			return "timeout"
 		}
-		cut = cut[:len(cut)-1]
 	}
-	return fmt.Sprintf("%s… (truncated, %d bytes in the answer)", cut, len(v))
+	var decode *onec.DecodeError
+	if errors.As(err, &decode) {
+		return "malformed_response"
+	}
+	return "unavailable"
 }
 
 // versionProbeGrace is how long the end of a session waits for the extension
@@ -1029,7 +1068,7 @@ func checkExtensionVersion(ctx context.Context, client *onec.Client) {
 			"confirmation that the installed extension is the right one; the check did not "+
 			"run at all. Usual causes: the publication path is wrong, the credentials were "+
 			"refused, a web server answered instead of 1C, or 1C is not running.",
-			"required_at_least", expectedExtensionVersion, "error", err)
+			"required_at_least", expectedExtensionVersion, "status", versionProbeFailureStatus(err))
 		return
 	}
 
@@ -1054,7 +1093,7 @@ func checkExtensionVersion(ctx context.Context, client *onec.Client) {
 	if !ok {
 		slog.Error("Extension version NOT verified: /version answered with something that is "+
 			"not a version number, so it cannot be ranked against what this binary requires.",
-			"got", shown, "required_at_least", expectedExtensionVersion)
+			"status", "invalid_version", "required_at_least", expectedExtensionVersion)
 		return
 	}
 

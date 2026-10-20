@@ -67,11 +67,11 @@ const (
 	// plus one for the namespace enum search_code declares and now enforces,
 	// plus one for the empty event name get_event_log refuses before the call,
 	// plus one for the empty event LIST it refuses there too.
-	wantSites = 41
+	wantSites = 47
 
 	// wantProtocolSites: 8 decode failures plus the 2 recovered-panic marks. The
 	// eighth decode failure is metadata's, which used to be discarded.
-	wantProtocolSites = 11
+	wantProtocolSites = 13
 
 	// wantOperationalSites: wantSites - wantProtocolSites. Four were added for
 	// the same reason: get_event_log refusing a level outside its declared enum,
@@ -80,18 +80,18 @@ const (
 	// is present and empty. All four sit on the operational side for the reason
 	// ProtocolError's doc gives, that a VALUE the caller chose is a mistake the
 	// caller can only fix from text it can read.
-	wantOperationalSites = 30
+	wantOperationalSites = 34
 
 	// wantToolHandlerFuncs is every top-level func in the package returning
 	// mcp.ToolHandler, INCLUDING the two wrappers that are not constructors. It is
 	// pinned because the enclosing-declaration rule below excludes exactly those
 	// two by name, and a third wrapper appearing without anyone noticing would
 	// silently change what the census counts.
-	wantToolHandlerFuncs = 15
+	wantToolHandlerFuncs = 18
 
 	// wantConstructors is the exported New* subset: the public surface an importer
 	// such as the paid edition registers for itself.
-	wantConstructors = 13
+	wantConstructors = 16
 
 	// wantDelegating: NewAnalyzeSubsystemsHandler and NewObjectStructureHandler
 	// forward to their WithSource twin and must NOT wrap again.
@@ -99,13 +99,16 @@ const (
 
 	// wantDecorated: the remaining constructors, each of which must terminate in
 	// WithToolErrors, alone or inside withIndexProtectionNotice.
-	wantDecorated = 11
+	wantDecorated = 14
 )
 
 // wantPerConstructor is (protocol, operational) per constructor. It is compared
 // in BOTH directions, so a site drifting from one constructor to another while
 // the totals stay put is still a failure.
 var wantPerConstructor = map[string]siteClasses{
+	"NewRecordCountHandler":                 {protocol: 1, operational: 1},
+	"NewMetadataSummaryHandler":             {protocol: 1, operational: 2},
+	"NewEnvironmentPassportHandler":         {protocol: 0, operational: 1},
 	"NewAnalyzeSubsystemsHandlerWithSource": {protocol: 2, operational: 5},
 	"NewConfigurationInfoHandler":           {protocol: 0, operational: 1},
 	"NewEventLogHandler":                    {protocol: 1, operational: 4},
