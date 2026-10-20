@@ -43,13 +43,18 @@ type EnvironmentPassport struct {
 	VersionStatus        PassportFieldStatus `json:"version_status"`
 }
 
-var passportVersion = regexp.MustCompile(`^[vV]?[0-9]+(\.[0-9]+){1,3}([+-][a-zA-Z0-9.-]+)?$`)
+var passportVersion = regexp.MustCompile(`^[vV]?([0-9]+(\.[0-9]+){1,3})([+-][a-zA-Z0-9.-]+)?$`)
 
 func safePassportVersion(s string) string {
-	if len(s) <= 80 && passportVersion.MatchString(s) {
-		return s
+	if len(s) > 80 {
+		return ""
 	}
-	return ""
+	match := passportVersion.FindStringSubmatch(s)
+	if match == nil {
+		return ""
+	}
+	// Opaque version suffixes can contain host names or tokens; publish only numeric components.
+	return match[1]
 }
 func passportText(s string) string {
 	if len(s) > 256 || strings.ContainsAny(s, "\r\n\t\\/@:=") {

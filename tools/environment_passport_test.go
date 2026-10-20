@@ -86,3 +86,34 @@ func TestPassportOfflineMakesZeroClientCalls(t *testing.T) {
 		t.Fatalf("offline made %d calls", calls)
 	}
 }
+
+func TestPassportVersionsNeverEchoOpaqueSuffixes(t *testing.T) {
+	const suffix = "gate-a-private-host.invalid.password-GATEA-unique"
+	client := onec.NewClient("http://fixture", "", "")
+	client.HTTPClient.Transport = passportRoundTrip(func(r *http.Request) (*http.Response, error) {
+		body := `{"version":"0.4.9-` + suffix + `"}`
+		if strings.HasSuffix(r.URL.Path, "/configuration") {
+			body = `{"name":"Fixture","version":"1.2.3+` + suffix + `","vendor":"Vendor","platform_version":"8.3.27.2130-` + suffix + `","mode":"file"}`
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	pc := PassportContext{Mode: ModeLive, ProductVersion: "v1.22.4-" + suffix, Edition: "Community", Transport: "http"}
+	p, err := ReadEnvironmentPassport(context.Background(), client, pc)
+	if err != nil || p.ExtensionVersion != "0.4.9" || p.ConfigurationVersion != "1.2.3" || p.PlatformVersion != "8.3.27.2130" || p.ProductVersion != "1.22.4" || p.VersionStatus.Status != "available" {
+		t.Fatalf("numeric version semantics lost: %+v %v", p, err)
+	}
+	res, err := drive(t, NewEnvironmentPassportHandler(client, pc), `{}`)
+	if err != nil || res.IsError {
+		t.Fatalf("passport response: %+v %v", res, err)
+	}
+	for _, sentinel := range []string{suffix, "gate-a-private-host.invalid", "password-GATEA-unique"} {
+		if strings.Contains(resultText(t, res), sentinel) {
+			t.Fatalf("opaque sentinel exposed: %q", sentinel)
+		}
+	}
+	for input, want := range map[string]string{"0.4.9": "0.4.9", "0.5.0-beta": "0.5.0", "v1.2.3+build": "1.2.3", "8.3.27.2130": "8.3.27.2130", "not-version": ""} {
+		if got := safePassportVersion(input); got != want {
+			t.Errorf("version %q = %q, want %q", input, got, want)
+		}
+	}
+}

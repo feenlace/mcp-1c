@@ -106,3 +106,25 @@ func TestCountRecordsTransportCancellationAndDenied(t *testing.T) {
 type countTestTransport func(*http.Request) (*http.Response, error)
 
 func (f countTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRecordCountRequestRejectsCaseAliases(t *testing.T) {
+	bodies := []string{
+		`{"object_type":"Document","object_name":"Orders","period":{"field":"Date","start":"2024-01-01T00:00:00","end":"2025-01-01T00:00:00"},"Period":null}`,
+		`{"Object_type":"Document","object_name":"Orders"}`,
+		`{"object_type":"Document","object_name":"Orders","period":{"field":"Date","Field":"Other","start":"2024-01-01T00:00:00","end":"2025-01-01T00:00:00"}}`,
+		`{"object_type":"Document","object_name":"Orders","organization":{"field":"Organization","reference":{"catalog_name":"Organizations","uuid":"f63d3d44-944b-430e-ad5b-06977e2ff030"}},"Organization":null}`,
+		`{"object_type":"Document","object_name":"Orders","organization":{"field":"Organization","reference":{"catalog_name":"Organizations","uuid":"f63d3d44-944b-430e-ad5b-06977e2ff030"},"Reference":null}}`,
+		`{"object_type":"Document","object_name":"Orders","organization":{"field":"Organization","reference":{"catalog_name":"Organizations","Catalog_name":"Other","uuid":"f63d3d44-944b-430e-ad5b-06977e2ff030"}}}`,
+	}
+	for _, body := range bodies {
+		var request RecordCountRequest
+		if err := json.Unmarshal([]byte(body), &request); err == nil {
+			t.Errorf("case alias accepted: %s", body)
+		}
+	}
+	const valid = `{"object_type":"Document","object_name":"Orders","period":{"field":"Date","start":"2024-01-01T00:00:00","end":"2025-01-01T00:00:00"},"organization":{"field":"Organization","reference":{"catalog_name":"Organizations","uuid":"f63d3d44-944b-430e-ad5b-06977e2ff030"}}}`
+	var request RecordCountRequest
+	if err := json.Unmarshal([]byte(valid), &request); err != nil || request.Period == nil || request.Organization == nil {
+		t.Fatalf("canonical filters failed: %+v %v", request, err)
+	}
+}

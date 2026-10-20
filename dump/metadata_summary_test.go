@@ -128,3 +128,37 @@ func TestMetadataSummaryLegacySubsystemAndNestedDuplicates(t *testing.T) {
 		t.Fatal("duplicate nested identity accepted")
 	}
 }
+
+func TestMetadataSummaryRejectsDuplicateSingletonContainers(t *testing.T) {
+	root := summaryFixture(t)
+	config := filepath.Join(root, "Configuration.xml")
+	configGood, _ := os.ReadFile(config)
+	object := filepath.Join(root, "Catalogs/Items.xml")
+	objectGood, _ := os.ReadFile(object)
+	cases := []struct {
+		name, path, xml string
+		selection       MetadataSelection
+	}{
+		{"configuration child containers", config, `<MetaDataObject><Configuration><Properties><Name>Fixture</Name></Properties><ChildObjects><Catalog>Items</Catalog></ChildObjects><ChildObjects><Document>Orders</Document></ChildObjects></Configuration></MetaDataObject>`, MetadataSelection{Kind: "configuration"}},
+		{"attribute property containers", object, `<MetaDataObject><Catalog><Properties><Name>Items</Name></Properties><ChildObjects><Attribute><Properties><Name>FirstName</Name><Type><Type>xs:string</Type></Type></Properties><Properties><Name>SecondName</Name><Type><Type>xs:decimal</Type></Type></Properties></Attribute></ChildObjects></Catalog></MetaDataObject>`, MetadataSelection{Kind: "object", ObjectType: "Catalog", Name: "Items"}},
+		{"nested table part child containers", object, `<MetaDataObject><Catalog><Properties><Name>Items</Name></Properties><ChildObjects><TabularSection><Properties><Name>Lines</Name></Properties><ChildObjects><Attribute><Properties><Name>First</Name></Properties></Attribute></ChildObjects><ChildObjects><Attribute><Properties><Name>Second</Name></Properties></Attribute></ChildObjects></TabularSection></ChildObjects></Catalog></MetaDataObject>`, MetadataSelection{Kind: "object", ObjectType: "Catalog", Name: "Items"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_ = os.WriteFile(tc.path, []byte(tc.xml), 0600)
+			before, _ := os.ReadFile(tc.path)
+			if _, err := ReadMetadataSummary(context.Background(), root, tc.selection); err == nil || !strings.Contains(err.Error(), "duplicate") {
+				t.Fatalf("ambiguous XML accepted: %v", err)
+			}
+			after, _ := os.ReadFile(tc.path)
+			if string(before) != string(after) {
+				t.Fatal("refusal changed source")
+			}
+			_ = os.WriteFile(config, configGood, 0600)
+			_ = os.WriteFile(object, objectGood, 0600)
+			if _, err := ReadMetadataSummary(context.Background(), root, tc.selection); err != nil {
+				t.Fatalf("ordinary source did not recover: %v", err)
+			}
+		})
+	}
+}

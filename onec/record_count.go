@@ -83,8 +83,52 @@ func validateCountRequest(r RecordCountRequest) error {
 	return nil
 }
 
-// UnmarshalJSON refuses unsupported and explicitly null filters rather than silently dropping them.
+// countJSONFields enforces wire spelling before Go's case-insensitive struct decoder.
+func countJSONFields(data []byte, allowed ...string) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, fmt.Errorf("count input must be a JSON object")
+	}
+	for key := range fields {
+		accepted := false
+		for _, name := range allowed {
+			if key == name {
+				accepted = true
+				break
+			}
+		}
+		if !accepted {
+			return nil, fmt.Errorf("unsupported count property: %q", key)
+		}
+	}
+	return fields, nil
+}
+
+// UnmarshalJSON refuses unsupported spelling and null filters rather than silently dropping them.
 func (r *RecordCountRequest) UnmarshalJSON(data []byte) error {
+	fields, err := countJSONFields(data, "object_type", "object_name", "period", "organization")
+	if err != nil {
+		return err
+	}
+	if raw, ok := fields["period"]; ok {
+		if _, err := countJSONFields(raw, "field", "start", "end"); err != nil {
+			return err
+		}
+	}
+	if raw, ok := fields["organization"]; ok {
+		organization, err := countJSONFields(raw, "field", "reference")
+		if err != nil {
+			return err
+		}
+		if raw, ok := organization["reference"]; ok {
+			if _, err := countJSONFields(raw, "catalog_name", "uuid"); err != nil {
+				return err
+			}
+		}
+	}
 	type plain RecordCountRequest
 	var v plain
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -94,15 +138,6 @@ func (r *RecordCountRequest) UnmarshalJSON(data []byte) error {
 	}
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return fmt.Errorf("one count request object is required")
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	for _, key := range []string{"period", "organization"} {
-		if raw, ok := fields[key]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			return fmt.Errorf("%s must be omitted or a complete typed filter", key)
-		}
 	}
 	*r = RecordCountRequest(v)
 	return nil

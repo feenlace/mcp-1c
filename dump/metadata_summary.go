@@ -58,10 +58,10 @@ var errMetadataSource = errors.New("metadata XML source unavailable: select an e
 const summaryMaxXML = 8 << 20
 
 type summaryXML struct {
-	name          string
-	text          string
-	children      []*summaryXML
-	propertyNames map[string]bool
+	name           string
+	text           string
+	children       []*summaryXML
+	singletonNames map[string]bool
 }
 
 func (n *summaryXML) child(name string) *summaryXML {
@@ -152,14 +152,14 @@ func summaryRead(ctx context.Context, root *os.Root, rel string) (*summaryXML, M
 			}
 			n := &summaryXML{name: t.Name.Local}
 			parent := stack[len(stack)-1]
-			if parent.name == "Properties" {
-				if parent.propertyNames == nil {
-					parent.propertyNames = map[string]bool{}
+			if parent.name == "Properties" || n.name == "Properties" || n.name == "ChildObjects" {
+				if parent.singletonNames == nil {
+					parent.singletonNames = map[string]bool{}
 				}
-				if parent.propertyNames[n.name] {
-					return nil, source, errors.New("duplicate metadata property")
+				if parent.singletonNames[n.name] {
+					return nil, source, errors.New("duplicate metadata property or singleton container")
 				}
-				parent.propertyNames[n.name] = true
+				parent.singletonNames[n.name] = true
 			}
 			parent.children = append(parent.children, n)
 			stack = append(stack, n)
