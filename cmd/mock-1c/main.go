@@ -639,7 +639,7 @@ func handleVersion(w http.ResponseWriter, r *http.Request) {
 	// the module it stands in for is not beside it. The copy is held to the
 	// original by TestHandleVersion_AnswersWhatTheExtensionAnswers, which reads
 	// the module and fails as soon as the two differ.
-	writeJSON(w, http.StatusOK, map[string]string{"version": "0.4.9"})
+	writeJSON(w, http.StatusOK, map[string]string{"version": "0.4.10"})
 }
 
 func main() {

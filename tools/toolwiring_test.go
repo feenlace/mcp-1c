@@ -96,6 +96,12 @@ type operationalSite struct {
 func operationalSites() []operationalSite {
 	const oops = "Поле не найдено \"Номенклатура\""
 	return []operationalSite{
+		{name: "patterns selection refusal", site: `form_patterns.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler { return NewFormPatternsHandler() }, args: `{"selection":"unknown"}`, heading: "Паттерны компоновки форм не получены", wants: []string{"selection must be"}},
+		{name: "schema operation refusal", site: `schema_registration.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler { return NewSchemaRegistrationHandler("") }, args: `{"xsd_path":"own.xsd","version":"v1","manifest_path":"schemas.json"}`, heading: "Регистрация схемы не выполнена", wants: []string{"project directory"}},
+		{name: "grid operation refusal", site: `image_grid.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler { return NewImageGridHandler("") }, args: `{"input_path":"own.png","output_path":"grid.png","spacing":16}`, heading: "Сетка изображения не получена", wants: []string{"project directory"}},
+		{name: "help mode refusal", site: `help_add.go "mode must be"`, build: func(t *testing.T) mcp.ToolHandler { return NewHelpAddHandler("", nil) }, args: `{}`, heading: "Добавление справки не выполнено", wants: []string{"mode must be"}},
+		{name: "help artifact refusal", site: `help_add.go "requires a selected"`, build: func(t *testing.T) mcp.ToolHandler { return NewHelpAddHandler("", nil) }, args: `{"mode":"patch_and_check"}`, heading: "Добавление справки не выполнено", wants: []string{"artifact_path"}},
+		{name: "help source refusal", site: `help_add.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler { return NewHelpAddHandler("", nil) }, args: `{"mode":"patch","language":"ru"}`, heading: "Добавление справки не выполнено", wants: []string{"project source directory"}},
 		{name: "count operation refusal", site: `record_count.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler { return NewRecordCountHandler(nil) }, args: `{}`, heading: "Количество доступных записей не получено", wants: []string{"Catalog"}},
 		{name: "metadata summary kind required", site: `metadata_summary.go "kind must be"`, build: func(t *testing.T) mcp.ToolHandler { return NewMetadataSummaryHandler("") }, args: `{}`, heading: "Сводка XML метаданных не получена", wants: []string{"kind must be"}},
 		{name: "metadata summary source failure", site: `metadata_summary.go "return nil, err"`, build: func(t *testing.T) mcp.ToolHandler { return NewMetadataSummaryHandler("") }, args: `{"kind":"configuration"}`, heading: "Сводка XML метаданных не получена", wants: []string{"source unavailable"}},
@@ -429,6 +435,10 @@ func protocolSites() []protocolSite {
 		return onec.ObjectStructure{}, true, errDumpSubsystemPanic
 	}
 	return []protocolSite{
+		{"patterns decode", `form_patterns.go "parsing input"`, func(t *testing.T) mcp.ToolHandler { return NewFormPatternsHandler() }, `not json`, jsonrpc.CodeInvalidParams},
+		{"schema decode", `schema_registration.go "parsing input"`, func(t *testing.T) mcp.ToolHandler { return NewSchemaRegistrationHandler("") }, `not json`, jsonrpc.CodeInvalidParams},
+		{"grid decode", `image_grid.go "parsing input"`, func(t *testing.T) mcp.ToolHandler { return NewImageGridHandler("") }, `not json`, jsonrpc.CodeInvalidParams},
+		{"help decode", `help_add.go "parsing input"`, func(t *testing.T) mcp.ToolHandler { return NewHelpAddHandler("", nil) }, `not json`, jsonrpc.CodeInvalidParams},
 		{"count decode", `record_count.go "parsing input"`, func(t *testing.T) mcp.ToolHandler { return NewRecordCountHandler(nil) }, `not json`, jsonrpc.CodeInvalidParams},
 		{"metadata summary decode", `metadata_summary.go "parsing input"`, func(t *testing.T) mcp.ToolHandler { return NewMetadataSummaryHandler("") }, `not json`, jsonrpc.CodeInvalidParams},
 		{"analyze_subsystems decode", `analyze_subsystems.go "parsing input"`,

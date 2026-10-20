@@ -164,7 +164,7 @@ func hasError(log string) bool { return strings.Contains(log, "level=ERROR") }
 // The old check compared for equality, so it reported that healthy, supported,
 // officially-fine deployment as an ERROR on every single start.
 func TestVersionProbe_SupportedPairingIsNotAnError(t *testing.T) {
-	for _, newer := range []string{"0.7.4", "0.4.9", "1.0.0", "0.5.0-beta"} {
+	for _, newer := range []string{"0.7.4", expectedExtensionVersion, "1.0.0", "0.5.0-beta"} {
 		t.Run(newer, func(t *testing.T) {
 			got := versionAnswer(t, newer)
 			if hasError(got) {
@@ -185,7 +185,7 @@ func TestVersionProbe_SupportedPairingIsNotAnError(t *testing.T) {
 // TestVersionProbe_TooOldIsStillReported keeps the fix from becoming useless.
 // Below the constant the pairing is genuinely broken, and that must still speak.
 func TestVersionProbe_TooOldIsStillReported(t *testing.T) {
-	for _, older := range []string{"0.4.5", "0.4.0", "0.3.9"} {
+	for _, older := range []string{"0.4.9", "0.4.5", "0.4.0", "0.3.9"} {
 		t.Run(older, func(t *testing.T) {
 			got := versionAnswer(t, older)
 			if !hasError(got) {

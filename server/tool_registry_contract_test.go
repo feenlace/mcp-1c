@@ -65,6 +65,10 @@ var wantTools = map[string]toolExpect{
 	"count_records":          {},
 	"metadata_summary":       {},
 	"environment_passport":   {},
+	"form_patterns":          {},
+	"register_schema":        {},
+	"image_grid":             {},
+	"help_add":               {},
 	"analyze_subsystems":     {},
 	"bsl_syntax_help":        {protocolOnly: true},
 	"search_code":            {needsDump: true},
@@ -76,11 +80,11 @@ const (
 	// against len(wantTools) would let an emptied table agree with an empty
 	// server, which is the vacuous pass this guard is written to be unable to
 	// produce.
-	wantToolsWithDump = 15
+	wantToolsWithDump = 19
 
 	// wantToolsWithoutDump is the same fact measured the other way: server.go
 	// registers the search_code / reload_dump pair together or not at all.
-	wantToolsWithoutDump = 13
+	wantToolsWithoutDump = 17
 )
 
 // registryContract is what a live session reported.

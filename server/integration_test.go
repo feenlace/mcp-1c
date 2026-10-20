@@ -572,6 +572,7 @@ func TestIntegration_ListTools(t *testing.T) {
 		"search_code", "reload_dump", "get_form_structure", "validate_query",
 		"get_event_log", "get_configuration_info", "bsl_syntax_help",
 		"analyze_subsystems", "get_storage_structure", "count_records", "metadata_summary", "environment_passport",
+		"form_patterns", "register_schema", "image_grid", "help_add",
 	}
 	for _, want := range expected {
 		if !toolNames[want] {

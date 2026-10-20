@@ -15,6 +15,7 @@ type Options struct {
 	SourceRoot  string
 	ProjectRoot string
 	Passport    tools.PassportContext
+	HelpCheck   *tools.HelpCheckConfig
 }
 
 func New(version string, onecClient *onec.Client, dumpIndex *dump.Index) *mcp.Server {
@@ -83,6 +84,10 @@ func NewWithOptions(version string, onecClient *onec.Client, dumpIndex *dump.Ind
 	}
 	passport.SourceRoot = opts.SourceRoot
 	s.AddTool(tools.EnvironmentPassportTool(), tools.NewEnvironmentPassportHandler(onecClient, passport))
+	s.AddTool(tools.FormPatternsTool(), tools.NewFormPatternsHandler())
+	s.AddTool(tools.SchemaRegistrationTool(), tools.NewSchemaRegistrationHandler(opts.ProjectRoot))
+	s.AddTool(tools.ImageGridTool(), tools.NewImageGridHandler(opts.ProjectRoot))
+	s.AddTool(tools.HelpAddTool(), tools.NewHelpAddHandler(opts.ProjectRoot, opts.HelpCheck))
 	// analyze_subsystems answers from the dump when present (nil source -> live).
 	s.AddTool(tools.AnalyzeSubsystemsTool(), tools.NewAnalyzeSubsystemsHandlerWithSource(onecClient, tools.DumpSubsystemForestFunc(dumpDir)))
 	tools.RegisterBSLHelp(s)

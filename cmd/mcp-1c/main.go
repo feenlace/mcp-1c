@@ -29,7 +29,7 @@ import (
 //	go build -ldflags "-X main.version=0.4.2-beta" ./cmd/mcp-1c
 var version = "dev"
 
-const expectedExtensionVersion = "0.4.9"
+const expectedExtensionVersion = "0.4.10"
 
 func main() {
 	// realStderr is fd 2 as the process was launched with, captured before any
@@ -58,6 +58,9 @@ func main() {
 	user := flag.String("user", "", "1C HTTP service user")
 	password := flag.String("password", "", "1C HTTP service password")
 	projectRoot := flag.String("project-root", "", "Explicit project directory for local helpers; without --dump, metadata XML can be read here without a code index")
+	nativeCheckPlatform := flag.String("native-check-platform", "", "Explicit installed Designer executable for trusted external-object builds; requires native-check-file-db and native-check-output-root")
+	nativeCheckFileDB := flag.String("native-check-file-db", "", "Explicit owned synthetic file database directory for help source builds only")
+	nativeCheckOutputRoot := flag.String("native-check-output-root", "", "Existing separate output directory for explicitly requested trusted help source builds")
 	dumpDir := flag.String("dump", "", "Path to DumpConfigToFiles output (enables search_code)")
 	cacheDir := flag.String("cache-dir", "", "Directory for index cache and logs (default: platform cache dir)")
 	reindex := flag.Bool("reindex", false, "Force rebuild of search index cache")
@@ -319,6 +322,13 @@ func main() {
 	}
 
 	localOptions := localToolOptions(version, *dumpDir, *projectRoot, *baseURL != "" || os.Getenv("MCP_1C_BASE_URL") != "")
+	if *nativeCheckPlatform != "" || *nativeCheckFileDB != "" || *nativeCheckOutputRoot != "" {
+		if *nativeCheckPlatform == "" || *nativeCheckFileDB == "" || *nativeCheckOutputRoot == "" {
+			reportStartupFailure(realStderr, fmt.Errorf("native help check requires all three explicit options: --native-check-platform, --native-check-file-db, --native-check-output-root"))
+			return
+		}
+		localOptions.HelpCheck = &tools.HelpCheckConfig{PlatformExecutable: *nativeCheckPlatform, TargetFileDatabase: *nativeCheckFileDB, OutputRoot: *nativeCheckOutputRoot}
+	}
 	if *projectRoot != "" {
 		if err := dumpPathFault(*projectRoot); err != nil {
 			reportStartupFailure(realStderr, fmt.Errorf("--project-root requires an existing directory"))
@@ -944,7 +954,7 @@ func compareExtensionVersions(a, b string) (int, bool) {
 //     therefore make the NEXT start discard the operator's whole history.
 //
 // The number is set against what a version actually is. The longest this
-// repository produces or names are the extension's own 0.4.9 and platform builds
+// repository produces or names are the extension's own 0.4.10 and platform builds
 // like 8.3.27.2130, eleven bytes; a pre-release suffix such as 0.5.0-beta adds a
 // few more. 128 bytes is an order of magnitude above the longest of those and
 // still one line in a log. A value over it is not shortened into a version, it is

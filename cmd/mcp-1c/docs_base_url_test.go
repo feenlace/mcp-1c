@@ -293,7 +293,7 @@ func TestDocsMatchBaseURLBehaviour(t *testing.T) {
 	// quoting {"version":"0.4.7"} unwatched, because that number is then stale and
 	// in no list. The assertion under the loop is what forces the list to be
 	// extended along with the constant instead of quietly losing a number.
-	staleVersions := []string{"0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8", "0.4.9"}
+	staleVersions := []string{"0.4.3", "0.4.4", "0.4.5", "0.4.6", "0.4.7", "0.4.8", "0.4.9", "0.4.10"}
 	currentIsListed := false
 	for _, v := range staleVersions {
 		if v == expectedExtensionVersion {

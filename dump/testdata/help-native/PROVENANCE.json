@@ -1,0 +1,15 @@
+{
+  "producer": "native Designer8.3.27.2130 canonical hierarchical dump after owned synthetic seed build",
+  "profile": "2.20",
+  "source_report": "feature07/native-help/PREFLIGHT.md",
+  "files": [
+    {
+      "name": "HelpProbeProcessor.xml",
+      "sha256": "b00bbd049bffd9072a1848f0562de3ff8b6ce80cd0304c28e2d53e8c304adb09"
+    },
+    {
+      "name": "HelpProbeReport.xml",
+      "sha256": "3168083f511e95fd6e9dc1254251fb9014e8f6308157eba0fe7c9ee5e3260c74"
+    }
+  ]
+}
