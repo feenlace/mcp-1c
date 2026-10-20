@@ -161,6 +161,7 @@ const (
 	headingForm          = "Структура формы не получена"
 	headingEventLog      = "Журнал регистрации не прочитан"
 	headingConfigInfo    = "Сведения о конфигурации не получены"
+	headingStorage       = "Структура хранения не получена"
 	headingSubsystems    = "Анализ подсистем не выполнен"
 	headingSearch        = "Поиск по выгрузке не выполнен"
 	headingReload        = "Перезагрузка выгрузки не выполнена"

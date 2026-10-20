@@ -305,6 +305,35 @@
 					</Method>
 				</ChildObjects>
 			</URLTemplate>
+			<URLTemplate uuid="890adb36-6453-4e25-a520-e2a8a33c9b34">
+				<Properties>
+					<Name>СтруктураХранения</Name>
+					<Synonym>
+						<v8:item>
+							<v8:lang>ru</v8:lang>
+							<v8:content>Структура хранения</v8:content>
+						</v8:item>
+					</Synonym>
+					<Comment/>
+					<Template>/storage/{type}/{name}</Template>
+				</Properties>
+				<ChildObjects>
+					<Method uuid="2003df0a-7dc8-4d32-ac15-93b15023d361">
+						<Properties>
+							<Name>GET</Name>
+							<Synonym>
+								<v8:item>
+									<v8:lang>ru</v8:lang>
+									<v8:content>GET</v8:content>
+								</v8:item>
+							</Synonym>
+							<Comment/>
+							<HTTPMethod>GET</HTTPMethod>
+							<Handler>СтруктураХраненияGET</Handler>
+						</Properties>
+					</Method>
+				</ChildObjects>
+			</URLTemplate>
 		</ChildObjects>
 	</HTTPService>
 </MetaDataObject>

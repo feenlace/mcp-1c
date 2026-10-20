@@ -140,6 +140,18 @@ func operationalSites() []operationalSite {
 			heading: headingConfigInfo, wants: []string{oops},
 		},
 		{
+			name: "storage_structure arguments required", site: `storage_structure.go "object_type and object_name are required"`,
+			build:   func(t *testing.T) mcp.ToolHandler { return NewStorageStructureHandler(envelope1C(t, 500, oops)) },
+			args:    `{"object_type":"Catalog"}`,
+			heading: headingStorage, wants: []string{"object_type and object_name are required"},
+		},
+		{
+			name: "storage_structure fetch", site: `storage_structure.go "fetching storage structure from 1C"`,
+			build:   func(t *testing.T) mcp.ToolHandler { return NewStorageStructureHandler(envelope1C(t, 500, oops)) },
+			args:    `{"object_type":"Catalog","object_name":"Номенклатура"}`,
+			heading: headingStorage, wants: []string{oops},
+		},
+		{
 			name: "eventlog read", site: `eventlog.go "reading event log from 1C"`,
 			build:   func(t *testing.T) mcp.ToolHandler { return NewEventLogHandler(envelope1C(t, 500, oops)) },
 			args:    `{}`,
@@ -425,6 +437,9 @@ func protocolSites() []protocolSite {
 			`not json`, jsonrpc.CodeInvalidParams},
 		{"object_structure decode", `object_structure.go "parsing input"`,
 			func(t *testing.T) mcp.ToolHandler { return NewObjectStructureHandler(envelope1C(t, 500, oops)) },
+			`not json`, jsonrpc.CodeInvalidParams},
+		{"storage_structure decode", `storage_structure.go "parsing input"`,
+			func(t *testing.T) mcp.ToolHandler { return NewStorageStructureHandler(envelope1C(t, 500, oops)) },
 			`not json`, jsonrpc.CodeInvalidParams},
 		{"query decode", `query.go "parsing input"`,
 			func(t *testing.T) mcp.ToolHandler { return NewQueryHandler(envelope1C(t, 500, oops)) },
