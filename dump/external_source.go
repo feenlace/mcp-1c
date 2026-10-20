@@ -107,6 +107,40 @@ func openExternalRoot(path string) (*os.Root, error) {
 	return r, nil
 }
 
+// Token accepts XML fragments too; external source files must be whole documents.
+func externalXMLDocument(data []byte) error {
+	d := xml.NewDecoder(bytes.NewReader(bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})))
+	depth, roots := 0, 0
+	for {
+		t, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return errors.New("malformed referenced source XML")
+		}
+		switch t := t.(type) {
+		case xml.StartElement:
+			if depth == 0 {
+				roots++
+			}
+			depth++
+		case xml.EndElement:
+			depth--
+		case xml.CharData:
+			if depth == 0 && strings.Trim(string(t), " \t\r\n") != "" {
+				return errors.New("referenced source XML has text outside its root")
+			}
+		case xml.Directive:
+			return errors.New("referenced source XML directives are unsupported")
+		}
+	}
+	if roots != 1 || depth != 0 {
+		return errors.New("referenced source XML requires exactly one root")
+	}
+	return nil
+}
+
 // InspectExternalSource admits the native-proven hierarchical2.20 external object profile.
 // The digest is SHA256 of sorted UTF-8 relative-path + NUL + file SHA256 + LF records.
 // It binds the root XML and every regular file below the selected object's directory, not unrelated projects.
@@ -178,7 +212,7 @@ func InspectExternalSource(ctx context.Context, projectRoot, manifest string) (E
 		case xml.CharData:
 			if nameDepth != 0 {
 				out.Name += string(t)
-			} else if depth == 0 && strings.TrimSpace(string(t)) != "" {
+			} else if depth == 0 && strings.Trim(string(t), " \t\r\n") != "" {
 				return out, errors.New("external manifest has text outside its root")
 			}
 		case xml.Directive:
@@ -228,18 +262,8 @@ func InspectExternalSource(ctx context.Context, projectRoot, manifest string) (E
 				return errors.New("external source exceeds32MiB")
 			}
 			if strings.EqualFold(filepath.Ext(path), ".xml") {
-				decoder := xml.NewDecoder(bytes.NewReader(bytes.TrimPrefix(b, []byte{0xef, 0xbb, 0xbf})))
-				for {
-					t, e := decoder.Token()
-					if e == io.EOF {
-						break
-					}
-					if e != nil {
-						return errors.New("malformed referenced source XML")
-					}
-					if _, ok := t.(xml.Directive); ok {
-						return errors.New("referenced source XML directives are unsupported")
-					}
+				if err := externalXMLDocument(b); err != nil {
+					return err
 				}
 			}
 			out.Files = append(out.Files, ExternalSourceFile{Path: path, SHA256: externalHash(b), Size: int64(len(b))})

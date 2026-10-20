@@ -96,12 +96,16 @@ func helpDescriptor(data []byte) ([]byte, error) {
 			if depth == 1 {
 				roots++
 				version := ""
+				defaultNamespace := ""
 				for _, a := range t.Attr {
 					if a.Name.Local == "version" {
 						version = a.Value
 					}
+					if a.Name.Space == "" && a.Name.Local == "xmlns" {
+						defaultNamespace = a.Value
+					}
 				}
-				if roots != 1 || t.Name.Local != "Help" || t.Name.Space != "http://v8.1c.ru/8.3/xcf/extrnprops" || version != "2.20" {
+				if roots != 1 || t.Name.Local != "Help" || t.Name.Space != "http://v8.1c.ru/8.3/xcf/extrnprops" || defaultNamespace != t.Name.Space || version != "2.20" {
 					return nil, errors.New("unsupported help descriptor profile")
 				}
 			}
@@ -112,6 +116,8 @@ func helpDescriptor(data []byte) ([]byte, error) {
 		case xml.CharData:
 			if inside {
 				page += string(t)
+			} else if depth == 0 && strings.Trim(string(t), " \t\r\n") != "" {
+				return nil, errors.New("help descriptor has text outside its root")
 			}
 		case xml.EndElement:
 			if depth == 2 && inside {
@@ -121,6 +127,9 @@ func helpDescriptor(data []byte) ([]byte, error) {
 				inside = false
 			}
 			if depth == 1 {
+				if before == d.InputOffset() {
+					return nil, errors.New("self-closing help descriptor root is unsupported; use the native explicit-closing profile")
+				}
 				end = before
 			}
 			depth--
@@ -143,7 +152,26 @@ func helpDescriptor(data []byte) ([]byte, error) {
 	}
 	result := append([]byte(nil), data[:end]...)
 	result = append(result, []byte("\t<Page>ru</Page>\r\n")...)
-	return append(result, data[end:]...), nil
+	result = append(result, data[end:]...)
+	if err := externalXMLDocument(result); err != nil {
+		return nil, err
+	}
+	var check struct {
+		Pages []string `xml:"http://v8.1c.ru/8.3/xcf/extrnprops Page"`
+	}
+	if err := xml.Unmarshal(bytes.TrimPrefix(result, []byte{0xef, 0xbb, 0xbf}), &check); err != nil {
+		return nil, errors.New("malformed updated help descriptor")
+	}
+	count := 0
+	for _, page := range check.Pages {
+		if page == "ru" {
+			count++
+		}
+	}
+	if count != 1 {
+		return nil, errors.New("updated help descriptor requires one ru Page in the native namespace")
+	}
+	return result, nil
 }
 
 func helpToken() string { var b [12]byte; _, _ = rand.Read(b[:]); return hex.EncodeToString(b[:]) }
