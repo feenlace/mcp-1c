@@ -13,6 +13,37 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Exercise the actual mock endpoint through the public typed operation; a
+// separate handcrafted response would miss drift between these two contracts.
+func TestHandleStorage_TypedClientContract(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp/storage/", handleStorage)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	client := onec.NewClient(srv.URL+"/mcp", "", "")
+	for _, tc := range []struct {
+		kind, name, fullName string
+	}{
+		{"Catalog", "Номенклатура", "Справочник.Номенклатура"},
+		{"Document", "РеализацияТоваровУслуг", "Документ.РеализацияТоваровУслуг"},
+		{"AccumulationRegister", "ТоварыНаСкладах", "РегистрНакопления.ТоварыНаСкладах"},
+		{"DefinedType", "ЗначениеДоступа", "ОпределяемыйТип.ЗначениеДоступа"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			st, err := client.GetStorageStructure(context.Background(), tc.kind, tc.name)
+			if err != nil {
+				t.Fatalf("mock response rejected by typed client: %v", err)
+			}
+			if st.Name != tc.name || st.FullName != tc.fullName || len(st.Tables) != 1 {
+				t.Fatalf("unexpected mock identity/map: %+v", st)
+			}
+			if table := st.Tables[0]; table.TableName != tc.fullName || table.Metadata != tc.fullName {
+				t.Fatalf("table identity differs from selected object: %+v", table)
+			}
+		})
+	}
+}
+
 // TestHandleObject_DefinedType exercises the offline DefinedType fixture: the
 // mock server must serve a "types" composition that round-trips into
 // onec.ObjectStructure with no live 1C involved.

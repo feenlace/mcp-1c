@@ -682,13 +682,22 @@ func handleStorage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Object not found"})
 		return
 	}
+	// Match the technical metadata names used by the existing mock fixtures.
+	prefix := map[string]string{
+		"Catalog":              "Справочник",
+		"Document":             "Документ",
+		"AccumulationRegister": "РегистрНакопления",
+		"DefinedType":          "ОпределяемыйТип",
+		"Subsystem":            "Подсистема",
+	}[parts[0]]
+	fullName := prefix + "." + parts[1]
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":      parts[1],
-		"full_name": parts[0] + "." + parts[1],
+		"full_name": fullName,
 		"tables": []map[string]any{{
 			"storage_name": "_Reference100",
-			"table_name":   parts[0] + "." + parts[1],
-			"metadata":     parts[0] + "." + parts[1],
+			"table_name":   fullName,
+			"metadata":     fullName,
 			"purpose":      "Основная",
 			"fields": []map[string]string{
 				{"name": "Ссылка", "storage_name": "_IDRRef", "metadata": ""},
