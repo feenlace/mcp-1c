@@ -89,6 +89,7 @@ func TestStorageStructureHandler(t *testing.T) {
 	for _, want := range []string{
 		"# Хранение `Справочник.Номенклатура` в СУБД",
 		"Таблиц: 2.",
+		"Пустые метаданные означают, что платформа не вернула сопоставление",
 		"## `_Reference441` (Основная)",
 		"Имя в языке запросов: `Справочник.Номенклатура`",
 		"| Артикул | _Fld52474 | Справочник.Номенклатура.Реквизит.Артикул |",
@@ -105,7 +106,7 @@ func TestStorageStructureHandler(t *testing.T) {
 
 func TestStorageStructureHandler_NoTables(t *testing.T) {
 	st := onec.StorageStructure{Name: "Тест", FullName: "Обработка.Тест"}
-	text := formatStorageStructure(&st)
+	text := FormatStorageStructure(&st)
 	if !strings.Contains(text, "нет собственных таблиц") {
 		t.Errorf("an object without tables must say so, got:\n%s", text)
 	}
@@ -159,5 +160,64 @@ func TestStorageStructureTool(t *testing.T) {
 	}
 	if len(schema.Required) != 2 {
 		t.Errorf("expected object_type and object_name to be required, got %v", schema.Required)
+	}
+}
+
+func TestStorageStructureHandler_RejectsRouteInjection(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(storageMockResponse))
+	}))
+	defer srv.Close()
+	client := onec.NewClient(srv.URL, "", "")
+	for _, input := range [][2]string{
+		{"Catalog", "Номенклатура#ignored"}, {"Catalog", "Номенклатура?ignored=1"},
+		{"Catalog", "../Номенклатура"}, {"Catalog", "Номенклатура/Другая"},
+		{"Catalog", "Номенклатура%23ignored"}, {"Catalog", "Номенклатура\n"},
+		{"Catalog", "1Номенклатура"}, {"Catalog/Document", "Номенклатура"},
+		{"Unknown", "Номенклатура"},
+	} {
+		t.Run(input[0]+"/"+input[1], func(t *testing.T) {
+			args, _ := json.Marshal(map[string]string{"object_type": input[0], "object_name": input[1]})
+			res, err := callStorage(t, client, string(args))
+			if err != nil || res == nil || !res.IsError {
+				t.Fatalf("invalid metadata input must fail, got result=%+v err=%v", res, err)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Errorf("invalid input dispatched %d requests; want none", requests)
+	}
+}
+
+func TestStorageStructureHandler_ResponseContract(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		wantError  bool
+	}{
+		{"empty object", `{}`, true},
+		{"null", `null`, true},
+		{"200 error", `{"error":"upstream unavailable"}`, true},
+		{"missing tables", `{"name":"Номенклатура","full_name":"Справочник.Номенклатура"}`, true},
+		{"null tables", `{"name":"Номенклатура","full_name":"Справочник.Номенклатура","tables":null}`, true},
+		{"wrong identity", `{"name":"Другая","full_name":"Справочник.Другая","tables":[]}`, true},
+		{"wrong kind", `{"name":"Номенклатура","full_name":"Документ.Номенклатура","tables":[]}`, true},
+		{"incomplete table", `{"name":"Номенклатура","full_name":"Справочник.Номенклатура","tables":[{}]}`, true},
+		{"missing field storage name", `{"name":"Номенклатура","full_name":"Справочник.Номенклатура","tables":[{"storage_name":"_Reference1","fields":[{}],"indexes":[]}]}`, true},
+		{"missing index fields", `{"name":"Номенклатура","full_name":"Справочник.Номенклатура","tables":[{"storage_name":"_Reference1","fields":[],"indexes":[{}]}]}`, true},
+		{"truncated json", `{"name":"Номенклатура","tables":[`, true},
+		{"case-insensitive identity", `{"name":"номенклатура","full_name":"Справочник.номенклатура","tables":[]}`, false},
+		{"valid empty", `{"name":"Номенклатура","full_name":"Справочник.Номенклатура","tables":[]}`, false},
+		{"valid mapped", storageMockResponse, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
+			defer srv.Close()
+			res, err := callStorage(t, onec.NewClient(srv.URL, "", ""), `{"object_type":"Catalog","object_name":"Номенклатура"}`)
+			if err != nil || res == nil || res.IsError != tc.wantError {
+				t.Fatalf("want IsError=%v, result=%+v err=%v", tc.wantError, res, err)
+			}
+		})
 	}
 }

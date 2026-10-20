@@ -15,10 +15,10 @@ func StorageStructureTool() *mcp.Tool {
 	return &mcp.Tool{
 		Name:  "get_storage_structure",
 		Title: "Таблицы СУБД объекта",
-		Description: "Получить таблицы, колонки и индексы СУБД (PostgreSQL, MS SQL и др.), в которых платформа 1С хранит объект метаданных: " +
+		Description: "Получить таблицы, колонки и индексы СУБД, в которых платформа 1С хранит выбранный объект метаданных: " +
 			"какой таблице вида _Reference123 соответствует справочник, какой колонке вида _Fld456 соответствует реквизит, где лежат табличные части, итоги и регистрация изменений. " +
 			"Ответ приходит от самой платформы (ПолучитьСтруктуруХраненияБазыДанных), поэтому имена точные для этой базы. " +
-			"Используй, когда нужно связать объект 1С с таблицей базы данных: прямой SQL-запрос к базе, разбор плана запроса, анализ размера таблиц, сопоставление имён из журнала СУБД. " +
+			"Используй, когда нужно сопоставить объект 1С с физическими именами из журнала или плана запроса СУБД. Размеры таблиц и выполнение SQL не предоставляются. " +
 			"Для состава реквизитов и типов полей вызывай get_object_structure, этот инструмент показывает только хранение.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		InputSchema: json.RawMessage(`{
@@ -51,22 +51,21 @@ func NewStorageStructureHandler(client *onec.Client) mcp.ToolHandler {
 		if input.ObjectType == "" || input.ObjectName == "" {
 			return nil, fmt.Errorf("object_type and object_name are required")
 		}
-
-		endpoint := fmt.Sprintf("/storage/%s/%s", input.ObjectType, input.ObjectName)
-		var st onec.StorageStructure
-		if err := client.Get(ctx, endpoint, &st); err != nil {
+		st, err := client.GetStorageStructure(ctx, input.ObjectType, input.ObjectName)
+		if err != nil {
 			return nil, fmt.Errorf("fetching storage structure from 1C: %w", err)
 		}
 
-		return textResult(formatStorageStructure(&st)), nil
+		return textResult(FormatStorageStructure(st)), nil
 	})
 }
 
-// formatStorageStructure renders the storage structure as markdown. Every name
-// on the page comes from 1C and is contained with inlineCode where it stands
+// FormatStorageStructure renders a storage structure as markdown for composition
+// by callers that fetch typed data through onec.Client.GetStorageStructure.
+// Every name on the page comes from 1C and is contained with inlineCode where it stands
 // alone on a heading line (the same containment formatObjectStructure uses).
 // Customer-facing RU: no em/en dash.
-func formatStorageStructure(st *onec.StorageStructure) string {
+func FormatStorageStructure(st *onec.StorageStructure) string {
 	var b strings.Builder
 
 	title := st.FullName
@@ -81,6 +80,7 @@ func formatStorageStructure(st *onec.StorageStructure) string {
 	}
 
 	fmt.Fprintf(&b, "Таблиц: %d. Имена колонок даны так, как их видит СУБД; в PostgreSQL они хранятся в нижнем регистре.\n\n", len(st.Tables))
+	b.WriteString("Пустые метаданные означают, что платформа не вернула сопоставление с реквизитом; у служебных полей его может не быть.\n\n")
 
 	for _, t := range st.Tables {
 		fmt.Fprintf(&b, "## %s (%s)\n", inlineCode(t.StorageName), t.Purpose)
