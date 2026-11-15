@@ -279,6 +279,9 @@ func validateWebOrigin(origin string) error {
 			portOK = false
 		}
 		ip := net.ParseIP(host)
+		if strings.HasPrefix(u.Host, "[") && ip == nil {
+			portOK = false
+		}
 		if ip != nil {
 			if ip.String() != host {
 				portOK = false
