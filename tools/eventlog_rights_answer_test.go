@@ -104,6 +104,7 @@ func TestEventLogRefusalBlamesTheAccountNotTheFilter(t *testing.T) {
 		"Это отказ по правам учётной записи, а не по отбору",
 		"право Администрирование",
 		"`--user`",
+		"При EPF это текущий пользователь",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the answer does not carry %q:\n%s", want, text)

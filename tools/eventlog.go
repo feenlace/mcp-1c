@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -28,7 +29,7 @@ const (
 // call site in this repository, tools/bsl_help.go RegisterBSLHelp. Measured
 // with `grep -rnE 'mcp\.AddTool\(' tools server cmd prompts | grep -v _test.go`,
 // which returns that one line; the mentions in comments do not match it because
-// they are not call syntax. So for the other ten tools the enum in the schema is
+// they are not call syntax. So for the other non-generic tool registrations the enum in the schema is
 // a hint to the model and nothing more, and a value outside it arrives at the
 // handler unremarked.
 //
@@ -63,8 +64,8 @@ const eventPresentationLabel = "Представление события"
 // EventLogTool returns the MCP tool definition for get_event_log.
 func EventLogTool() *mcp.Tool {
 	return &mcp.Tool{
-		Name:  "get_event_log",
-		Title: "Журнал регистрации",
+		Name:        "get_event_log",
+		Title:       "Журнал регистрации",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Прочитать журнал регистрации 1С — лог ошибок, действий пользователей и системных событий. " +
 			"Фильтрация по дате, уровню важности (Ошибка/Предупреждение/Информация/Примечание), " +
@@ -74,6 +75,7 @@ func EventLogTool() *mcp.Tool {
 		// copy of it.
 		InputSchema: json.RawMessage(`{
 			"type": "object",
+ "additionalProperties":false,
 			"properties": {
 				"start_date": {
 					"type": "string",
@@ -106,11 +108,30 @@ func EventLogTool() *mcp.Tool {
 	}
 }
 
+// An unrecognized or null filter must not silently become an unfiltered read.
+func decodeEventLogInput(data []byte, out *onec.EventLogRequest) error {
+	var fields map[string]json.RawMessage
+	if err := localDecode(data, &fields); err != nil {
+		return err
+	}
+	for name, value := range fields {
+		switch name {
+		case "start_date", "end_date", "level", "event", "user", "limit":
+		default:
+			return fmt.Errorf("unsupported event log property: %q", name)
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("event log property %q must not be null", name)
+		}
+	}
+	return json.Unmarshal(data, out)
+}
+
 // NewEventLogHandler returns a ToolHandler that reads the 1C event log.
 func NewEventLogHandler(client *onec.Client) mcp.ToolHandler {
 	return WithToolErrors(headingEventLog, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var body onec.EventLogRequest
-		if err := json.Unmarshal(req.Params.Arguments, &body); err != nil {
+		if err := decodeEventLogInput(req.Params.Arguments, &body); err != nil {
 			return nil, InvalidParams(argumentDecodeError(err))
 		}
 		// Operational, not InvalidParams: this is a VALUE the caller chose, and

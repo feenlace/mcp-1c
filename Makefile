@@ -1,4 +1,4 @@
-.PHONY: build test clean release mock
+.PHONY: build test clean release mock local-epf-rc
 
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -22,3 +22,7 @@ release:
 
 mock:
 	go run ./cmd/mock-1c
+
+# Local evidence-bound candidate only; RC_OUTPUT must be a new directory.
+local-epf-rc:
+	python3 epf/tools/stage_local_rc.py --output "$(RC_OUTPUT)" $(if $(RC_PROOF),--proof "$(RC_PROOF)")

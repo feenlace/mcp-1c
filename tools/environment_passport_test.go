@@ -117,3 +117,46 @@ func TestPassportVersionsNeverEchoOpaqueSuffixes(t *testing.T) {
 		}
 	}
 }
+
+// The server-selected transport, never a worker's version claim, selects the namespace.
+func TestPassportEPFVersionIsNotAnInstalledExtension(t *testing.T) {
+	for _, tc := range []struct {
+		name, transport, body, wantExtension, wantConnector, wantStatus string
+		wantProtocol                                                    int
+	}{
+		{"epf", "epf", `{"version":"9.9.9","connector_version":"0.1.0+private-host.invalid","protocol":1}`, "", "0.1.0", "available", 1},
+		{"http", "http", `{"version":"9.9.9","connector_version":[],"protocol":"unrelated"}`, "9.9.9", "", "available", 0},
+		{"epf_cfe_claim_only", "epf", `{"version":"9.9.9"}`, "", "", "unavailable", 0},
+		{"epf_unknown_protocol", "epf", `{"connector_version":"0.1.0","protocol":99}`, "", "", "unsupported", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := onec.NewClient("http://fixture", "", "")
+			client.HTTPClient.Transport = passportRoundTrip(func(r *http.Request) (*http.Response, error) {
+				body := tc.body
+				if strings.HasSuffix(r.URL.Path, "/configuration") {
+					body = `{"name":"Fixture"}`
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			p, err := ReadEnvironmentPassport(context.Background(), client, PassportContext{Mode: ModeLive, Transport: tc.transport})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := json.Marshal(p)
+			var fields map[string]any
+			_ = json.Unmarshal(b, &fields)
+			connector, _ := fields["native_connector_version"].(string)
+			protocol, _ := fields["native_connector_protocol"].(float64)
+			source := "live_extension"
+			if tc.transport == "epf" {
+				source = "live_connector"
+			}
+			if p.ExtensionVersion != tc.wantExtension || connector != tc.wantConnector || int(protocol) != tc.wantProtocol || p.VersionStatus.Status != tc.wantStatus || p.VersionStatus.Source != source {
+				t.Fatalf("wrong version namespace/status: extension=%q connector=%q protocol=%v source=%q status=%q", p.ExtensionVersion, connector, protocol, p.VersionStatus.Source, p.VersionStatus.Status)
+			}
+			if strings.Contains(string(b), "private-host.invalid") {
+				t.Fatal("opaque version suffix exposed")
+			}
+		})
+	}
+}

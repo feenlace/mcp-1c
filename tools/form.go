@@ -1037,6 +1037,9 @@ func mergeDumpIntoForm(form *onec.FormStructure, dumpForm *onec.FormStructure, d
 	if form.Title == "" {
 		form.Title = dumpForm.Title
 	}
+	if suppliesStructure(dumpForm, dumpLists) {
+		form.Warnings = nil
+	}
 	if len(dumpForm.Elements) > 0 {
 		form.Elements = dumpForm.Elements
 	}
@@ -1080,6 +1083,9 @@ func formatFormStructure(f *onec.FormStructure, lists []dump.FormDynamicList) st
 		fmt.Fprintf(&b, "**Заголовок:** %s\n", f.Title)
 	}
 	b.WriteByte('\n')
+	if len(f.Warnings) > 0 {
+		fmt.Fprintf(&b, "> Диагностика источника формы: %s\n\n", diagnosticCauses(f.Warnings))
+	}
 
 	if len(f.Elements) > 0 {
 		b.WriteString("## Элементы формы\n\n")

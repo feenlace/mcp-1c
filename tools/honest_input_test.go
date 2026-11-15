@@ -431,7 +431,7 @@ func exprText(e ast.Expr) string {
 func mustArgs(t *testing.T, property, value string) string {
 	t.Helper()
 	m := map[string]string{property: value}
-	if property != "query" {
+	if property == "mode" || property == "namespace" {
 		// search_code requires query; supplying it keeps the mode check the
 		// only thing under test.
 		m["query"] = "Процедура"

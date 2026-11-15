@@ -1,0 +1,6 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.16">
+<ExternalDataProcessor uuid="7a90d608-0770-4a31-b77a-7e7829bed301"><InternalInfo>
+<xr:ContainedObject><xr:ClassId>c3831ec8-d8d5-4f93-8a22-f9bfae07327f</xr:ClassId><xr:ObjectId>108c6080-6399-44d3-aad4-736323cfd4d4</xr:ObjectId></xr:ContainedObject>
+<xr:GeneratedType name="ExternalDataProcessorObject.MCPConnector" category="Object"><xr:TypeId>6148a30b-dd35-4b29-9eab-83198cc76ad9</xr:TypeId><xr:ValueId>fd8821ad-73bb-4471-8c0b-1c61f312a9ab</xr:ValueId></xr:GeneratedType>
+</InternalInfo><Properties><Name>MCPConnector</Name><Synonym><v8:item><v8:lang>ru</v8:lang><v8:content>Подключение MCP</v8:content></v8:item></Synonym><Comment/><DefaultForm>ExternalDataProcessor.MCPConnector.Form.Main</DefaultForm><AuxiliaryForm/></Properties><ChildObjects><Form>Main</Form></ChildObjects></ExternalDataProcessor></MetaDataObject>

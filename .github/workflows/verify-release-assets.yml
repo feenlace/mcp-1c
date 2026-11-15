@@ -3,8 +3,8 @@ name: Verify release assets
 # The .cfe extension cannot be built in GitHub Actions (the 1C platform is not
 # available there), so the maintainer uploads it by hand after the Release
 # workflow has finished. This check therefore runs on demand: start it once the
-# manual upload is done. Running it inside the tag-triggered workflow would fail
-# every single time, because at that moment the .cfe does not exist yet.
+# manual uploads of the .cfe and common EPF are done. Running it inside the
+# tag-triggered workflow would fail because those assets do not exist yet.
 
 on:
   workflow_dispatch:
@@ -13,6 +13,11 @@ on:
         description: "Release tag to verify, for example v1.11.5"
         required: true
         type: string
+      require_epf:
+        description: "Require MCPConnector.epf (disable only for releases predating it)"
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -35,6 +40,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag }}
       EXPECTED_BINARIES: "6"
+      REQUIRE_EPF: ${{ inputs.require_epf }}
     steps:
       - name: List published assets
         run: |
@@ -43,7 +49,7 @@ jobs:
           echo "Assets published for ${TAG}:"
           cat assets.txt
 
-      - name: Require the binaries, checksums.txt and MCP_HTTPService.cfe
+      - name: Require the binaries and native assets
         run: |
           set -euo pipefail
           missing=0
@@ -53,6 +59,10 @@ jobs:
               missing=1
             fi
           done
+          if [ "${REQUIRE_EPF}" = "true" ] && ! grep -qxF 'MCPConnector.epf' assets.txt; then
+            echo "::error::release ${TAG} has no asset MCPConnector.epf"
+            missing=1
+          fi
           binaries=$(grep -c '^mcp-1c-' assets.txt || true)
           if [ "${binaries}" -ne "${EXPECTED_BINARIES}" ]; then
             echo "::error::release ${TAG} has ${binaries} mcp-1c-* assets, expected ${EXPECTED_BINARIES}"
@@ -68,6 +78,10 @@ jobs:
           cd published
           if ! grep -qF 'MCP_HTTPService.cfe' checksums.txt; then
             echo "::error::checksums.txt has no line for MCP_HTTPService.cfe"
+            exit 1
+          fi
+          if [ "${REQUIRE_EPF}" = "true" ] && ! awk '$2 == "MCPConnector.epf" {found=1} END {exit !found}' checksums.txt; then
+            echo "::error::checksums.txt has no line for MCPConnector.epf"
             exit 1
           fi
           sha256sum -c checksums.txt

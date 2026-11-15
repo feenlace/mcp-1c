@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.16">
+<Title><v8:item><v8:lang>ru</v8:lang><v8:content>Подключение MCP</v8:content></v8:item></Title><AutoTitle>false</AutoTitle><AutoCommandBar name="FormCommandBar" id="-1"/>
+<Events><Event name="OnOpen">OnOpen</Event><Event name="OnClose">OnClose</Event></Events><ChildItems>
+<InputField name="BridgePort" id="1"><DataPath>BridgePort</DataPath><Title><v8:item><v8:lang>ru</v8:lang><v8:content>Порт MCP-сервера</v8:content></v8:item></Title><ReadOnly>false</ReadOnly><PasswordMode>false</PasswordMode><ContextMenu name="BridgePortMenu" id="101"/><ExtendedTooltip name="BridgePortTip" id="201"/></InputField>
+<InputField name="PairingToken" id="2"><DataPath>PairingToken</DataPath><Title><v8:item><v8:lang>ru</v8:lang><v8:content>Код подключения</v8:content></v8:item></Title><ReadOnly>false</ReadOnly><PasswordMode>true</PasswordMode><ContextMenu name="PairingTokenMenu" id="102"/><ExtendedTooltip name="PairingTokenTip" id="202"/></InputField>
+<InputField name="ConnectionState" id="3"><DataPath>ConnectionState</DataPath><Title><v8:item><v8:lang>ru</v8:lang><v8:content>Состояние</v8:content></v8:item></Title><ReadOnly>true</ReadOnly><PasswordMode>false</PasswordMode><ContextMenu name="ConnectionStateMenu" id="103"/><ExtendedTooltip name="ConnectionStateTip" id="203"/></InputField>
+<Button name="ConnectButton" id="10"><Type>UsualButton</Type><CommandName>Form.Command.Connect</CommandName></Button>
+<Button name="DisconnectButton" id="11"><Type>UsualButton</Type><CommandName>Form.Command.Disconnect</CommandName></Button>
+</ChildItems><Attributes>
+<Attribute name="BridgePort" id="1"><Type><v8:Type>xs:decimal</v8:Type></Type></Attribute>
+<Attribute name="PairingToken" id="2"><Type><v8:Type>xs:string</v8:Type></Type></Attribute>
+<Attribute name="ConnectionState" id="3"><Type><v8:Type>xs:string</v8:Type></Type></Attribute>
+<Attribute name="SessionToken" id="4"><Type><v8:Type>xs:string</v8:Type></Type></Attribute>
+<Attribute name="NativeIdentity" id="5"><Type><v8:Type>xs:string</v8:Type></Type></Attribute>
+</Attributes><Commands>
+<Command name="Connect" id="1"><Title><v8:item><v8:lang>ru</v8:lang><v8:content>Подключить</v8:content></v8:item></Title><Action>Connect</Action></Command>
+<Command name="Disconnect" id="2"><Title><v8:item><v8:lang>ru</v8:lang><v8:content>Остановить</v8:content></v8:item></Title><Action>Disconnect</Action></Command>
+</Commands></Form>

@@ -38,3 +38,33 @@ func TestRecordCountHandlerRejectsCaseAliasBeforeTransport(t *testing.T) {
 		t.Fatalf("canonical retry failed: %+v %v calls=%d", result, err, calls)
 	}
 }
+
+func TestRecordCountNotFoundKeepsDomainDiagnostic(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		status  int
+		install bool
+	}{
+		{`{"error":"selected count object not found"}`, 404, false},
+		{`{"error":"selected count table is denied"}`, 403, false},
+		{`<html>not found</html>`, 404, true},
+	} {
+		t.Run(tc.body, func(t *testing.T) {
+			c := onec.NewClient("http://synthetic", "", "")
+			c.HTTPClient.Transport = passportRoundTrip(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: tc.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+			result, err := drive(t, NewRecordCountHandler(c), `{"object_type":"Catalog","object_name":"Missing"}`)
+			if err != nil || result == nil || !result.IsError {
+				t.Fatal("missing/denied table was successful")
+			}
+			text := resultText(t, result)
+			if strings.Contains(text, "--install") != tc.install {
+				t.Fatalf("wrong endpoint/domain diagnostic: %s", text)
+			}
+			if !tc.install && !strings.Contains(text, "selected count") {
+				t.Fatal("domain diagnostic lost")
+			}
+		})
+	}
+}

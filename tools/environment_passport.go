@@ -30,17 +30,19 @@ type PassportFieldStatus struct {
 	ActionCode string `json:"action_code,omitempty"`
 }
 type EnvironmentPassport struct {
-	ProductVersion       string              `json:"product_version,omitempty"`
-	Edition              string              `json:"edition,omitempty"`
-	Transport            string              `json:"transport,omitempty"`
-	ConfigurationName    string              `json:"configuration_name,omitempty"`
-	ConfigurationVersion string              `json:"configuration_version,omitempty"`
-	Vendor               string              `json:"vendor,omitempty"`
-	PlatformVersion      string              `json:"platform_version,omitempty"`
-	DatabaseMode         string              `json:"database_mode,omitempty"`
-	ExtensionVersion     string              `json:"extension_version,omitempty"`
-	ConfigurationStatus  PassportFieldStatus `json:"configuration_status"`
-	VersionStatus        PassportFieldStatus `json:"version_status"`
+	ProductVersion          string              `json:"product_version,omitempty"`
+	Edition                 string              `json:"edition,omitempty"`
+	Transport               string              `json:"transport,omitempty"`
+	ConfigurationName       string              `json:"configuration_name,omitempty"`
+	ConfigurationVersion    string              `json:"configuration_version,omitempty"`
+	Vendor                  string              `json:"vendor,omitempty"`
+	PlatformVersion         string              `json:"platform_version,omitempty"`
+	DatabaseMode            string              `json:"database_mode,omitempty"`
+	ExtensionVersion        string              `json:"extension_version,omitempty"`
+	NativeConnectorVersion  string              `json:"native_connector_version,omitempty"`
+	NativeConnectorProtocol int                 `json:"native_connector_protocol,omitempty"`
+	ConfigurationStatus     PassportFieldStatus `json:"configuration_status"`
+	VersionStatus           PassportFieldStatus `json:"version_status"`
 }
 
 var passportVersion = regexp.MustCompile(`^[vV]?([0-9]+(\.[0-9]+){1,3})([+-][a-zA-Z0-9.-]+)?$`)
@@ -118,8 +120,11 @@ func ReadEnvironmentPassport(ctx context.Context, client *onec.Client, pc Passpo
 		p.Edition = pc.Edition
 	}
 	switch pc.Transport {
-	case "http", "polling", "proxy", "offline":
+	case "http", "polling", "proxy", "offline", "epf":
 		p.Transport = pc.Transport
+	}
+	if p.Transport == "epf" {
+		p.VersionStatus = passportStatus("live_connector", "unavailable")
 	}
 	if pc.Mode == ModeOffline {
 		p.Transport = "offline"
@@ -158,8 +163,29 @@ func ReadEnvironmentPassport(ctx context.Context, client *onec.Client, pc Passpo
 		}
 	}
 	var ver onec.VersionInfo
-	if err := client.Get(ctx, "/version", &ver); err != nil {
-		p.VersionStatus = classifyPassportError("live_extension", err)
+	var connector struct {
+		Version  string `json:"connector_version"`
+		Protocol int    `json:"protocol"`
+	}
+	var target any = &ver
+	if p.Transport == "epf" {
+		target = &connector
+	}
+	if err := client.Get(ctx, "/version", target); err != nil {
+		p.VersionStatus = classifyPassportError(p.VersionStatus.Source, err)
+		if p.Transport == "epf" && p.VersionStatus.Status == "unsupported" {
+			p.VersionStatus.ActionCode = "update_connector"
+		}
+	} else if p.Transport == "epf" {
+		// Transport is configured by the server. Adapter versions never claim an
+		// installed CFE, grant capabilities, or authorize paid/native operations.
+		if connector.Protocol == 1 && safePassportVersion(connector.Version) != "" {
+			p.NativeConnectorVersion = safePassportVersion(connector.Version)
+			p.NativeConnectorProtocol = connector.Protocol
+			p.VersionStatus = passportStatus("live_connector", "available")
+		} else if connector.Protocol != 0 && connector.Protocol != 1 {
+			p.VersionStatus = PassportFieldStatus{"live_connector", "unsupported", "update_connector"}
+		}
 	} else {
 		p.ExtensionVersion = safePassportVersion(ver.Version)
 		if p.ExtensionVersion != "" {
@@ -169,7 +195,7 @@ func ReadEnvironmentPassport(ctx context.Context, client *onec.Client, pc Passpo
 	return p, nil
 }
 func EnvironmentPassportTool() *mcp.Tool {
-	return &mcp.Tool{Name: "environment_passport", Title: "Безопасный паспорт среды", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}, Description: "Краткий паспорт выбранной среды: конфигурация, версия платформы и расширения, редакция и явно объявленный транспорт. Без адресов, учётных данных, лицензий и сведений о машине. Каждый источник имеет отдельный статус; offline читает только XML.", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{}}`)}
+	return &mcp.Tool{Name: "environment_passport", Title: "Безопасный паспорт среды", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}, Description: "Краткий паспорт выбранной среды: конфигурация, версия платформы, расширения или EPF-коннектора, редакция и явно объявленный транспорт. Без адресов, учётных данных, лицензий и сведений о машине. Каждый источник имеет отдельный статус; offline читает только XML.", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{}}`)}
 }
 func NewEnvironmentPassportHandler(client *onec.Client, pc PassportContext) mcp.ToolHandler {
 	return WithToolErrors("Паспорт среды не получен", func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -97,6 +97,7 @@ type FormStructure struct {
 	Elements []FormElement `json:"elements"`
 	Commands []FormCommand `json:"commands,omitempty"`
 	Handlers []FormHandler `json:"handlers,omitempty"`
+	Warnings []string      `json:"warnings,omitempty"`
 }
 
 // FormElement represents an element on a 1C form.

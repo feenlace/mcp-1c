@@ -21,7 +21,7 @@ func NewRecordCountHandler(client *onec.Client) mcp.ToolHandler {
 		result, err := client.CountRecords(ctx, input)
 		if err != nil {
 			var status *onec.StatusError
-			if errors.As(err, &status) && (status.StatusCode == 404 || status.StatusCode == 405 || status.StatusCode == 501) {
+			if errors.As(err, &status) && ((status.StatusCode == 404 && status.BodyKind == onec.BodyKindForeign) || status.StatusCode == 405 || status.StatusCode == 501) {
 				err = fmt.Errorf("POST /count недоступен (HTTP %d). Проверьте публикацию MCPService и наличие обработчика /count. Обновите расширение командой mcp-1c --install с путём своей базы и учётными данными установки; затем повторите вызов", status.StatusCode)
 			}
 			return nil, err

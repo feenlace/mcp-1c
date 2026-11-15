@@ -266,7 +266,17 @@ func (c *Client) do(req *http.Request, endpoint string, result any) error {
 	}
 	req.Close = true // close connection after each request (avoids 1C session limit)
 
-	resp, err := c.HTTPClient.Do(req)
+	client := c.HTTPClient
+	if transport, ok := client.Transport.(interface{ UseContextTimeout() bool }); ok && transport.UseContextTimeout() && client.Timeout > 0 {
+		requestContext, cancel := context.WithTimeout(req.Context(), client.Timeout)
+		defer cancel()
+		req = req.Clone(requestContext)
+		localClient := *client
+		// The same deadline lives in the context: http.Client's outer timer discards typed outcome errors.
+		localClient.Timeout = 0
+		client = &localClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		// http.Client строит СВОЙ *url.Error из адреса запроса и маскирует в нём
 		// только пароль, логин печатается целиком. После разделения на границе

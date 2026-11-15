@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/feenlace/mcp-1c/dump"
+	"github.com/feenlace/mcp-1c/epf"
 	"github.com/feenlace/mcp-1c/extension"
 	"github.com/feenlace/mcp-1c/installer"
 	"github.com/feenlace/mcp-1c/internal/config"
@@ -55,6 +56,10 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	debug := flag.Bool("debug", false, "Enable verbose logging to file (~/.cache/mcp-1c/server.log). In terminal mode also suppresses the stderr progress indicator.")
 	baseURL := flag.String("base", "", "Base URL of 1C HTTP service")
+	var epfListen, epfTokenFile, epfWebOrigin epf.ConnectionFlags
+	flag.Var(&epfListen, "epf-listen", "Local EPF listener: 127.0.0.1:PORT or NAME=127.0.0.1:PORT; Community supports one connection per process")
+	flag.Var(&epfTokenFile, "epf-token-file", "Dedicated server-managed private code file, or NAME=PATH with named listen; five-minute one-use startup/Stop code; old input files refused")
+	flag.Var(&epfWebOrigin, "epf-web-origin", "Exact EPF browser origin, or NAME=ORIGIN with named listen; HTTPS or loopback HTTP")
 	user := flag.String("user", "", "1C HTTP service user")
 	password := flag.String("password", "", "1C HTTP service password")
 	projectRoot := flag.String("project-root", "", "Explicit project directory for local helpers; without --dump, metadata XML can be read here without a code index")
@@ -250,10 +255,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := onec.NewClient(cfg.BaseURL, cfg.User, cfg.Password,
-		onec.WithMaxResponseSize(cfg.MaxResponseSizeMiB),
-		onec.WithRequestTimeout(cfg.RequestTimeout),
-	)
+	connections, err := epf.Connections(epfListen, epfTokenFile, epfWebOrigin)
+	if err != nil || len(connections) > 1 {
+		if err == nil {
+			err = errors.New("Community supports one EPF connection per process; use Advanced/Pro for named multibase tools")
+		}
+		reportStartupFailure(realStderr, err)
+		os.Exit(1)
+	}
+	clientBase := cfg.BaseURL
+	if len(connections) > 0 {
+		clientBase = connections[0].Endpoint
+	}
+	client := onec.NewClient(clientBase, cfg.User, cfg.Password, onec.WithMaxResponseSize(cfg.MaxResponseSizeMiB), onec.WithRequestTimeout(cfg.RequestTimeout))
+	if len(connections) > 0 {
+		if *baseURL != "" || os.Getenv("MCP_1C_BASE_URL") != "" || cfg.User != "" || cfg.Password != "" {
+			reportStartupFailure(realStderr, errors.New("use EPF flags without HTTP base/user/password settings"))
+			os.Exit(1)
+		}
+		bridge, err := epf.NewConnection(connections[0], nil)
+		if err != nil {
+			reportStartupFailure(realStderr, err)
+			os.Exit(1)
+		}
+		stop, err := bridge.Start(connections[0].Listen)
+		if err != nil {
+			reportStartupFailure(realStderr, err)
+			os.Exit(1)
+		}
+		defer stop()
+		client.HTTPClient.Transport = bridge
+	}
 
 	// serveBuildCtx bounds any background generation build kicked off by
 	// openServeIndexLocal so a build still in flight when serving ends cannot wedge
@@ -322,6 +354,10 @@ func main() {
 	}
 
 	localOptions := localToolOptions(version, *dumpDir, *projectRoot, *baseURL != "" || os.Getenv("MCP_1C_BASE_URL") != "")
+	if len(connections) > 0 {
+		localOptions.Passport.Mode = tools.ModeLive
+		localOptions.Passport.Transport = "epf"
+	}
 	if *nativeCheckPlatform != "" || *nativeCheckFileDB != "" || *nativeCheckOutputRoot != "" {
 		if *nativeCheckPlatform == "" || *nativeCheckFileDB == "" || *nativeCheckOutputRoot == "" {
 			reportStartupFailure(realStderr, fmt.Errorf("native help check requires all three explicit options: --native-check-platform, --native-check-file-db, --native-check-output-root"))
@@ -359,7 +395,7 @@ func main() {
 	versionCtx, versionCancel := context.WithCancel(context.Background())
 	defer versionCancel()
 	versionDone := make(chan struct{})
-	if localOptions.Passport.Mode == tools.ModeOffline {
+	if localOptions.Passport.Mode == tools.ModeOffline || len(connections) > 0 {
 		close(versionDone)
 	} else {
 		go func() { defer close(versionDone); checkExtensionVersion(versionCtx, client) }()

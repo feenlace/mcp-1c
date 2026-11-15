@@ -7,6 +7,7 @@
 1. Убедиться, что все PR, которые должны попасть в релиз, смержены.
 2. Просмотреть заголовки смерженных PR: они пригодятся при ручном написании текста релиза. Отдельного `CHANGELOG.md` в репозитории нет.
 3. Проверить, что `ConfigurationExtensionCompatibilityMode` в `extension/src/Configuration.xml` соответствует минимально поддерживаемой платформе (сейчас `Version8_3_14`).
+4. До согласованного выпуска подготовить и проверить локально общий `MCPConnector.epf` для Community, Advanced и Pro из исходников этого выпуска; сохранить SHA256, версию исходников, протокола и сведения о сборке. Сборка и readback описаны в [epf/README.md](epf/README.md). Локальный synthetic candidate не является выпускным артефактом.
 
 ## Тегирование и публикация Go-бинарей
 
@@ -102,7 +103,20 @@
    gh release edit vX.Y.Z --notes-file release-notes.md
    ```
 
-8. Проверить, что в релизе лежит всё, что должно: вкладка Actions, workflow **Verify release assets**, Run workflow, ввести тег `vX.Y.Z`. Прогон падает, если в релизе нет шести бинарей, `checksums.txt` или `MCP_HTTPService.cfe`, а также если хэши в `checksums.txt` не сходятся с реально опубликованными файлами.
+8. После публикации общего EPF по следующему разделу проверить итоговый релиз через **Verify release assets**.
+
+## Публикация общего EPF
+
+После отдельной команды владельца на выпуск Community добавить заранее проверенный `MCPConnector.epf` к тому же Community Release и его SHA256 к `checksums.txt`. Выполнять команды в выделенном рабочем каталоге выпуска: `--clobber` обновит оставшийся после шага CFE локальный `checksums.txt` опубликованной версией со всеми существующими строками.
+
+```bash
+gh release upload vX.Y.Z dist/MCPConnector.epf
+gh release download vX.Y.Z -p checksums.txt --clobber
+(cd dist && shasum -a 256 MCPConnector.epf) >> checksums.txt
+gh release upload vX.Y.Z checksums.txt --clobber
+```
+
+Опубликовать рядом сведения о происхождении, версии исходников и протокола и проверенных ограничениях совместимости. Общий EPF свободно доступен в Community Release также пользователям Advanced и Pro; после выпуска Community обновить зависимость Advanced/Pro на опубликованную Community-версию, а их выпуск выполнять только по отдельной команде владельца. Повторить **Verify release assets** с включённым `require_epf` после загрузки обоих native-файлов и итогового `checksums.txt`. Для исторических релизов, предшествующих EPF, этот параметр можно отключить.
 
 ## Контрольные точки
 

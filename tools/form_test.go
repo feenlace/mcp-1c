@@ -1560,3 +1560,18 @@ func TestNewFormStructureHandler_NoFormsInDumpWordingFitsAbsence(t *testing.T) {
 		t.Errorf("no form file was opened, so the partial parse note must not appear:\n%s", text)
 	}
 }
+
+func TestFormStaticMetadataWarningAndDumpEnrichment(t *testing.T) {
+	form := onec.FormStructure{Name: "ФормаОбъекта", Warnings: []string{"Статические метаданные; используйте --dump.\nПодробности"}}
+	if text := formatFormStructure(&form, nil); !strings.Contains(text, "> Диагностика источника формы: Статические метаданные; используйте --dump.") || strings.Contains(text, "\nПодробности") {
+		t.Fatalf("source limit hidden: %s", text)
+	}
+	mergeDumpIntoForm(&form, &onec.FormStructure{Name: "ФормаОбъекта"}, nil)
+	if len(form.Warnings) == 0 {
+		t.Fatal("empty dump hid source limitation")
+	}
+	mergeDumpIntoForm(&form, &onec.FormStructure{Name: "ФормаОбъекта", Elements: []onec.FormElement{{Name: "Код"}}}, nil)
+	if len(form.Warnings) != 0 {
+		t.Fatal("complete dump retained static-only warning")
+	}
+}
