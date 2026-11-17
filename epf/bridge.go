@@ -26,6 +26,19 @@ import (
 const Protocol = 1
 const MaxBody = 2 << 20
 const maxPending = 16
+const DefaultWaitTimeout = 30 * time.Second
+
+// WaitTimeoutError identifies the actual response wait, preserving the original cause.
+type WaitTimeoutError struct {
+	Budget          time.Duration
+	EarlierDeadline bool
+	Cause           error
+}
+
+func (e *WaitTimeoutError) Error() string {
+	return "EPF response wait expired after " + e.Budget.String()
+}
+func (e *WaitTimeoutError) Unwrap() error { return e.Cause }
 
 var ErrCapabilityUnavailable = errors.New("EPF capability unavailable; use a supported connector read route or configure the required source")
 
@@ -112,6 +125,8 @@ type Bridge struct {
 	mu                         sync.Mutex
 	pairing, session, identity string
 	pairingExpires             time.Time
+	waitTimeout                time.Duration
+	defaultWaitLimit           time.Duration
 	codeFile                   *os.File
 	codePath                   string
 	core                       string
@@ -151,6 +166,13 @@ type Bridge struct {
 	done                       chan struct{}
 	// admit is rechecked on handout; result collection deliberately does not call it.
 	admit func(context.Context, Task) error
+}
+
+// SetDefaultWaitLimit preserves an explicitly configured operator transport limit. Call before Start.
+func (b *Bridge) SetDefaultWaitLimit(limit time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.defaultWaitLimit = limit
 }
 
 func New(pairingToken string, admit func(context.Context, Task) error, webOrigin ...string) (*Bridge, error) {
@@ -412,6 +434,7 @@ func (b *Bridge) Handler(host string) http.Handler {
 			b.mu.Lock()
 			if !b.closed && matches(b.session, bearer(r)) {
 				b.session = ""
+				b.waitTimeout = 0
 				b.identity = ""
 				b.core = ""
 				b.queryPackageContract = ""
@@ -460,6 +483,7 @@ func (b *Bridge) pair(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Protocol       int             `json:"protocol"`
+		WaitTimeout    json.RawMessage `json:"wait_timeout_seconds,omitempty"`
 		Identity       string          `json:"identity"`
 		Core           string          `json:"core,omitempty"`
 		QueryPackage   json.RawMessage `json:"query_package,omitempty"`
@@ -478,12 +502,22 @@ func (b *Bridge) pair(w http.ResponseWriter, r *http.Request) {
 		CodeExecute    json.RawMessage `json:"code_execute,omitempty"`
 		Graph          json.RawMessage `json:"graph,omitempty"`
 	}
-	if !decode(w, r, &in, "protocol", "identity", "core", "query_package", "object_diff", "job_diagnose", "incident_timeline", "read_exchange_queue", "reconcile", "quality", "report_compose", "print_export", "code_execute", "graph", "job_control_read", "job_retry_read", "job_control", "job_retry") {
+	if !decode(w, r, &in, "protocol", "identity", "core", "wait_timeout_seconds", "query_package", "object_diff", "job_diagnose", "incident_timeline", "read_exchange_queue", "reconcile", "quality", "report_compose", "print_export", "code_execute", "graph", "job_control_read", "job_retry_read", "job_control", "job_retry") {
 		return
 	}
 	if in.Protocol != Protocol || strings.TrimSpace(in.Identity) != in.Identity || in.Identity == "" || len(in.Identity) > 1024 || len(in.Core) > 4096 {
 		http.Error(w, "EPF identity/protocol refused", 400)
 		return
+	}
+	waitTimeout := DefaultWaitTimeout
+	if len(in.WaitTimeout) != 0 {
+		seconds, err := strconv.ParseInt(string(in.WaitTimeout), 10, 64)
+		// Collection uses one extra minute in the same duration arithmetic.
+		if err != nil || seconds <= 0 || seconds > int64((time.Duration(1<<63-1)-time.Minute)/time.Second) {
+			http.Error(w, "EPF wait must be positive whole seconds representable with result retention", 400)
+			return
+		}
+		waitTimeout = time.Duration(seconds) * time.Second
 	}
 	var packageContract string
 	if len(in.QueryPackage) != 0 && (json.Unmarshal(in.QueryPackage, &packageContract) != nil || packageContract != "query_package/1" || in.Core == "") {
@@ -574,6 +608,10 @@ func (b *Bridge) pair(w http.ResponseWriter, r *http.Request) {
 	b.pairingExpires = time.Time{}
 	b.session = randomToken(32)
 	b.identity = in.Identity
+	b.waitTimeout = waitTimeout
+	if b.defaultWaitLimit > 0 && b.defaultWaitLimit < b.waitTimeout {
+		b.waitTimeout = b.defaultWaitLimit
+	}
 	b.core = in.Core
 	b.queryPackageContract = packageContract
 	b.objectDiffContract = objectDiffContract
@@ -591,11 +629,13 @@ func (b *Bridge) pair(w http.ResponseWriter, r *http.Request) {
 	b.codeExecuteContract = codeExecuteContract
 	b.graphContract = graphContract
 	writeJSON(w, struct {
-		Protocol     int      `json:"protocol"`
-		Session      string   `json:"session"`
-		Identity     string   `json:"identity"`
-		Capabilities []string `json:"capabilities"`
-	}{Protocol, b.session, b.identity, []string{"community.metadata", "community.configuration", "community.query", "community.version", "community.object", "community.subsystems", "community.form", "community.validate-query", "community.count", "community.storage", "community.eventlog"}})
+		Protocol                    int      `json:"protocol"`
+		Session                     string   `json:"session"`
+		Identity                    string   `json:"identity"`
+		Capabilities                []string `json:"capabilities"`
+		RequestedWaitSeconds        int64    `json:"wait_timeout_seconds"`
+		EffectiveDefaultWaitSeconds float64  `json:"effective_default_wait_timeout_seconds"`
+	}{Protocol, b.session, b.identity, []string{"community.metadata", "community.configuration", "community.query", "community.version", "community.object", "community.subsystems", "community.form", "community.validate-query", "community.count", "community.storage", "community.eventlog"}, int64(waitTimeout / time.Second), b.waitTimeout.Seconds()})
 }
 func (b *Bridge) poll(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -955,22 +995,7 @@ func (b *Bridge) RoundTrip(r *http.Request) (*http.Response, error) {
 	if cap == "pro.document-read" && len(body) > 65536 {
 		return nil, errors.New("EPF request body refused")
 	}
-	now := time.Now()
-	deadline := now.Add(30 * time.Second)
-	if cap == "advanced.code-execute" {
-		var in struct {
-			Timeout int `json:"timeout"`
-		}
-		_ = json.Unmarshal(body, &in) // The closed wire body was validated above.
-		deadline = now.Add(time.Duration(in.Timeout) * time.Second)
-	}
-	if d, ok := r.Context().Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	executeDeadline := deadline
-	if cap == "advanced.code-execute" && now.Add(30*time.Second).Before(executeDeadline) {
-		executeDeadline = now.Add(30 * time.Second)
-	}
+	var executeDeadline time.Time
 	if cap == "pro.document-read" || cap == "pro.document-date" || cap == "pro.graph" || (jobCapability(cap) || cap == "pro.incident-context") || (cap == "pro.exchange-queue" || (cap == "pro.reconcile-read" || (cap == "pro.quality-read" || (cap == "pro.report-compose" || cap == "pro.print-export")))) || (cap == "advanced.code-execute" || cap == "advanced.query-package" || cap == "advanced.object-diff" || cap == "advanced.job-diagnose") {
 		check := b.documentReadCutoff
 		if cap == "advanced.code-execute" || cap == "advanced.query-package" || cap == "advanced.object-diff" || cap == "advanced.job-diagnose" {
@@ -980,45 +1005,43 @@ func (b *Bridge) RoundTrip(r *http.Request) (*http.Response, error) {
 		if err != nil {
 			return nil, err
 		}
-		if cutoff.Before(executeDeadline) {
+		if executeDeadline.IsZero() || cutoff.Before(executeDeadline) {
 			executeDeadline = cutoff
 		}
 	}
 	if cap == "pro.document-read" || cap == "pro.document-date" || cap == "pro.graph" {
-		if cutoff, ok := r.Context().Value(documentCutoffKey{}).(time.Time); ok && cutoff.Before(executeDeadline) {
+		if cutoff, ok := r.Context().Value(documentCutoffKey{}).(time.Time); ok && (executeDeadline.IsZero() || cutoff.Before(executeDeadline)) {
 			executeDeadline = cutoff
 		}
 	}
 
 	if cap == "advanced.code-execute" {
-		if cutoff, ok := r.Context().Value(codeExecuteCutoffKey{}).(time.Time); ok && cutoff.Before(executeDeadline) {
+		if cutoff, ok := r.Context().Value(codeExecuteCutoffKey{}).(time.Time); ok && (executeDeadline.IsZero() || cutoff.Before(executeDeadline)) {
 			executeDeadline = cutoff
 		}
 	}
 	if cap == "pro.reconcile-read" {
-		if cutoff, ok := r.Context().Value(reconcileCutoffKey{}).(time.Time); ok && cutoff.Before(executeDeadline) {
+		if cutoff, ok := r.Context().Value(reconcileCutoffKey{}).(time.Time); ok && (executeDeadline.IsZero() || cutoff.Before(executeDeadline)) {
 			executeDeadline = cutoff
 		}
 	}
 	if jobCapability(cap) {
-		if cutoff, ok := r.Context().Value(jobReadCutoffKey{}).(time.Time); ok && cutoff.Before(executeDeadline) {
+		if cutoff, ok := r.Context().Value(jobReadCutoffKey{}).(time.Time); ok && (executeDeadline.IsZero() || cutoff.Before(executeDeadline)) {
 			executeDeadline = cutoff
 		}
 	}
 	if cap == "pro.quality-read" {
-		if cutoff, ok := r.Context().Value(qualityCutoffKey{}).(time.Time); ok && cutoff.Before(executeDeadline) {
+		if cutoff, ok := r.Context().Value(qualityCutoffKey{}).(time.Time); ok && (executeDeadline.IsZero() || cutoff.Before(executeDeadline)) {
 			executeDeadline = cutoff
 		}
 	}
 	if cap == "pro.report-compose" {
-		if cutoff, ok := r.Context().Value(reportComposeCutoffKey{}).(time.Time); ok && cutoff.Before(executeDeadline) {
+		if cutoff, ok := r.Context().Value(reportComposeCutoffKey{}).(time.Time); ok && (executeDeadline.IsZero() || cutoff.Before(executeDeadline)) {
 			executeDeadline = cutoff
 		}
 	}
-	if !executeDeadline.After(now) {
-		return nil, context.DeadlineExceeded
-	}
 	b.mu.Lock()
+	now := time.Now()
 	b.prune(now)
 	if err := r.Context().Err(); err != nil {
 		b.mu.Unlock()
@@ -1036,6 +1059,37 @@ func (b *Bridge) RoundTrip(r *http.Request) (*http.Response, error) {
 	if (cap == "pro.job-control" && b.jobControlContract != "job_control/1") || (cap == "pro.job-retry" && b.jobRetryContract != "job_retry/2") || (cap == "pro.job-control-read" && b.jobControlReadContract != "job_control_read/1") || (cap == "pro.job-retry-read" && b.jobRetryReadContract != "job_retry_read/2") || (cap == "advanced.code-execute" && b.codeExecuteContract != "code_execute/1") || (strings.HasPrefix(cap, "pro.document-") && b.core == "") || ((cap == "pro.graph" || cap == "pro.graph-receipt") && (b.core == "" || b.graphContract != "graph_transfer/1")) || (cap == "advanced.query-package" && b.queryPackageContract != "query_package/1") || (cap == "advanced.object-diff" && b.objectDiffContract != "object_diff/1") || (cap == "advanced.job-diagnose" && b.jobDiagnoseContract != "JOB-DIAG-1") || (cap == "pro.incident-context" && b.incidentContract != "INCIDENT-TIMELINE-1") || (cap == "pro.exchange-queue" && b.exchangeQueueContract != "queue_observation/1") || (cap == "pro.reconcile-read" && b.reconcileContract != "reconcile_read/1") || (cap == "pro.quality-read" && b.qualityContract != "quality_read/1") || (cap == "pro.report-compose" && b.reportComposeContract != "report_compose/1") || (cap == "pro.print-export" && b.printExportContract != "print_export/1") {
 		b.mu.Unlock()
 		return nil, ErrHybridUnavailable
+	}
+	wait := b.waitTimeout
+	if wait == 0 {
+		wait = DefaultWaitTimeout
+	}
+	if cap == "advanced.code-execute" {
+		var in struct {
+			Timeout int `json:"timeout"`
+		}
+		_ = json.Unmarshal(body, &in) // The closed wire body was validated above.
+		wait = time.Duration(in.Timeout) * time.Second
+	}
+	deadline := now.Add(wait)
+	earlierDeadline := false
+	if d, ok := r.Context().Deadline(); ok && d.Before(deadline) {
+		deadline = d
+		earlierDeadline = true
+	}
+	startDeadline := now.Add(DefaultWaitTimeout)
+	if deadline.Before(startDeadline) {
+		startDeadline = deadline
+	}
+	if executeDeadline.IsZero() || startDeadline.Before(executeDeadline) {
+		executeDeadline = startDeadline
+	}
+	if !executeDeadline.After(now) {
+		b.mu.Unlock()
+		return nil, context.DeadlineExceeded
+	}
+	waitError := func(cause error) error {
+		return &WaitTimeoutError{Budget: deadline.Sub(now), EarlierDeadline: earlierDeadline, Cause: cause}
 	}
 	if cap == "advanced.code-execute" || cap == "pro.report-compose" || cap == "pro.print-export" {
 		for _, outstanding := range b.pending {
@@ -1075,9 +1129,13 @@ func (b *Bridge) RoundTrip(r *http.Request) (*http.Response, error) {
 	case <-b.done:
 		return nil, b.interrupted(p, ErrUnavailable)
 	case <-r.Context().Done():
-		return nil, b.interrupted(p, r.Context().Err())
+		cause := r.Context().Err()
+		if errors.Is(cause, context.DeadlineExceeded) {
+			cause = waitError(cause)
+		}
+		return nil, b.interrupted(p, cause)
 	case <-timer.C:
-		return nil, b.interrupted(p, context.DeadlineExceeded)
+		return nil, b.interrupted(p, waitError(context.DeadlineExceeded))
 	}
 }
 func (b *Bridge) Close() {
@@ -1095,5 +1153,6 @@ func (b *Bridge) Close() {
 	}
 	close(b.done)
 	b.session = ""
+	b.waitTimeout = 0
 	b.identity = ""
 }

@@ -19,7 +19,8 @@ type Config struct {
 
 	// RequestTimeout — таймаут HTTP-запроса к 1С. Запас нужен для передачи
 	// крупных ответов /extensions (сотни мегабайт).
-	RequestTimeout time.Duration
+	RequestTimeout         time.Duration
+	RequestTimeoutExplicit bool
 }
 
 // DefaultMaxResponseSizeMiB — лимит размера ответа 1С по умолчанию (MiB).
@@ -57,10 +58,20 @@ func Load() *Config {
 	// MCP_1C_REQUEST_TIMEOUT задаётся в секундах. Некорректные или
 	// неположительные значения игнорируются — остаётся значение по умолчанию.
 	if v := os.Getenv("MCP_1C_REQUEST_TIMEOUT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.RequestTimeout = time.Duration(n) * time.Second
+		if d, ok := RequestTimeoutSeconds(v); ok {
+			cfg.RequestTimeout = d
+			cfg.RequestTimeoutExplicit = true
 		}
 	}
 
 	return cfg
+}
+
+// RequestTimeoutSeconds validates before multiplication so overflowing values cannot become a limit.
+func RequestTimeoutSeconds(value string) (time.Duration, bool) {
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n <= 0 || n > int64(time.Duration(1<<63-1)/time.Second) {
+		return 0, false
+	}
+	return time.Duration(n) * time.Second, true
 }

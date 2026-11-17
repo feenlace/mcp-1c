@@ -119,3 +119,20 @@ func TestLoadRequestTimeout(t *testing.T) {
 		}
 	})
 }
+
+func TestRequestTimeoutExplicitAndOverflow(t *testing.T) {
+	for _, value := range []string{"9223372036854775807", "9223372037", "0", "-1", "1.5", "bad"} {
+		t.Setenv("MCP_1C_REQUEST_TIMEOUT", value)
+		cfg := Load()
+		if cfg.RequestTimeoutExplicit || cfg.RequestTimeout != DefaultRequestTimeout {
+			t.Fatalf("invalid explicit timeout accepted: %s", value)
+		}
+	}
+	for _, value := range []string{"300", "600", "9223372036"} {
+		t.Setenv("MCP_1C_REQUEST_TIMEOUT", value)
+		cfg := Load()
+		if !cfg.RequestTimeoutExplicit || cfg.RequestTimeout <= 0 {
+			t.Fatalf("valid explicit timeout ignored: %s", value)
+		}
+	}
+}

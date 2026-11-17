@@ -59,7 +59,8 @@ type Client struct {
 	// вызов и не содержит ни одного байта значения. Отказ живёт здесь, а не в
 	// виде паники или os.Exit, потому что NewClient вызывают и с внутренними
 	// схемами (proxy://, poll://), которые никто не вводил руками.
-	baseErr error
+	baseErr                 error
+	transportManagedTimeout bool
 }
 
 // Option настраивает Client при создании через NewClient.
@@ -81,8 +82,15 @@ func WithRequestTimeout(timeout time.Duration) Option {
 	return func(c *Client) {
 		if timeout > 0 {
 			c.HTTPClient.Timeout = timeout
+			c.transportManagedTimeout = false
 		}
 	}
+}
+
+// WithTransportManagedTimeout lets an opted-in transport own only the implicit default wait.
+// The positive base timeout remains available to finite worker-budget consumers.
+func WithTransportManagedTimeout() Option {
+	return func(c *Client) { c.transportManagedTimeout = true }
 }
 
 // MaxResponseSize возвращает действующий лимит размера ответа 1С в байтах.
@@ -268,9 +276,11 @@ func (c *Client) do(req *http.Request, endpoint string, result any) error {
 
 	client := c.HTTPClient
 	if transport, ok := client.Transport.(interface{ UseContextTimeout() bool }); ok && transport.UseContextTimeout() && client.Timeout > 0 {
-		requestContext, cancel := context.WithTimeout(req.Context(), client.Timeout)
-		defer cancel()
-		req = req.Clone(requestContext)
+		if !c.transportManagedTimeout {
+			requestContext, cancel := context.WithTimeout(req.Context(), client.Timeout)
+			defer cancel()
+			req = req.Clone(requestContext)
+		}
 		localClient := *client
 		// The same deadline lives in the context: http.Client's outer timer discards typed outcome errors.
 		localClient.Timeout = 0

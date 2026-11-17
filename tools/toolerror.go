@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/feenlace/mcp-1c/epf"
 	"github.com/feenlace/mcp-1c/onec"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -849,7 +850,20 @@ func renderFailure(heading string, err error) string {
 	var se *onec.StatusError
 	var te *onec.TransportError
 	var re *onec.RequestError
+	var we *epf.WaitTimeoutError
+	var unknown *epf.UnknownOutcome
 	switch {
+	case errors.As(err, &we):
+		if we.EarlierDeadline {
+			p.add(fmt.Sprintf("Истёк более ранний срок ожидания вызывающей стороны или сервера (%s). Проверьте срок вызова и `--request-timeout` / `MCP_1C_REQUEST_TIMEOUT`.", we.Budget))
+		} else {
+			p.add(fmt.Sprintf("Истекло ожидание ответа EPF (%s). Измените «Ожидание ответа, сек.» в форме подключения и подключитесь заново.", we.Budget))
+		}
+		if errors.As(err, &unknown) {
+			p.add("Результат уже начатой операции неизвестен. Она могла завершиться после окончания ожидания. Сохраните исходную операцию для наблюдения и не повторяйте её автоматически.")
+		} else {
+			p.add("Ожидание не отменяет уже начатую операцию в 1С.")
+		}
 	case errors.As(err, &se):
 		renderStatusError(&p, heading, se)
 	case errors.As(err, &te):

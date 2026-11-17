@@ -228,8 +228,9 @@ func main() {
 	if *maxResponseSize > 0 {
 		cfg.MaxResponseSizeMiB = *maxResponseSize
 	}
-	if *requestTimeout > 0 {
-		cfg.RequestTimeout = time.Duration(*requestTimeout) * time.Second
+	if d, ok := config.RequestTimeoutSeconds(strconv.Itoa(*requestTimeout)); ok {
+		cfg.RequestTimeout = d
+		cfg.RequestTimeoutExplicit = true
 	}
 
 	// Отказ выносится ЗДЕСЬ, на границе флага, и только здесь.
@@ -277,6 +278,11 @@ func main() {
 		if err != nil {
 			reportStartupFailure(realStderr, err)
 			os.Exit(1)
+		}
+		if cfg.RequestTimeoutExplicit {
+			bridge.SetDefaultWaitLimit(cfg.RequestTimeout)
+		} else {
+			onec.WithTransportManagedTimeout()(client)
 		}
 		stop, err := bridge.Start(connections[0].Listen)
 		if err != nil {
