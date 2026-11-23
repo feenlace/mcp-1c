@@ -49,23 +49,10 @@ type WrappedPathState struct {
 // first segment is a recognised extension directory and the namespace accounts for
 // it, so the question is asked of what is left.
 //
-// The same is true one level lower: an extension reached through byPrefix is
-// namespaced by a TWO-segment prefix, and moduleKey strips both before deriving
-// the rest, so both are consumed here as well. The longer prefix is asked first,
-// as in moduleKey.
+// Use the same enclosing prefix as moduleKey, then measure the remaining path.
 func (l extensionLayout) wrapDepth(relPath string) int {
-	parts := strings.Split(filepath.ToSlash(relPath), "/")
-	if len(l.byPrefix) > 0 && len(parts) >= 3 {
-		if _, ok := l.byPrefix[parts[0]+"/"+parts[1]]; ok {
-			return anchorIndex(parts[2:])
-		}
-	}
-	if len(l.byDir) > 0 && len(parts) >= 2 {
-		if _, ok := l.byDir[parts[0]]; ok {
-			return anchorIndex(parts[1:])
-		}
-	}
-	return anchorIndex(parts)
+	_, inside := l.matchExtensionPrefix(filepath.ToSlash(relPath))
+	return anchorIndex(strings.Split(inside, "/"))
 }
 
 // noteWrappedPaths publishes the report for the paths currently installed.

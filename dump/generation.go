@@ -229,7 +229,10 @@ const (
 	// external data source computes the SAME signature before and after. Without the
 	// bump its warm generation stays current and keeps serving the collapsed keys,
 	// under which only one of the files sharing a key is reachable at all.
-	dumpIndexSchemaVersion = 8
+	// v9: the BSL index recognizes classic extension manifests below the
+	// shallow scan and uses the full relative prefix for docIDs. The same BSL
+	// files can now have different keys, so READY and flat v8 caches must rebuild.
+	dumpIndexSchemaVersion = 9
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and

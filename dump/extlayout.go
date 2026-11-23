@@ -136,8 +136,8 @@ const (
 	// it never reached.
 	maxExtensionScan = 64
 
-	// maxNestedProbeEntries bounds the size of a directory the one-level descent
-	// below will list through. Past it the descent stops.
+	// maxNestedProbeEntries bounds the size of a wrapper the descent will probe.
+	// Past it the descent stops after listing the directory.
 	//
 	// IT IS A HYPOTHESIS AND NO CORPUS IN THIS TREE STANDS BEHIND IT. The argument
 	// for a small number is that a directory which WRAPS a dump is small by
@@ -157,6 +157,9 @@ const (
 	// justification, and the number it resolves to is as unmeasured as the one
 	// above.
 	maxNestedProbeChildren = maxExtensionScan
+
+	// Deep probes get their own budget so they cannot displace shallow roots.
+	maxDeepProbeChildren = maxNestedProbeChildren
 
 	// maxExtensionNameRunes bounds an accepted extension name. It is a bound on
 	// what becomes a key component and a rendered string, not a platform limit.
@@ -229,17 +232,8 @@ type extensionLayout struct {
 	// byDir maps an immediate child directory to the extension name its own
 	// manifest declares, the -AllExtensions shape. Nil otherwise.
 	byDir map[string]string
-	// byPrefix maps a TWO-SEGMENT root-relative prefix, "<child>/<grandchild>" and
-	// always slash-separated whatever the platform's separator is, to the extension
-	// name the manifest there declares. Nil otherwise.
-	//
-	// It exists because the two halves of the key derivation disagreed about depth.
-	// This detection stopped at the root's immediate children while anchorIndex in
-	// index.go scans EVERY segment, so an extension one level lower than the
-	// detection looks had its wrapper segments dropped with no namespace put back
-	// and its modules landed on the base configuration's own keys. Measured on the
-	// tree of issue 46: the surviving key served the EXTENSION's bytes, because
-	// WalkDir is lexical and the second write into pathByName won.
+	// byPrefix maps a slash-separated, root-relative prefix of at least two
+	// segments to the extension name its manifest declares. Nil otherwise.
 	//
 	// A key of this map can never share its first segment with a key of byDir: the
 	// descent runs only where the child's own verdict was manifestAbsent, which is
@@ -277,33 +271,35 @@ func (l extensionLayout) empty() bool {
 // a container that carries its own manifest, "ExtA/..." is ExtA's and only what is
 // left over is the container's. Resolving that by precedence instead, the way this
 // did before, filed every child under the container's name and collided them with
-// each other. THE LONGER PREFIX IS ASKED FIRST for the same reason one level
-// further down: two segments are more specific evidence than one.
+// each other. The closest matching ancestor wins.
 func (l extensionLayout) moduleKey(relPath string) string {
-	slash := filepath.ToSlash(relPath)
-	if len(l.byPrefix) > 0 {
-		parts := strings.Split(slash, "/")
-		// Two segments for the prefix and at least one for what is inside it.
-		if len(parts) >= 3 {
-			if name, ok := l.byPrefix[parts[0]+"/"+parts[1]]; ok {
-				return NFC("ext." + name + "." + bslPathToModuleName(strings.Join(parts[2:], "/")))
-			}
-		}
-	}
-	if len(l.byDir) > 0 {
-		parts := strings.Split(slash, "/")
-		// At least a directory and a file, or there is no extension subtree to be
-		// inside of.
-		if len(parts) >= 2 {
-			if name, ok := l.byDir[parts[0]]; ok {
-				return NFC("ext." + name + "." + bslPathToModuleName(strings.Join(parts[1:], "/")))
-			}
-		}
+	if name, inside := l.matchExtensionPrefix(filepath.ToSlash(relPath)); name != "" {
+		return NFC("ext." + name + "." + bslPathToModuleName(inside))
 	}
 	if l.self != "" {
 		return NFC("ext." + l.self + "." + bslPathToModuleName(relPath))
 	}
 	return bslPathToModuleName(relPath)
+}
+
+// matchExtensionPrefix returns the enclosing extension and the path inside it.
+// The input uses slash separators. Only complete ancestor segments can match.
+func (l extensionLayout) matchExtensionPrefix(path string) (string, string) {
+	if len(l.byPrefix) > 0 {
+		for end := strings.LastIndexByte(path, '/'); end >= 0; end = strings.LastIndexByte(path[:end], '/') {
+			if name := l.byPrefix[path[:end]]; name != "" {
+				return name, path[end+1:]
+			}
+		}
+	}
+	if len(l.byDir) > 0 {
+		if end := strings.IndexByte(path, '/'); end >= 0 {
+			if name := l.byDir[path[:end]]; name != "" {
+				return name, path[end+1:]
+			}
+		}
+	}
+	return "", path
 }
 
 // detectExtensionLayout reads dir and decides which of the two shapes it is, or
@@ -315,12 +311,10 @@ func (l extensionLayout) moduleKey(relPath string) string {
 // configuration dump means once, at the root. TestLayoutDetectionCostIsBounded
 // measures it as numbers rather than arguing it.
 //
-// THE DESCENT: ONE LEVEL FURTHER, AND ONLY WHERE THE FIRST LEVEL FOUND NOTHING. A
-// child whose own verdict was manifestAbsent, and whose NAME is not one
-// belongsToSelfExtension refuses, is listed once and each of ITS subdirectories is
-// asked the same manifest question. Nothing below that is looked at. The listing is
-// refused past maxNestedProbeEntries and the subdirectories asked across ALL
-// children are capped by maxNestedProbeChildren.
+// The shallow scan probes immediate children and the children of eligible
+// wrappers whose manifest is absent. The index continues breadth-first below
+// these wrappers with a separate budget. A bound scan for forms and summaries
+// stops after the shallow scan.
 //
 // WHAT THAT COSTS A BASE CONFIGURATION depends on its top level, not on its size.
 // The five kind directories of the tree TestLayoutDetectionCostIsBounded builds are
@@ -384,6 +378,7 @@ func detectExtensionLayoutMode(dir string, bound *os.Root) extensionLayout {
 		l.doubts = append(l.doubts, layoutDoubt{reason: reason})
 	}
 
+	var deepParents []string
 	scanned := 0
 	probed := 0
 	for _, e := range ents {
@@ -424,55 +419,46 @@ func detectExtensionLayoutMode(dir string, bound *os.Root) extensionLayout {
 			if belongsToSelfExtension(child) && !(strict && child == extensionDirName && l.self == "") {
 				continue
 			}
-			l.probeNestedExtensionsMode(dir, child, &probed, strict, readDir, verdictOf)
+			l.probeNestedExtensionsMode(dir, child, &probed, strict, readDir, verdictOf, &deepParents)
 		}
 	}
 	if !strict {
+		l.probeDeepExtensions(dir, deepParents)
 		l.dropPrefixNameCollisions()
 	}
 	return l
 }
 
-// dropPrefixNameCollisions removes every byPrefix entry whose extension name is not
-// unique across {self} + byDir + byPrefix. self and byDir are never touched.
-//
-// WHY ANYTHING IS DROPPED. moduleKey derives ONE namespace per NAME, so two entries
-// carrying one name key two subtrees into one namespace and one of the two files
-// stops being reachable through GetContent. Measured on the tree
-// TestADepthTwoExtensionMayNotTakeADepthOneName builds: without this pass the two
-// files produce ONE key twice, CollapsedKeys reports {Files:1 Keys:1}, and that key
-// serves the deeper file's bytes.
-//
-// NEITHER COLLIDING ENTRY IS KEPT. Dropping the byDir entry as well would send both
-// subtrees to one base key, and the extension one level down would lose the
-// namespace its own manifest declares to a directory that has no claim on it.
-// Keeping the first one is order dependent, and "first" here is os.ReadDir byte
-// order, which a rename changes.
-//
-// IT RUNS AFTER THE LOOP AND NOT AT THE ASSIGNMENT. byDir is INCOMPLETE while the
-// descent runs: os.ReadDir sorts, so a wrapper named «Ааа» is descended into before
-// a genuine «Настоящее» is read, and the same question asked where the entry is
-// recorded answers differently for two trees that differ by that rename.
-// TestTheNameCheckDoesNotDependOnDirectoryOrder is that difference as a test.
-//
-// The names are counted under NFC because that is the form moduleKey puts into the
-// key.
+// dropPrefixNameCollisions preserves shallow namespaces and drops competing
+// deep namespaces. The existing depth-two rule still drops any depth-two name
+// that is shared with another shallow root. Compare names in the NFC form used
+// by moduleKey and wait for the whole scan so directory order cannot pick a winner.
 func (l *extensionLayout) dropPrefixNameCollisions() {
 	if len(l.byPrefix) == 0 {
 		return
 	}
-	seen := make(map[string]int, len(l.byDir)+len(l.byPrefix)+1)
+	shallow := make(map[string]int, len(l.byDir)+len(l.byPrefix)+1)
+	deep := make(map[string]int)
 	if l.self != "" {
-		seen[NFC(l.self)]++
+		shallow[NFC(l.self)]++
 	}
 	for _, name := range l.byDir {
-		seen[NFC(name)]++
-	}
-	for _, name := range l.byPrefix {
-		seen[NFC(name)]++
+		shallow[NFC(name)]++
 	}
 	for prefix, name := range l.byPrefix {
-		if seen[NFC(name)] > 1 {
+		if strings.Count(prefix, "/") == 1 {
+			shallow[NFC(name)]++
+		} else {
+			deep[NFC(name)]++
+		}
+	}
+	for prefix, name := range l.byPrefix {
+		name = NFC(name)
+		if strings.Count(prefix, "/") == 1 {
+			if shallow[name] > 1 {
+				delete(l.byPrefix, prefix)
+			}
+		} else if shallow[name] > 0 || deep[name] > 1 {
 			delete(l.byPrefix, prefix)
 		}
 	}
@@ -481,14 +467,12 @@ func (l *extensionLayout) dropPrefixNameCollisions() {
 	}
 }
 
-// probeNestedExtensions asks the manifest question about the immediate children of
-// ONE child of the dump root, and records a hit under the two-segment prefix that
-// reaches it. It goes no deeper: depth two below the root is the whole of it.
-func (l *extensionLayout) probeNestedExtensions(root, child string, budget *int) {
-	l.probeNestedExtensionsMode(root, child, budget, false, os.ReadDir, manifestVerdictOf)
-}
-
-func (l *extensionLayout) probeNestedExtensionsMode(root, child string, budget *int, strict bool, readDir func(string) ([]os.DirEntry, error), verdictOf func(string, *extensionScanCost) (manifestVerdict, string, layoutDoubtReason)) {
+// probeNestedExtensionsMode keeps the original shallow scan budget and queues
+// only manifest-free, eligible second-level directories for index discovery.
+func (l *extensionLayout) probeNestedExtensionsMode(root, child string, budget *int, strict bool, readDir func(string) ([]os.DirEntry, error), verdictOf func(string, *extensionScanCost) (manifestVerdict, string, layoutDoubtReason), pending *[]string) {
+	if strict {
+		pending = nil
+	}
 	if *budget >= maxNestedProbeChildren {
 		if strict {
 			l.doubts = append(l.doubts, layoutDoubt{dir: child, reason: doubtScanTruncated})
@@ -541,14 +525,48 @@ func (l *extensionLayout) probeNestedExtensionsMode(root, child string, budget *
 		}
 		*budget++
 		prefix := child + "/" + grand
-		switch verdict, name, reason := verdictOf(filepath.Join(path, grand), &l.cost); verdict {
-		case manifestExtension:
-			if l.byPrefix == nil {
-				l.byPrefix = make(map[string]string, 2)
+		l.probeExtensionPrefix(filepath.Join(path, grand), prefix, verdictOf, pending)
+	}
+}
+
+func (l *extensionLayout) probeDeepExtensions(root string, pending []string) {
+	probed := 0
+	for len(pending) > 0 {
+		parent := pending[0]
+		pending = pending[1:]
+		path := filepath.Join(root, filepath.FromSlash(parent))
+		l.cost.ReadDirs++
+		ents, err := os.ReadDir(path)
+		if err != nil || len(ents) > maxNestedProbeEntries {
+			l.doubts = append(l.doubts, layoutDoubt{dir: parent, reason: doubtScanTruncated})
+			continue
+		}
+		for _, e := range ents {
+			if !e.IsDir() || belongsToSelfExtension(e.Name()) {
+				continue
 			}
-			l.byPrefix[prefix] = name
-		case manifestUndecided:
-			l.doubts = append(l.doubts, layoutDoubt{dir: prefix, reason: reason})
+			if probed == maxDeepProbeChildren {
+				l.doubts = append(l.doubts, layoutDoubt{dir: parent, reason: doubtScanTruncated})
+				return
+			}
+			probed++
+			l.probeExtensionPrefix(filepath.Join(path, e.Name()), parent+"/"+e.Name(), manifestVerdictOf, &pending)
+		}
+	}
+}
+
+func (l *extensionLayout) probeExtensionPrefix(path, prefix string, verdictOf func(string, *extensionScanCost) (manifestVerdict, string, layoutDoubtReason), pending *[]string) {
+	switch verdict, name, reason := verdictOf(path, &l.cost); verdict {
+	case manifestExtension:
+		if l.byPrefix == nil {
+			l.byPrefix = make(map[string]string, 2)
+		}
+		l.byPrefix[prefix] = name
+	case manifestUndecided:
+		l.doubts = append(l.doubts, layoutDoubt{dir: prefix, reason: reason})
+	case manifestAbsent:
+		if pending != nil {
+			*pending = append(*pending, prefix)
 		}
 	}
 }
@@ -1008,8 +1026,7 @@ type ExtensionLayoutSummary struct {
 	// Extensions is how many directories below the inspected path are extensions.
 	Extensions int
 	// Dirs are those directories as root-relative prefixes, slash-separated on
-	// every platform, sorted. A child contributes one segment and a grandchild two,
-	// so a reader is told WHERE the extension is and not only that one exists.
+	// every platform, sorted.
 	// OPERATOR LOG ONLY; see above.
 	Dirs []string
 	// The ways a directory can be undecided, counted separately because the
@@ -1020,8 +1037,7 @@ type ExtensionLayoutSummary struct {
 	NameRejected  int // declared a name that cannot be part of a key
 	Malformed     int // a comment, CDATA section or instruction that never closes
 	Unscannable   int // a markup declaration whose extent this scan cannot bound
-	// ScanTruncated reports that the child scan stopped at maxExtensionScan, so
-	// extensions below it were never looked for.
+	// ScanTruncated reports that a scan limit prevented some extension probes.
 	ScanTruncated bool
 }
 
