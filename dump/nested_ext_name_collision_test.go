@@ -217,9 +217,9 @@ func TestSameNameDirectFlatRekeysBeforeMutatingShards(t *testing.T) {
 			}
 			open(doubleCache, single)
 			doubleStored, err := LoadManifest(migCachePath(t, root, doubleCache))
-			if err != nil || doubleStored == nil || !slices.Equal(docIDsFromManifest(doubleStored), []string{
-				"ext.Legacy@/a." + collisionBaseKey, "ext.Legacy@/b." + collisionBaseKey,
-			}) {
+			if err != nil || doubleStored == nil || len(doubleStored.Files) != 2 ||
+				doubleStored.Files["a/"+collisionObjectRel].DocID != "ext.Legacy@/a."+collisionBaseKey ||
+				doubleStored.Files["b/"+collisionObjectRel].DocID != "ext.Legacy@/b."+collisionBaseKey {
 				t.Fatalf("removing a root changed the original flat manifest: %+v, %v", doubleStored, err)
 			}
 		})
@@ -369,4 +369,51 @@ func TestSameNameXMLOnlyEditKeepsAttachedDeepOwnership(t *testing.T) {
 	warm = open()
 	defer warm.Close()
 	check(warm, double, 1, first)
+}
+
+func TestSameNameMissingStampCanHoldQualifiedKeys(t *testing.T) {
+	const first, second = "wrap/exports/a", "wrap/exports/b"
+	const firstBody, secondBody = "// commonmarker firstmarker\n", "// commonmarker secondmarker\n"
+	root, cache := t.TempDir(), t.TempDir()
+	firstRoot := filepath.Join(root, filepath.FromSlash(first))
+	secondRoot := filepath.Join(root, filepath.FromSlash(second))
+	mkExtensionDump(t, firstRoot, extManifestClassic, "Legacy")
+	mkExtensionDump(t, secondRoot, extManifestClassic, "Legacy")
+	mkBSLFile(t, root, first+"/"+collisionObjectRel, firstBody)
+	mkBSLFile(t, root, second+"/"+collisionObjectRel, secondBody)
+
+	flat := migOpen(t, root, cache, false)
+	requireSameNameSearch(t, flat, map[string]string{
+		"ext.Legacy@/" + first + "." + collisionBaseKey:  firstBody,
+		"ext.Legacy@/" + second + "." + collisionBaseKey: secondBody,
+	})
+	flat.Close()
+	cpath := migCachePath(t, root, cache)
+	shardDirs := cacheShardDirs(cpath)
+	before := snapshotShardTree(t, shardDirs)
+	if err := os.Remove(manifestPath(cpath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(secondRoot, extManifestClassic)); err != nil {
+		t.Fatal(err)
+	}
+
+	idx := migOpen(t, root, cache, false)
+	defer idx.Close()
+	requireSameNameSearch(t, idx, map[string]string{
+		"ext.Legacy." + collisionBaseKey: firstBody,
+		collisionBaseKey:                 secondBody,
+	})
+	for _, mode := range []SearchMode{SearchModeSmart, SearchModeExact} {
+		matches, _, err := idx.Search(SearchParams{Query: "secondmarker", Mode: mode})
+		if err != nil || len(matches) != 1 || matches[0].Module != collisionBaseKey {
+			t.Errorf("%s search for restored base module = %+v, %v, want %q", mode, matches, err, collisionBaseKey)
+		}
+	}
+	if manifest, err := LoadManifest(cpath); err != nil || manifest != nil {
+		t.Errorf("manifest written over the old qualified shards: %+v, %v", manifest, err)
+	}
+	if after := snapshotShardTree(t, cacheShardDirs(cpath)); !sameSnapshot(after, before) {
+		t.Errorf("original qualified shard files changed: %v, want %v", after, before)
+	}
 }

@@ -1452,9 +1452,9 @@ func newIndex(dir, cacheDir string, reindex, prewarm bool) (*Index, error) {
 	if useCache && !reindex {
 		if shardDirs := cacheShardDirs(cpath); len(shardDirs) > 0 {
 			manifest, stale := flatCacheManifest(cpath)
-			if stale {
-				// The shards may still be open in a process using the old schema.
-				// Leave them in place and build without opening or locking them.
+			if stale || manifest == nil {
+				// Shards without a compatible stamp may have unrelated docIDs
+				// and may still be open in another process.
 				go func() {
 					defer close(idx.done)
 					if prewarm {
@@ -1463,32 +1463,12 @@ func newIndex(dir, cacheDir string, reindex, prewarm bool) (*Index, error) {
 						}
 						return
 					}
-					slog.Info("Building current index in memory beside an incompatible flat cache", "path", cpath)
+					slog.Info("Building current index in memory beside a flat cache without a compatible stamp", "path", cpath)
 					idx.buildShards("", false)
 				}()
 				return idx, nil
 			}
 
-			var unstampedPaths []string
-			if manifest == nil && !idx.layout().empty() {
-				paths, err := collectBSLPaths(dir)
-				if err != nil {
-					idx.setBuildErr(fmt.Errorf("loading BSL paths: %w", err))
-					close(idx.done)
-					return idx, nil
-				}
-				layout := idx.layout().finalizeNamespaces(slices.Values(paths))
-				if len(layout.qualified) != 0 {
-					// An unstamped cache can contain old IDs. Even opening those
-					// shards read-write can change their Bolt files.
-					go func() {
-						defer close(idx.done)
-						idx.rebuildAfterLayoutChange(cpath, paths, layout, prewarm)
-					}()
-					return idx, nil
-				}
-				unstampedPaths = paths
-			}
 			if shards, err := openCachedShards(shardDirs, false, ""); err == nil {
 				// Legacy flat layout stays read-WRITE: this path runs the incremental
 				// warm-start diff (loadFromManifestAndDiff) which mutates the base
@@ -1501,7 +1481,7 @@ func newIndex(dir, cacheDir string, reindex, prewarm bool) (*Index, error) {
 				// Fast startup: populate index from manifest, then apply incremental diff.
 				go func() {
 					defer close(idx.done)
-					if err := idx.loadFromManifestAndDiff(cpath, manifest, unstampedPaths, prewarm); err != nil {
+					if err := idx.loadFromManifestAndDiff(cpath, manifest, prewarm); err != nil {
 						// Fallback: walk filesystem if manifest-based load fails.
 						slog.Warn("Manifest load failed, falling back to walk", "error", err)
 						if err := idx.loadBSLPaths(dir); err != nil {
@@ -2253,16 +2233,7 @@ func (idx *Index) loadBSLFiles(dir string) error {
 // Populates idx.names, idx.pathByName, and idx.pathToDocID.
 // This is the fast startup path (~0.5s) used when cached shards exist.
 func (idx *Index) loadBSLPaths(dir string) error {
-	paths, err := collectBSLPaths(dir)
-	if err != nil {
-		return err
-	}
-	idx.installBSLPaths(dir, paths, idx.layout().finalizeNamespaces(slices.Values(paths)))
-	return nil
-}
-
-func collectBSLPaths(dir string) ([]string, error) {
-	paths := []string{}
+	var paths []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -2287,7 +2258,11 @@ func collectBSLPaths(dir string) ([]string, error) {
 		paths = append(paths, filepath.ToSlash(rel))
 		return nil
 	})
-	return paths, err
+	if err != nil {
+		return err
+	}
+	idx.installBSLPaths(dir, paths, idx.layout().finalizeNamespaces(slices.Values(paths)))
+	return nil
 }
 
 func indexableBSLPath(dir, path string, entry fs.DirEntry) bool {
@@ -3158,21 +3133,8 @@ func (idx *Index) filterModules(namespace, category, moduleType string) ([]strin
 // loadFromManifestAndDiff populates the index from a cached manifest and applies
 // incremental updates using a single filesystem walk (via Diff). This is the fastest
 // startup path: manifest provides names/paths, Diff detects changes.
-// If the manifest is absent, derive names from a fresh walk.
-func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, unstampedPaths []string, prewarm bool) error {
+func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, prewarm bool) error {
 	layout := idx.layout()
-	if manifest == nil {
-		if unstampedPaths == nil {
-			var err error
-			unstampedPaths, err = collectBSLPaths(idx.dir)
-			if err != nil {
-				return err
-			}
-		}
-		idx.installBSLPaths(idx.dir, unstampedPaths, layout)
-		idx.saveManifest(cacheDir)
-		return nil
-	}
 
 	// Reuse the diff walk for paths whose IDs can change together. Also
 	// look for stored qualifiers when the last recognised root is gone.
@@ -3374,8 +3336,8 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, u
 	return nil
 }
 
-// Rebuild outside the flat cache when its stored keys can differ from the
-// current layout. Check before any incremental writes to flat shards.
+// A surviving path changing docID invalidates shard placement. Rebuild
+// outside the flat cache before any incremental writes.
 func (idx *Index) rebuildAfterLayoutChange(cpath string, paths []string, layout extensionLayout, prewarm bool) {
 	if idx.lockDir != "" {
 		removeCacheLock(idx.lockDir)

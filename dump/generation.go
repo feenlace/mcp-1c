@@ -1732,7 +1732,7 @@ func flatCacheAdoptable(cpath, dir string) (bool, string) {
 
 // flatCacheManifest reads the flat stamp once before opening any shards. An
 // existing but unusable stamp has unknown provenance and is treated as stale.
-// An absent stamp can come from an interrupted build and needs a layout check.
+// An absent stamp can come from an interrupted build of any layout or schema.
 func flatCacheManifest(cpath string) (*Manifest, bool) {
 	m, err := LoadManifest(cpath)
 	if err == nil && m != nil {
