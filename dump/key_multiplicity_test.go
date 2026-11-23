@@ -149,7 +149,7 @@ func TestKeyMultiplicityIsPublishedOnEveryInstallPath(t *testing.T) {
 	collided, unique := multiplicityFixtureFiles(t, dir)
 
 	armsRun++
-	recordedFuncs = append(recordedFuncs, "loadBSLPaths")
+	recordedFuncs = append(recordedFuncs, "installBSLPaths")
 	t.Run("loadBSLPaths_coldBuildWithCache", func(t *testing.T) {
 		idx, err := NewIndex(dir, cacheDir, false)
 		if err != nil {
