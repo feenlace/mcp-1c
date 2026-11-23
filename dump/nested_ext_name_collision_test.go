@@ -368,7 +368,35 @@ func TestSameNameXMLOnlyEditKeepsAttachedDeepOwnership(t *testing.T) {
 	idx.Close()
 	warm = open()
 	defer warm.Close()
-	check(warm, double, 1, first)
+	check(warm, double, 0, first)
+}
+
+func TestSameNameQualifiedRootCanContainAWrappedPath(t *testing.T) {
+	root, cache := t.TempDir(), t.TempDir()
+	for _, dir := range []string{"a.b", "b"} {
+		mkExtensionDump(t, filepath.Join(root, dir), extManifestClassic, "Legacy")
+	}
+	mkBSLFile(t, root, "a.b/extra/"+collisionObjectRel, "// wrapped body\n")
+	mkBSLFile(t, root, "b/"+collisionObjectRel, "// regular body\n")
+	sig := mustGenSig(t, root)
+	if err := BuildGeneration(root, cache, sig); err != nil {
+		t.Fatal(err)
+	}
+
+	// Current discovery would consume "extra"; the persisted owner does not.
+	if err := os.Remove(filepath.Join(root, "a.b", extManifestClassic)); err != nil {
+		t.Fatal(err)
+	}
+	mkExtensionDump(t, filepath.Join(root, "a.b", "extra"), extManifestClassic, "Legacy")
+	idx := openSameNameGeneration(t, root, cache, sig)
+	defer idx.Close()
+	requireCollisionBodies(t, idx, map[string]string{
+		"ext.Legacy@/a%2Eb." + collisionBaseKey: "// wrapped body\n",
+		"ext.Legacy@/b." + collisionBaseKey:     "// regular body\n",
+	})
+	if got := idx.WrappedPaths(); got != (WrappedPathState{Files: 1, Total: 2}) {
+		t.Errorf("wrapped paths = %+v, want one wrap below a qualified root", got)
+	}
 }
 
 func TestSameNameMissingStampCanHoldQualifiedKeys(t *testing.T) {

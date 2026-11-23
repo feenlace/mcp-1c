@@ -55,6 +55,34 @@ func (l extensionLayout) wrapDepth(relPath string) int {
 	return anchorIndex(strings.Split(inside, "/"))
 }
 
+// An attached generation can still own a qualified root after an XML-only edit.
+// Prove that ownership from the indexed path and complete key before using it.
+func indexedQualifiedRemainder(path, docID string) (string, bool) {
+	key, extension := strings.CutPrefix(docID, "ext.")
+	if !extension {
+		return "", false
+	}
+	owner, _, _ := strings.Cut(key, ".")
+	name, encodedRoot, qualified := strings.Cut(owner, extensionRootSeparator)
+	if !qualified || !validExtensionName(name) {
+		return "", false
+	}
+
+	prefix, inside := "", path
+	if encodedRoot != "" {
+		for range strings.Count(encodedRoot, "/") + 1 {
+			_, rest, found := strings.Cut(inside, "/")
+			if !found {
+				return "", false
+			}
+			inside = rest
+		}
+		prefix = path[:len(path)-len(inside)-1]
+	}
+	key = NFC("ext." + qualifiedExtensionName(name, prefix) + "." + bslPathToModuleName(inside))
+	return inside, key == docID
+}
+
 // noteWrappedPaths publishes the report for the paths currently installed.
 //
 // It reads idx.pathToDocID rather than taking an argument, because that map is the
@@ -79,8 +107,14 @@ type indexedLayoutState struct {
 func (idx *Index) noteWrappedPaths() {
 	l := idx.layout().persistedExtensionLayout(idx.pathToDocID)
 	st := WrappedPathState{Total: len(idx.pathToDocID)}
-	for rel := range idx.pathToDocID {
-		if l.wrapDepth(rel) > 0 {
+	for rel, docID := range idx.pathToDocID {
+		var depth int
+		if inside, ok := indexedQualifiedRemainder(rel, docID); ok {
+			depth = anchorIndex(strings.Split(inside, "/"))
+		} else {
+			depth = l.wrapDepth(rel)
+		}
+		if depth > 0 {
 			st.Files++
 		}
 	}
