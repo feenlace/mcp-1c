@@ -1,7 +1,6 @@
 package dump
 
 import (
-	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 // THE FIX HAS TO REACH AN INSTALLATION THAT ALREADY HAS A CACHE, and nothing in
@@ -157,49 +155,19 @@ func TestASchemaStaleFlatCacheIsRebuiltAndDeliversTheNestedExtensionKey(t *testi
 		t.Fatalf("BuildError after the reopen finished: %v", err)
 	}
 
-	// ARTIFACT 1: the flat cache was emptied, so a rebuild really ran.
-	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Errorf("the schema-stale flat cache was reused: the marker survived (stat err=%v). "+
-			"Nothing below can mean a rebuild if this one holds.", statErr)
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("existing flat cache marker was changed: %v", statErr)
+	}
+	old, err := LoadManifest(cpath)
+	if err != nil || old == nil || old.schemaVersion() != dumpIndexSchemaVersion-1 ||
+		!slices.Equal(docIDsFromManifest(old), []string{issue46BaseKey}) {
+		t.Errorf("original flat manifest changed: %+v, %v", old, err)
 	}
 
-	// ARTIFACT 2: a manifest is on disk, re-stamped current and carrying the
-	// NAMESPACED key.
-	//
-	// Waited for by file rather than read straight after readiness: the rebuilt
-	// manifest is saved after the readiness flip. The wait cannot manufacture a
-	// pass. It waits for existence only, and the stale-stamped manifest is deleted
-	// synchronously inside NewIndex, so a cache that had been REUSED would leave
-	// that old file in place, waitManifest would return it, and both checks below
-	// would fail on it.
-	reM := waitManifest(t, cpath, 60*time.Second)
-	if reM.schemaVersion() != dumpIndexSchemaVersion {
-		t.Errorf("rebuilt manifest is stamped schema %d, want the current %d",
-			reM.schemaVersion(), dumpIndexSchemaVersion)
-	}
-	post := docIDsFromManifest(reM)
-	if !slices.Contains(post, issue46ExtKey) {
-		t.Errorf("the rebuilt manifest persists %v, want the namespaced key %q: the cache was "+
-			"dropped but what replaced it does not carry the fix", post, issue46ExtKey)
-	}
-	if slices.Contains(post, issue46BaseKey) {
-		t.Errorf("the rebuilt manifest still persists the pre-fix key %q: %v", issue46BaseKey, post)
-	}
-
-	// ARTIFACT 3: and that is what the index answers with, bytes included. A key
-	// that resolves to the wrong file would satisfy the two checks above.
-	body, ok := idx.GetContent(issue46ExtKey)
-	if !ok {
-		t.Fatalf("GetContent(%q) = not found after the rebuild. Names: %v",
-			issue46ExtKey, idx.ModuleNames())
-	}
-	if body != issue46ExtBody {
-		t.Errorf("GetContent(%q) returned %q, want the extension's own bytes %q",
-			issue46ExtKey, body, issue46ExtBody)
-	}
-	if _, stillThere := idx.GetContent(issue46BaseKey); stillThere {
-		t.Errorf("the pre-fix key %q still resolves after the rebuild, so the extension's "+
-			"module is still reachable as the base configuration's", issue46BaseKey)
+	requireCollisionBodies(t, idx, map[string]string{issue46ExtKey: issue46ExtBody})
+	matches, _, err := idx.Search(SearchParams{Query: issue46SearchTerm})
+	if err != nil || len(matches) != 1 || matches[0].Module != issue46ExtKey {
+		t.Errorf("smart search = %+v, %v, want %q", matches, err, issue46ExtKey)
 	}
 }
 
@@ -356,23 +324,18 @@ const issue46SearchTerm = "расширение"
 // manifest goes only if every shard went. A shard whose removal FAILED must keep
 // the manifest beside it, because that manifest is the only surviving evidence
 // that those shards are foreign.
-func TestAnInterruptedFlatCacheDropIsRetriedRatherThanServed(t *testing.T) {
+func TestAnInterruptedFlatCacheDropKeepsItsStampAndIsBypassed(t *testing.T) {
 	if !strings.Contains(issue46ExtBody, issue46SearchTerm) {
 		t.Fatalf("premise broken: the extension body %q does not carry %q, so a search for it "+
 			"measures nothing", issue46ExtBody, issue46SearchTerm)
 	}
 
-	// CONTROL. Same tree, same foreign stamp, no interruption: the gate drops the
-	// cache whole and the cold rebuild answers the query. It is what makes the arm
-	// below about the INTERRUPTION rather than about the stamp — a green there has
-	// to be reachable without one, or the arm is only measuring that a stale cache
-	// is rebuilt.
-	t.Run("control: the same stamp with no interruption", func(t *testing.T) {
+	t.Run("intact stale flat", func(t *testing.T) {
 		root, cacheDir, cpath := staleFlatCacheOfIssue46(t)
 		stampFlatCacheOneSchemaBack(t, cpath)
 		if !flatCacheSchemaStale(cpath) {
 			t.Fatalf("premise broken: a cache stamped one schema version back is not seen as " +
-				"stale, so this control drops nothing")
+				"stale")
 		}
 		assertIssue46IsSearchable(t, root, cacheDir, "the first start")
 		assertIssue46IsSearchable(t, root, cacheDir, "the reopen after it")
@@ -444,7 +407,7 @@ func TestAnInterruptedFlatCacheDropIsRetriedRatherThanServed(t *testing.T) {
 		}
 
 		// ASSERTION 1: the manifest outlived the shard the drop could not take, so
-		// the cache still declares itself foreign and the drop will be retried.
+		// the cache still declares itself foreign.
 		//
 		// Errorf and not Fatalf: when this one fails the manifest is gone, which is
 		// precisely the state the assertions below are about, and running them says
@@ -456,48 +419,14 @@ func TestAnInterruptedFlatCacheDropIsRetriedRatherThanServed(t *testing.T) {
 				"serve those shards.", blocked)
 		}
 
-		// THE RETRY, DRIVEN THROUGH THE REAL GATE WITH THE OBSTRUCTION STILL THERE.
-		// The assertion above reads the state a drop leaves; this reads what NewIndex
-		// does with it. The gate has to fire a second time, the second drop has to
-		// keep the manifest again, and the partial drop has to be reported rather
-		// than left for an operator to infer from an empty search.
-		rec := captureLogs(t)
-		func() {
-			idx, err := NewIndex(root, cacheDir, false)
-			if err != nil {
-				t.Fatalf("NewIndex over a cache whose drop is still blocked: %v", err)
-			}
-			defer idx.Close()
-			<-idx.Done()
-		}()
-		if !flatCacheSchemaStale(cpath) {
-			t.Errorf("after a start whose drop was blocked again, the cache no longer reads "+
-				"as schema-stale, so the start after it would serve the foreign shards in %s",
-				blocked)
-		}
-		errs := rec.atLevel(slog.LevelError)
-		if !slices.ContainsFunc(errs, func(m string) bool {
-			return strings.Contains(m, "did not take every shard")
-		}) {
-			t.Errorf("a drop that left a shard behind was not reported at ERROR. Messages at "+
-				"ERROR: %v. WARN is dropped by the three default logger configurations this "+
-				"binary runs --build-index and the MCP pipe launch under, so a quieter level "+
-				"is the same as no report at all.", errs)
-		}
-
-		// The obstruction clears, as it does once the process that was holding the
-		// shard is gone. This is the next start, and the question is what it serves.
-		// Restored over the whole subtree for the same reason it was cleared over the
-		// whole subtree: buildShard opens with an os.RemoveAll of the shard path, and
-		// one directory left read-only deeper down fails the rebuild.
-		chmodDirs(t, blocked, 0o755)
-
-		// ASSERTION 2 and 3: the retry, and then the start after it. The second one
-		// is not a repetition — the first start writes a manifest, and if it wrote a
-		// current-stamped one over a foreign shard the gate can never fire again, so
-		// a search that only works once is the self-sealing failure and not a fix.
 		assertIssue46IsSearchable(t, root, cacheDir, "the start after the interruption")
 		assertIssue46IsSearchable(t, root, cacheDir, "the reopen after that")
+		if !flatCacheSchemaStale(cpath) {
+			t.Error("original flat cache no longer carries its stale stamp")
+		}
+		if after := treeInventory(t, blocked); !slices.Equal(before, after) {
+			t.Errorf("stale shards changed after separate rebuild: %v, want %v", after, before)
+		}
 	})
 }
 

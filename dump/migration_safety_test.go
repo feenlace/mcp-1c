@@ -60,6 +60,11 @@ func migOpen(t *testing.T, dumpDir, cacheDir string, reindex bool) *Index {
 // R5: an unreadable manifest read as NOT stale
 // ---------------------------------------------------------------------------
 
+func flatCacheSchemaStale(cpath string) bool {
+	_, stale := flatCacheManifest(cpath)
+	return stale
+}
+
 // TestUnreadableFlatManifestReadsAsStale pins the schema gate's answer for a
 // manifest that is THERE and cannot be used.
 //
@@ -165,9 +170,9 @@ func TestUnreadableFlatManifestReadsAsStale(t *testing.T) {
 	}
 }
 
-// TestUnusableFlatManifestIsDroppedAndRebuilt is the same fact one level up: the
+// TestUnusableFlatManifestIsPreservedAndBypassed is the same fact one level up: the
 // open ACTS on the gate rather than merely computing it.
-func TestUnusableFlatManifestIsDroppedAndRebuilt(t *testing.T) {
+func TestUnusableFlatManifestIsPreservedAndBypassed(t *testing.T) {
 	dumpDir := t.TempDir()
 	cacheDir := t.TempDir()
 	migWriteModule(t, dumpDir, "CommonModules/Общий/Ext/Module.bsl", "Процедура Тест()\nКонецПроцедуры\n")
@@ -182,22 +187,17 @@ func TestUnusableFlatManifestIsDroppedAndRebuilt(t *testing.T) {
 	idx := migOpen(t, dumpDir, cacheDir, false)
 	defer idx.Close()
 
-	// A usable, current-schema manifest is back, which can only have come from a
-	// rebuild: the corrupt one is not repairable in place.
-	m, err := LoadManifest(cpath)
-	if err != nil || m == nil {
-		t.Fatalf("after the open the flat manifest is still unusable: m=%v err=%v", m, err)
+	raw, err := os.ReadFile(manifestPath(cpath))
+	if err != nil || string(raw) != "{not json" {
+		t.Errorf("unusable flat manifest was changed: %q, %v", raw, err)
 	}
-	if m.schemaVersion() != dumpIndexSchemaVersion {
-		t.Errorf("rebuilt manifest is stamped schema %d, want %d", m.schemaVersion(), dumpIndexSchemaVersion)
-	}
-	// And the index answers, so the drop did not cost the user their search.
+
 	matches, _, err := idx.SearchWithStats(SearchParams{Query: "Процедура", Mode: SearchModeExact, Limit: 10})
 	if err != nil {
 		t.Fatalf("search after the rebuild: %v", err)
 	}
 	if len(matches) == 0 {
-		t.Error("the rebuilt index finds nothing, so the drop broke the cache instead of refreshing it")
+		t.Error("the independently rebuilt index finds nothing")
 	}
 }
 

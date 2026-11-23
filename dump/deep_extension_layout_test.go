@@ -73,11 +73,11 @@ func TestDeepExtensionDiscoveryPreservesRecognizedRoots(t *testing.T) {
 	outside := mkExtensionDump(t, t.TempDir(), extManifestClassic, "Outside")
 	symlinkOrSkip(t, outside, filepath.Join(root, "outer", "branch", "linked"))
 	layout := detectExtensionLayout(root)
-	if got := layout.summary().Dirs; !slices.Equal(got, []string{"outer/branch/known", "shallow/wrapper"}) {
+	if got := layout.summary().Dirs; !slices.Equal(got, []string{"outer/branch/deep", "outer/branch/duplicate-a", "outer/branch/duplicate-b", "outer/branch/known", "shallow/wrapper"}) {
 		t.Fatalf("recognized prefixes = %v", got)
 	}
 	const module = "/Catalogs/Items/Ext/ObjectModule.bsl"
-	if got := layout.moduleKey("shallow/wrapper" + module); got != "ext.Й.Справочник.Items.МодульОбъекта" {
+	if got := layout.finalizeNamespaces(nil).moduleKey("shallow/wrapper" + module); got != "ext.Й@/shallow/wrapper.Справочник.Items.МодульОбъекта" {
 		t.Errorf("the deep NFC duplicate took the shallow key: %q", got)
 	}
 }
@@ -248,7 +248,7 @@ func TestDeepExtensionKeepsLegacyModuleIdentity(t *testing.T) {
 			}
 
 			deepOnly := map[string]string{extKey: "// deepmarker\n"}
-			mixed := map[string]string{extKey: "// legacymarker\n", oldKey: "// deepmarker\n"}
+			mixed := map[string]string{extKey: "// legacymarker\n", "ext.Й@/" + deep + "." + oldKey: "// deepmarker\n"}
 			flatSnapshot := func(cache string, want map[string]string) func() {
 				t.Helper()
 				cpath, err := cachePath(root, cache)

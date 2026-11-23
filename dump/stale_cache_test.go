@@ -116,13 +116,9 @@ func TestLoadFromManifest_NFCNormalisesStaleNFDDocID(t *testing.T) {
 	}
 }
 
-// TestNewIndex_DropsStaleSchemaFlatCache is the HARDENING regression: a legacy flat
-// cache whose manifest records an OLDER index schema (as every pre-schema-bump cache
-// does) must be dropped and cold-rebuilt by the schema gate in NewIndex, not reused.
-// The rebuild also re-creates the Bleve shard docIDs under the current schema (the
-// part the in-place NFC fix at the maps cannot reach). A drop is detected via a
-// marker file the gate's removeFlatCacheContents deletes; a reuse would leave it.
-func TestNewIndex_DropsStaleSchemaFlatCache(t *testing.T) {
+// A stamped older flat cache remains available to its original schema while the
+// new standalone index builds separately.
+func TestNewIndex_PreservesStaleSchemaFlatCache(t *testing.T) {
 	if dumpIndexSchemaVersion == baselineSchemaVersion {
 		t.Skip("current binary is still on the baseline schema; no older schema to simulate")
 	}
@@ -139,8 +135,7 @@ func TestNewIndex_DropsStaleSchemaFlatCache(t *testing.T) {
 		t.Fatalf("cachePath: %v", err)
 	}
 
-	// Marker distinguishes reuse (survives) from drop+rebuild (removeFlatCacheContents
-	// deletes everything under cpath except the g/ generations subtree).
+	// The rebuild should preserve existing flat cache files.
 	marker := filepath.Join(cpath, "reuse-marker")
 	if err := os.WriteFile(marker, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write marker: %v", err)
@@ -164,29 +159,16 @@ func TestNewIndex_DropsStaleSchemaFlatCache(t *testing.T) {
 	defer idx.Close()
 	waitReady(t, idx, 30*time.Second)
 
-	// Dropped: the marker is gone.
-	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Errorf("stale-schema flat cache was reused (marker survived, stat err=%v); expected drop+rebuild", statErr)
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Errorf("existing flat cache marker was changed: %v", statErr)
 	}
-	// Rebuilt: the new manifest is re-stamped to the current schema.
-	//
-	// Waited for by FILE, not by Ready(): the rebuilt manifest is saved after the
-	// readiness flip (see waitManifest), so reading it straight after waitReady
-	// raced the build and failed 7 times in 40 runs with "m=<nil> err=<nil>".
-	//
-	// The wait cannot manufacture a pass. It waits for existence only, and the
-	// tampered baseline-stamped manifest is already gone by this point:
-	// removeFlatCacheContents deletes it synchronously inside NewIndex, keeping
-	// only the g/ subtree. Had the stale cache been REUSED instead of dropped,
-	// that old manifest would still be on disk, waitManifest would return it, and
-	// the schema check below would fail on it exactly as it did before.
 	reM := waitManifest(t, cpath, 30*time.Second)
-	if reM.schemaVersion() != dumpIndexSchemaVersion {
-		t.Errorf("rebuilt manifest schema = %d, want current %d", reM.schemaVersion(), dumpIndexSchemaVersion)
+	if reM.schemaVersion() != baselineSchemaVersion {
+		t.Errorf("flat schema = %d, want original %d", reM.schemaVersion(), baselineSchemaVersion)
 	}
 	// Still resolvable, and exactly the one module is present.
 	if _, ok := idx.GetContent("Справочник.Номенклатура.МодульОбъекта"); !ok {
-		t.Error("module not resolvable after stale-schema drop+rebuild")
+		t.Error("module not resolvable after separate rebuild")
 	}
 	if idx.ModuleCount() != 1 {
 		t.Errorf("expected 1 module after rebuild, got %d", idx.ModuleCount())

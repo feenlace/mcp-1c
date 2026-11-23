@@ -51,7 +51,7 @@ type WrappedPathState struct {
 //
 // Use the same enclosing prefix as moduleKey, then measure the remaining path.
 func (l extensionLayout) wrapDepth(relPath string) int {
-	_, inside := l.indexedExtensionPrefix(filepath.ToSlash(relPath))
+	_, _, inside := l.indexedExtensionPrefix(filepath.ToSlash(relPath))
 	return anchorIndex(strings.Split(inside, "/"))
 }
 

@@ -119,7 +119,7 @@ const (
 	// GetContent/resolve query — module_code and resolve returned not-found for any
 	// such name. The bump forces a fresh NFC-keyed build: a v1 generation now derives
 	// a different gensig (rebuilt on serve, never adopted), and a v1 legacy-flat cache
-	// is dropped by the schema gate in NewIndex (flatCacheSchemaStale) and cold-rebuilt.
+	// is bypassed by the schema gate in NewIndex (flatCacheManifest) and rebuilt separately.
 	//
 	// v3: the docID derivation (bslPathToModuleName) changed for six top-level dump
 	// directories. Five service kinds (HTTPServices, WebServices, SettingsStorages,
@@ -232,7 +232,9 @@ const (
 	// v9: the BSL index recognizes classic extension manifests below the
 	// shallow scan and uses the full relative prefix for docIDs. The same BSL
 	// files can now have different keys, so READY and flat v8 caches must rebuild.
-	dumpIndexSchemaVersion = 9
+	// v10: conflicting manifest roots have distinct BSL docIDs qualified by
+	// their full relative paths.
+	dumpIndexSchemaVersion = 10
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and
@@ -1728,53 +1730,22 @@ func flatCacheAdoptable(cpath, dir string) (bool, string) {
 	return true, ""
 }
 
-// flatCacheSchemaStale reports whether the legacy flat cache under cpath was built
-// under an index schema / on-disk zap format the running binary cannot safely reuse
-// (see the BUMP PROTOCOL above). A stale flat cache must be dropped and cold-rebuilt
-// rather than served: its shard docIDs and manifest keys were produced under a
-// different schema — e.g. before module names were NFC-normalised, so a macOS dump's
-// decomposable (short-I / IO) names were stored NFD and never match an NFC query —
-// so reusing it silently breaks module_code / resolve for those names.
-//
-// IT ANSWERS "STALE" FOR A MANIFEST THAT IS THERE AND CANNOT BE USED, and that is
-// a correction rather than caution. It used to answer "reuse" for every way of
-// failing to read one: an I/O error, a corrupt file, an incompatible manifest
-// version. The shards were then opened and the names re-derived by the CURRENT
-// binary, so the served state became this binary's module names over the other
-// binary's shard docIDs. Every hit the index returns from such a shard is a docID
-// GetContent cannot resolve, which the search counts into SearchStats.Unreadable
-// and reports through tools/search.go:searchShortfallNote as content it could not
-// obtain, with the remedy for a changed dump. The condition is a stale cache and
-// it was diagnosed as a moved one.
-//
-// That path had never been exercised on a large scale, because until v4 no schema
-// bump had happened since the stamp was introduced. The v3 -> v4 bump makes the
-// transition happen on every installation at once, which is what turns a latent
-// misreading into a certain one.
-//
-// AN ABSENT MANIFEST STILL READS AS "REUSE", and the two are deliberately not one
-// answer. A cache directory holding shards and no manifest at all is the shape a
-// build leaves behind before it writes one, and those shards were written by the
-// binary that is running; loadFromManifestAndDiff re-walks the dump with the
-// current schema and writes a fresh manifest. Nothing about that state suggests a
-// foreign schema, so dropping it would be a gratuitous cold rebuild.
-//
-// So the discriminator is PRESENCE, asked separately from readability, because
-// LoadManifest deliberately collapses "absent" and "version-incompatible" into the
-// same nil for callers that only want a usable manifest or nothing.
-func flatCacheSchemaStale(cpath string) bool {
+// flatCacheManifest reads the flat stamp once before opening any shards. An
+// existing but unusable stamp has unknown provenance and is treated as stale.
+// An absent stamp can come from an interrupted build and needs a layout check.
+func flatCacheManifest(cpath string) (*Manifest, bool) {
 	m, err := LoadManifest(cpath)
 	if err == nil && m != nil {
-		return m.schemaVersion() != dumpIndexSchemaVersion || m.zapVersion() != zapSegmentVersion
+		return m, m.schemaVersion() != dumpIndexSchemaVersion || m.zapVersion() != zapSegmentVersion
 	}
 	if _, statErr := os.Stat(manifestPath(cpath)); statErr != nil {
-		return false // no manifest on disk at all
+		return nil, false // no manifest on disk at all
 	}
 	// A manifest file exists and nothing usable came out of it. What schema wrote
 	// the shards beside it is unknown, and "unknown" is not "mine".
 	slog.Info("dump: the flat index cache has a manifest that cannot be read; treating the "+
 		"cache as built under an unknown index schema", "path", cpath, "error", err)
-	return true
+	return nil, true
 }
 
 // adoptFlatShards adopts the legacy flat shards (shardDirs, all directly under

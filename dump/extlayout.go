@@ -11,6 +11,9 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // The two dump shapes 1C actually emits for configuration extensions.
@@ -241,6 +244,8 @@ type extensionLayout struct {
 	// descent runs only where the child's own verdict was manifestAbsent, which is
 	// exactly the verdict that keeps that child out of byDir.
 	byPrefix map[string]string
+	// qualified holds the index namespace for roots whose ordinary name is shared.
+	qualified map[string]string
 	// doubts is every directory whose extension-ness could not be decided. It is
 	// never a reason to guess; it is the thing that gets reported.
 	doubts []layoutDoubt
@@ -262,26 +267,16 @@ func (l extensionLayout) empty() bool {
 	return l.self == "" && len(l.byDir) == 0 && len(l.byPrefix) == 0
 }
 
-// moduleKey derives the index key for a dump-relative path under this layout.
-//
-// It delegates to bslPathToModuleName for everything except the namespace, so an
-// extension's modules go through exactly the same derivation the base
-// configuration does and land on the same "ext.<Имя>." shape the Расширения layout
-// has always produced. One key shape, three ways of arriving at it.
-//
-// A CHILD BEATS THE ROOT, because a child match is the more specific evidence: in
-// a container that carries its own manifest, "ExtA/..." is ExtA's and only what is
-// left over is the container's. Resolving that by precedence instead, the way this
-// did before, filed every child under the container's name and collided them with
-// each other. The closest matching ancestor wins.
+// moduleKey uses the nearest recognised root and the ordinary module suffix.
 func (l extensionLayout) moduleKey(relPath string) string {
-	if name, inside := l.indexedExtensionPrefix(filepath.ToSlash(relPath)); name != "" {
-		return NFC("ext." + name + "." + bslPathToModuleName(inside))
+	prefix, name, inside := l.indexedExtensionPrefix(filepath.ToSlash(relPath))
+	if name == "" {
+		return bslPathToModuleName(relPath)
 	}
-	if l.self != "" {
-		return NFC("ext." + l.self + "." + bslPathToModuleName(relPath))
+	if qualified := l.qualified[prefix]; qualified != "" {
+		name = qualified
 	}
-	return bslPathToModuleName(relPath)
+	return NFC("ext." + name + "." + bslPathToModuleName(inside))
 }
 
 // matchExtensionPrefix returns the enclosing extension and the path inside it.
@@ -304,13 +299,17 @@ func (l extensionLayout) matchExtensionPrefix(path string) (string, string) {
 	return "", path
 }
 
-// An existing legacy key takes precedence over a newly discovered deep prefix.
-func (l extensionLayout) indexedExtensionPrefix(path string) (string, string) {
-	name, inside := l.matchExtensionPrefix(path)
-	if name != "" && isDeepExtensionPrefix(path[:len(path)-len(inside)-1]) && l.legacyNamespace(path) != "" {
-		return "", path
+// Preserve the legacy interpretation of paths enclosed by a deep manifest.
+func (l extensionLayout) indexedExtensionPrefix(path string) (prefix, name, inside string) {
+	name, inside = l.matchExtensionPrefix(path)
+	if name == "" {
+		return "", l.self, path
 	}
-	return name, inside
+	prefix = path[:len(path)-len(inside)-1]
+	if isDeepExtensionPrefix(prefix) && l.legacyNamespace(path) != "" {
+		return "", "", path
+	}
+	return prefix, name, inside
 }
 
 func isDeepExtensionPrefix(prefix string) bool {
@@ -324,17 +323,6 @@ func (l extensionLayout) hasDeepExtensions() bool {
 		}
 	}
 	return false
-}
-
-func (l extensionLayout) deepExtensionPrefix(path string) string {
-	name, inside := l.matchExtensionPrefix(path)
-	if name != "" {
-		prefix := path[:len(path)-len(inside)-1]
-		if isDeepExtensionPrefix(prefix) {
-			return prefix
-		}
-	}
-	return ""
 }
 
 // legacyNamespace uses the same anchor as bslPathToModuleName, including a
@@ -355,27 +343,76 @@ func (l extensionLayout) legacyNamespace(path string) string {
 	return ""
 }
 
-// protectLegacyNamespaces only reserves namespaces represented by indexed paths.
-func (l extensionLayout) protectLegacyNamespaces(paths iter.Seq[string]) extensionLayout {
-	if !l.hasDeepExtensions() {
+// finalizeNamespaces reserves actual legacy keys and qualifies every member of a
+// repeated manifest name. Manifest discovery stays available to the diagnostics.
+func (l extensionLayout) finalizeNamespaces(paths iter.Seq[string]) extensionLayout {
+	if l.empty() {
 		return l
 	}
-	legacy := make(map[string]bool)
-	for path := range paths {
-		if name := l.legacyNamespace(path); name != "" {
-			legacy[name] = true
+	roots := make(map[string]string, len(l.byDir)+len(l.byPrefix)+1)
+	if l.self != "" {
+		roots[""] = NFC(l.self)
+	}
+	for path, name := range l.byDir {
+		roots[path] = NFC(name)
+	}
+	for path, name := range l.byPrefix {
+		roots[path] = NFC(name)
+	}
+	counts := make(map[string]int, len(roots))
+	for _, name := range roots {
+		counts[name]++
+	}
+	if paths != nil && l.self == "" {
+		for path := range paths {
+			if name := l.legacyNamespace(path); counts[name] == 1 {
+				counts[name]++
+			}
 		}
 	}
-	if len(legacy) == 0 {
-		return l
-	}
-	l.byPrefix = maps.Clone(l.byPrefix)
-	for prefix, name := range l.byPrefix {
-		if isDeepExtensionPrefix(prefix) && legacy[NFC(name)] {
-			delete(l.byPrefix, prefix)
+	for path, name := range roots {
+		if counts[name] > 1 {
+			if l.qualified == nil {
+				l.qualified = make(map[string]string)
+			}
+			l.qualified[path] = qualifiedExtensionName(name, path)
 		}
 	}
 	return l
+}
+
+const extensionRootSeparator = "@/"
+
+func qualifiedExtensionName(name, path string) string {
+	var qualified strings.Builder
+	qualified.WriteString(NFC(name))
+	qualified.WriteString(extensionRootSeparator)
+	for i, segment := range strings.Split(path, "/") {
+		if i != 0 {
+			qualified.WriteByte('/')
+		}
+		// Encode raw bytes when literal Unicode would make the key sensitive
+		// to normalization. This also keeps invalid UTF-8 out of docIDs.
+		normal := norm.NFC.IsNormalString(segment)
+		for len(segment) != 0 {
+			r, size := utf8.DecodeRuneInString(segment)
+			if r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-' ||
+				r > unicode.MaxASCII && normal && (unicode.IsLetter(r) || unicode.IsDigit(r)) &&
+					!unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
+				qualified.WriteString(segment[:size])
+			} else {
+				const hex = "0123456789ABCDEF"
+				for j := range size {
+					b := segment[j]
+					qualified.WriteByte('%')
+					qualified.WriteByte(hex[b>>4])
+					qualified.WriteByte(hex[b&15])
+				}
+			}
+			segment = segment[size:]
+		}
+	}
+	return qualified.String()
 }
 
 // persistedExtensionLayout lets stored docIDs decide whether a candidate was
@@ -386,7 +423,12 @@ func (l extensionLayout) persistedExtensionLayout(paths map[string]string) exten
 	}
 	var unused map[string]bool
 	for path, id := range paths {
-		if prefix := l.deepExtensionPrefix(path); prefix != "" && l.moduleKey(path) != id {
+		prefix, name, inside := l.indexedExtensionPrefix(path)
+		if !isDeepExtensionPrefix(prefix) {
+			continue
+		}
+		suffix := "." + bslPathToModuleName(inside)
+		if id != "ext."+NFC(name)+suffix && id != "ext."+qualifiedExtensionName(name, prefix)+suffix {
 			if unused == nil {
 				unused = make(map[string]bool)
 			}
@@ -524,47 +566,8 @@ func detectExtensionLayoutMode(dir string, bound *os.Root) extensionLayout {
 	}
 	if !strict {
 		l.probeDeepExtensions(dir, deepParents)
-		l.dropPrefixNameCollisions()
 	}
 	return l
-}
-
-// dropPrefixNameCollisions preserves shallow namespaces and drops competing
-// deep namespaces. The existing depth-two rule still drops any depth-two name
-// that is shared with another shallow root. Compare names in the NFC form used
-// by moduleKey and wait for the whole scan so directory order cannot pick a winner.
-func (l *extensionLayout) dropPrefixNameCollisions() {
-	if len(l.byPrefix) == 0 {
-		return
-	}
-	shallow := make(map[string]int, len(l.byDir)+len(l.byPrefix)+1)
-	deep := make(map[string]int)
-	if l.self != "" {
-		shallow[NFC(l.self)]++
-	}
-	for _, name := range l.byDir {
-		shallow[NFC(name)]++
-	}
-	for prefix, name := range l.byPrefix {
-		if !isDeepExtensionPrefix(prefix) {
-			shallow[NFC(name)]++
-		} else {
-			deep[NFC(name)]++
-		}
-	}
-	for prefix, name := range l.byPrefix {
-		name = NFC(name)
-		if !isDeepExtensionPrefix(prefix) {
-			if shallow[name] > 1 {
-				delete(l.byPrefix, prefix)
-			}
-		} else if shallow[name] > 0 || deep[name] > 1 {
-			delete(l.byPrefix, prefix)
-		}
-	}
-	if len(l.byPrefix) == 0 {
-		l.byPrefix = nil
-	}
 }
 
 // probeNestedExtensionsMode keeps the original shallow scan budget and queues
