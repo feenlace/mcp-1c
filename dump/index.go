@@ -1391,6 +1391,10 @@ type loadedModule struct {
 // asynchronously in a background goroutine and becomes available when Ready()
 // returns true. If reindex is true, any existing cache is discarded and rebuilt.
 func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
+	return newIndex(dir, cacheDir, reindex, false)
+}
+
+func newIndex(dir, cacheDir string, reindex, prewarm bool) (*Index, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	idx := &Index{
 		dir:           dir,
@@ -1486,14 +1490,12 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 				// immutable-generation path (OpenGenerationReadOnly) instead.
 				idx.shards = shards
 				idx.alias.Add(shards...)
-				if pid, held := readCacheLock(cpath); !held || pid == os.Getpid() {
-					idx.acquireCacheLock(cpath)
-				}
+				idx.acquireCacheLock(cpath)
 
 				// Fast startup: populate index from manifest, then apply incremental diff.
 				go func() {
 					defer close(idx.done)
-					if err := idx.loadFromManifestAndDiff(cpath); err != nil {
+					if err := idx.loadFromManifestAndDiff(cpath, prewarm); err != nil {
 						// Fallback: walk filesystem if manifest-based load fails.
 						slog.Warn("Manifest load failed, falling back to walk", "error", err)
 						if err := idx.loadBSLPaths(dir); err != nil {
@@ -1686,7 +1688,7 @@ func BuildCache(dir, cacheDir string, reindex bool) error {
 			"delete %s and retry", cpath, who, filepath.Join(cpath, serveLockName))
 	}
 
-	idx, err := NewIndex(dir, cacheDir, reindex)
+	idx, err := newIndex(dir, cacheDir, reindex, true)
 	if err != nil {
 		return err
 	}
@@ -3150,7 +3152,7 @@ func (idx *Index) filterModules(namespace, category, moduleType string) ([]strin
 // incremental updates using a single filesystem walk (via Diff). This is the fastest
 // startup path: manifest provides names/paths, Diff detects changes.
 // Returns an error if no manifest exists or if Diff fails.
-func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
+func (idx *Index) loadFromManifestAndDiff(cacheDir string, prewarm bool) error {
 	manifest, err := LoadManifest(cacheDir)
 	if err != nil {
 		return fmt.Errorf("loading manifest: %w", err)
@@ -3162,6 +3164,33 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 		}
 		idx.saveManifest(cacheDir)
 		return nil
+	}
+
+	// Reuse the diff walk's paths when a deep namespace can change ownership.
+	layout := idx.layout()
+	var paths []string
+	var visit func(string, string, fs.DirEntry)
+	if layout.hasDeepExtensions() {
+		visit = func(rel, path string, entry fs.DirEntry) {
+			if indexableBSLPath(idx.dir, path, entry) {
+				paths = append(paths, rel)
+			}
+		}
+	}
+	diff, err := manifest.diff(idx.dir, visit)
+	if err != nil {
+		return fmt.Errorf("computing diff: %w", err)
+	}
+	if visit != nil && !diff.Empty() {
+		finalized := layout.protectLegacyNamespaces(slices.Values(paths))
+		for _, path := range paths {
+			if prior, ok := manifest.Files[path]; ok && layout.deepExtensionPrefix(path) != "" &&
+				NFC(prior.DocID) != finalized.moduleKey(path) {
+				idx.rebuildAfterLayoutChange(cacheDir, paths, finalized, prewarm)
+				return nil
+			}
+		}
+		layout = finalized
 	}
 
 	// Populate names, pathByName, pathToDocID from manifest (no filesystem I/O).
@@ -3195,34 +3224,8 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 
-	// Reuse the diff walk's paths when a deep namespace can change ownership.
-	layout := idx.layout()
-	var paths []string
-	var visit func(string, string, fs.DirEntry)
-	if layout.hasDeepExtensions() {
-		visit = func(rel, path string, entry fs.DirEntry) {
-			if indexableBSLPath(idx.dir, path, entry) {
-				paths = append(paths, rel)
-			}
-		}
-	}
-	diff, err := manifest.diff(idx.dir, visit)
-	if err != nil {
-		return fmt.Errorf("computing diff: %w", err)
-	}
 	if diff.Empty() {
 		return nil
-	}
-	if visit != nil {
-		finalized := layout.protectLegacyNamespaces(slices.Values(paths))
-		for _, path := range paths {
-			if prior, ok := manifest.Files[path]; ok && layout.deepExtensionPrefix(path) != "" &&
-				NFC(prior.DocID) != finalized.moduleKey(path) {
-				idx.rebuildFlatAfterLayoutChange(cacheDir, paths, finalized)
-				return nil
-			}
-		}
-		layout = finalized
 	}
 
 	// Apply deletions.
@@ -3354,10 +3357,13 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	return nil
 }
 
-// A surviving path changing docID invalidates its old shard placement as well
-// as the manifest. Rebuild from the current diff inventory before applying any
-// incremental deletion or addition.
-func (idx *Index) rebuildFlatAfterLayoutChange(cacheDir string, paths []string, layout extensionLayout) {
+// A surviving path changing docID invalidates shard placement. Keep the old
+// flat cache intact and rebuild before applying any incremental changes.
+func (idx *Index) rebuildAfterLayoutChange(cpath string, paths []string, layout extensionLayout, prewarm bool) {
+	if idx.lockDir != "" {
+		removeCacheLock(idx.lockDir)
+		idx.lockDir = ""
+	}
 	idx.alias.Remove(idx.shards...)
 	var closeErr error
 	for _, shard := range idx.shards {
@@ -3365,17 +3371,40 @@ func (idx *Index) rebuildFlatAfterLayoutChange(cacheDir string, paths []string, 
 	}
 	idx.shards = nil
 	if closeErr != nil {
-		idx.setBuildErr(fmt.Errorf("closing stale flat shards: %w", closeErr))
+		idx.setBuildErr(fmt.Errorf("closing outdated flat shards: %w", closeErr))
 		return
 	}
 
-	useCache := false
-	if pid, held := readCacheLock(cacheDir); held && pid == os.Getpid() && idx.lockDir == cacheDir {
-		removeFlatCacheContentsWithLock(cacheDir, true)
-		useCache = len(cacheShardDirs(cacheDir)) == 0
+	if prewarm {
+		if err := idx.prewarmGeneration(cpath); err != nil {
+			idx.setBuildErr(err)
+		}
+		return
 	}
+	slog.Warn("Flat cache keys changed, building the current index in memory", "path", cpath)
 	idx.installBSLPaths(idx.dir, paths, layout)
-	idx.buildLoadedShards(cacheDir, useCache)
+	idx.buildLoadedShards("", false)
+}
+
+func (idx *Index) prewarmGeneration(cpath string) error {
+	gensig, err := GenSig(idx.dir)
+	if err != nil {
+		return err
+	}
+	reg, err := buildGeneration(idx.dir, idx.cacheDir, gensig, withClaim)
+	if err != nil {
+		return err
+	}
+	genDir := generationDir(cpath, gensig)
+	if err := idx.attachReadOnlyShards(genDir, reg); err != nil {
+		return err
+	}
+	if err := idx.loadNamesReadOnly(genDir); err != nil {
+		return err
+	}
+	idx.pathIndex = NewPathIndex(idx.names)
+	idx.ready.Store(true)
+	return nil
 }
 
 // ModuleCount returns the number of indexed BSL modules.

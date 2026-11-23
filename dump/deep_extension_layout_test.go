@@ -1,6 +1,7 @@
 package dump
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/blevesearch/bleve/v2"
 )
 
 func TestDeepExtensionModulesKeepTheirOwnKeys(t *testing.T) {
@@ -206,8 +209,7 @@ func TestDeepExtensionKeepsLegacyModuleIdentity(t *testing.T) {
 		"custom/production/src/Расширения/И\u0306",
 	} {
 		t.Run(legacyPrefix, func(t *testing.T) {
-			root := t.TempDir()
-			cache := t.TempDir()
+			root, cache := t.TempDir(), t.TempDir()
 			const deep = "custom/production/src"
 			const module = "Catalogs/Items/Ext/ObjectModule.bsl"
 			const oldKey = "Справочник.Items.МодульОбъекта"
@@ -215,33 +217,17 @@ func TestDeepExtensionKeepsLegacyModuleIdentity(t *testing.T) {
 			mkExtensionDump(t, filepath.Join(root, filepath.FromSlash(deep)), extManifestClassic, "Й")
 			writeBSL(t, root, deep+"/"+module, "// deepmarker\n")
 
-			check := func(want map[string]string) {
+			check := func(idx *Index, want map[string]string) {
 				t.Helper()
-				idx, err := NewIndex(root, cache, false)
-				if err != nil {
-					t.Fatal(err)
-				}
 				defer idx.Close()
 				<-idx.Done()
 				if err := idx.BuildError(); err != nil {
 					t.Fatal(err)
 				}
-				cacheRoot, err := cachePath(root, cache)
-				if err != nil {
-					t.Fatal(err)
-				}
-				manifest, err := LoadManifest(cacheRoot)
-				if err != nil || manifest == nil {
-					t.Fatalf("LoadManifest: %v, %v", manifest, err)
-				}
-				docIDs := docIDsFromManifest(manifest)
 				if names := idx.ModuleNames(); len(names) != len(want) || idx.CollapsedKeys().Files != 0 {
 					t.Errorf("names = %v, collapsed = %d, want distinct keys %v", names, idx.CollapsedKeys().Files, want)
 				}
 				for key, body := range want {
-					if !slices.Contains(docIDs, key) {
-						t.Errorf("flat manifest docIDs = %v, want %q", docIDs, key)
-					}
 					if got, ok := idx.GetContent(key); !ok || got != body {
 						t.Errorf("GetContent(%q) = %q, %v, want %q", key, got, ok, body)
 					}
@@ -252,15 +238,87 @@ func TestDeepExtensionKeepsLegacyModuleIdentity(t *testing.T) {
 					}
 				}
 			}
+			openFlat := func(cache string) *Index {
+				t.Helper()
+				idx, err := NewIndex(root, cache, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return idx
+			}
 
-			check(map[string]string{extKey: "// deepmarker\n"})
-			// Adding the legacy module invalidates the existing deep docID.
+			deepOnly := map[string]string{extKey: "// deepmarker\n"}
+			mixed := map[string]string{extKey: "// legacymarker\n", oldKey: "// deepmarker\n"}
+			flatSnapshot := func(cache string, want map[string]string) func() {
+				t.Helper()
+				cpath, err := cachePath(root, cache)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.ReadFile(manifestPath(cpath))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					t.Helper()
+					after, err := os.ReadFile(manifestPath(cpath))
+					if err != nil || !bytes.Equal(after, before) {
+						t.Errorf("flat manifest changed: %v", err)
+					}
+					shards, err := openCachedShards(cacheShardDirs(cpath), true, "1s")
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, shard := range shards {
+						defer shard.Close()
+					}
+					alias := bleve.NewIndexAlias(shards...)
+					if count, err := alias.DocCount(); err != nil || count != uint64(len(want)) {
+						t.Errorf("old flat shard document count = %d, %v, want %d", count, err, len(want))
+					}
+					for key, body := range want {
+						marker := strings.TrimSpace(strings.TrimPrefix(body, "// "))
+						query := bleve.NewMatchQuery(marker)
+						query.SetField("content")
+						hits, err := alias.Search(bleve.NewSearchRequest(query))
+						if err != nil || len(hits.Hits) != 1 || hits.Hits[0].ID != key {
+							t.Errorf("old flat shard search for %q = %+v, %v, want %q", marker, hits, err, key)
+						}
+					}
+				}
+			}
+
+			check(openFlat(cache), deepOnly)
+			checkOriginalFlat := flatSnapshot(cache, deepOnly)
+
+			// A new legacy module takes precedence over an already persisted deep key.
 			writeBSL(t, root, legacyPrefix+"/"+module, "// legacymarker\n")
-			check(map[string]string{extKey: "// legacymarker\n", oldKey: "// deepmarker\n"})
+			check(openFlat(cache), mixed)
+			checkOriginalFlat()
+
+			// Explicit prewarm leaves the flat cache intact and publishes a usable READY.
+			if err := BuildCache(root, cache, false); err != nil {
+				t.Fatal(err)
+			}
+			sig := mustGenSig(t, root)
+			if !GenerationReady(root, cache, sig) {
+				t.Fatal("prewarm did not publish a READY generation")
+			}
+			generation, err := OpenGenerationReadOnly(root, cache, sig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(generation, mixed)
+			checkOriginalFlat()
+
+			mixedCache := t.TempDir()
+			check(openFlat(mixedCache), mixed)
+			checkMixedFlat := flatSnapshot(mixedCache, mixed)
 			if err := os.Remove(filepath.Join(root, filepath.FromSlash(legacyPrefix+"/"+module))); err != nil {
 				t.Fatal(err)
 			}
-			check(map[string]string{extKey: "// deepmarker\n"})
+			check(openFlat(mixedCache), deepOnly)
+			checkMixedFlat()
 		})
 	}
 }
