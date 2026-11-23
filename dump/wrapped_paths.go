@@ -51,7 +51,7 @@ type WrappedPathState struct {
 //
 // Use the same enclosing prefix as moduleKey, then measure the remaining path.
 func (l extensionLayout) wrapDepth(relPath string) int {
-	_, inside := l.matchExtensionPrefix(filepath.ToSlash(relPath))
+	_, inside := l.indexedExtensionPrefix(filepath.ToSlash(relPath))
 	return anchorIndex(strings.Split(inside, "/"))
 }
 
@@ -71,16 +71,20 @@ func (l extensionLayout) wrapDepth(relPath string) int {
 // accounts for counted as a wrap. See the doc comment on Index.layout for the
 // numbers; TestWrappedPaths_WarmAndReadOnlyStartsAgreeWithTheColdOne is what now
 // holds the sentence shut.
+type indexedLayoutState struct {
+	wrapped WrappedPathState
+	layout  ExtensionLayoutSummary
+}
+
 func (idx *Index) noteWrappedPaths() {
-	l := idx.layout()
-	var st WrappedPathState
-	st.Total = len(idx.pathToDocID)
+	l := idx.layout().persistedExtensionLayout(idx.pathToDocID)
+	st := WrappedPathState{Total: len(idx.pathToDocID)}
 	for rel := range idx.pathToDocID {
 		if l.wrapDepth(rel) > 0 {
 			st.Files++
 		}
 	}
-	idx.wrapped.Store(&st)
+	idx.wrapped.Store(&indexedLayoutState{wrapped: st, layout: l.summary()})
 }
 
 // WrappedPaths returns the whole report in one atomic load.
@@ -92,7 +96,7 @@ func (idx *Index) WrappedPaths() WrappedPathState {
 		return WrappedPathState{}
 	}
 	if p := idx.wrapped.Load(); p != nil {
-		return *p
+		return p.wrapped
 	}
 	return WrappedPathState{}
 }

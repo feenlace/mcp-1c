@@ -139,11 +139,12 @@ func TestAHealthyDumpRootIsQuietPastTheDescentCaps(t *testing.T) {
 		if !rs.Quiet() {
 			t.Fatalf("control failed: summary = %+v, want quiet with the budget large enough", rs)
 		}
-		if spent.cost.ReadDirs >= roomy.cost.ReadDirs {
-			t.Fatalf("control failed: the exhausted tree listed %d directories against %d "+
-				"for the roomy one; the third child must go unlisted, or the quiet above "+
-				"is not the budget: spent=%+v roomy=%+v",
-				spent.cost.ReadDirs, roomy.cost.ReadDirs, spent.cost, roomy.cost)
+		// Subtract the visits to the manifest-free depth-two wrappers.
+		spentShallow := spent.cost.ReadDirs - 2*maxNestedProbeEntries
+		roomyShallow := roomy.cost.ReadDirs - (20 + 20 + 1)
+		if spentShallow+1 != roomyShallow {
+			t.Fatalf("shallow listing counts = %d with spent budget and %d with room, want a difference of one",
+				spentShallow, roomyShallow)
 		}
 
 		// b2: the budget is gone BETWEEN two subdirectories of the third child, which

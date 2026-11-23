@@ -377,14 +377,14 @@ func TestNestedProbeSpendsABoundedTotalAcrossChildren(t *testing.T) {
 	// that may hold maxExtensionScan of them. MEASURED, not budgeted: the run that
 	// first took these numbers is what they are pinned from.
 	if want := (extensionScanCost{
-		ReadDirs: 4,
+		ReadDirs: 4 + 2*maxNestedProbeEntries,
 		Lstats:   1 + 3 + 2*maxNestedProbeEntries,
 		Reads:    1,
 	}); spent.cost != want {
 		t.Errorf("cost = %+v, want %+v. ReadDirs counts the root, the byte-exact "+
-			"confirmation of its manifest name, and the TWO children that fit in the "+
-			"budget. A third listing means the last child was opened after the budget "+
-			"was already gone.", spent.cost, want)
+			"confirmation of its manifest name, the two children that fit in the "+
+			"shallow budget, and their manifest-free children tested as deep wrappers.",
+			spent.cost, want)
 	}
 
 	// ONE SIBLING DIRECTORY MORE, and the budget is gone BETWEEN two subdirectories

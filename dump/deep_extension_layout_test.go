@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -195,5 +196,115 @@ func TestDeepExtensionRebuildsSchemaEightFlatCache(t *testing.T) {
 	}
 	if got, ok := idx.GetContent(newKey); !ok || got != body {
 		t.Errorf("GetContent(%q) = %q, %v, want %q", newKey, got, ok, body)
+	}
+}
+
+func TestDeepExtensionKeepsLegacyModuleIdentity(t *testing.T) {
+	for _, legacyPrefix := range []string{
+		"Расширения/И\u0306",
+		"a-wrapper/Расширения/И\u0306",
+		"custom/production/src/Расширения/И\u0306",
+	} {
+		t.Run(legacyPrefix, func(t *testing.T) {
+			root := t.TempDir()
+			cache := t.TempDir()
+			const deep = "custom/production/src"
+			const module = "Catalogs/Items/Ext/ObjectModule.bsl"
+			const oldKey = "Справочник.Items.МодульОбъекта"
+			const extKey = "ext.Й." + oldKey
+			mkExtensionDump(t, filepath.Join(root, filepath.FromSlash(deep)), extManifestClassic, "Й")
+			writeBSL(t, root, deep+"/"+module, "// deepmarker\n")
+
+			check := func(want map[string]string) {
+				t.Helper()
+				idx, err := NewIndex(root, cache, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer idx.Close()
+				<-idx.Done()
+				if err := idx.BuildError(); err != nil {
+					t.Fatal(err)
+				}
+				cacheRoot, err := cachePath(root, cache)
+				if err != nil {
+					t.Fatal(err)
+				}
+				manifest, err := LoadManifest(cacheRoot)
+				if err != nil || manifest == nil {
+					t.Fatalf("LoadManifest: %v, %v", manifest, err)
+				}
+				docIDs := docIDsFromManifest(manifest)
+				if names := idx.ModuleNames(); len(names) != len(want) || idx.CollapsedKeys().Files != 0 {
+					t.Errorf("names = %v, collapsed = %d, want distinct keys %v", names, idx.CollapsedKeys().Files, want)
+				}
+				for key, body := range want {
+					if !slices.Contains(docIDs, key) {
+						t.Errorf("flat manifest docIDs = %v, want %q", docIDs, key)
+					}
+					if got, ok := idx.GetContent(key); !ok || got != body {
+						t.Errorf("GetContent(%q) = %q, %v, want %q", key, got, ok, body)
+					}
+					marker := strings.TrimSpace(strings.TrimPrefix(body, "// "))
+					matches, _, err := idx.Search(SearchParams{Query: marker})
+					if err != nil || len(matches) != 1 || matches[0].Module != key {
+						t.Errorf("smart search for %q = %+v, %v, want %q", marker, matches, err, key)
+					}
+				}
+			}
+
+			check(map[string]string{extKey: "// deepmarker\n"})
+			// Adding the legacy module invalidates the existing deep docID.
+			writeBSL(t, root, legacyPrefix+"/"+module, "// legacymarker\n")
+			check(map[string]string{extKey: "// legacymarker\n", oldKey: "// deepmarker\n"})
+			if err := os.Remove(filepath.Join(root, filepath.FromSlash(legacyPrefix+"/"+module))); err != nil {
+				t.Fatal(err)
+			}
+			check(map[string]string{extKey: "// deepmarker\n"})
+		})
+	}
+}
+
+func TestDeepExtensionKeepsAnEnclosedLegacyModule(t *testing.T) {
+	root := t.TempDir()
+	const deep = "custom/production/src"
+	const module = "Catalogs/Items/Ext/ObjectModule.bsl"
+	const suffix = "Справочник.Items.МодульОбъекта"
+	mkExtensionDump(t, filepath.Join(root, filepath.FromSlash(deep)), extManifestClassic, "Modern")
+	writeBSL(t, root, deep+"/"+module, "// modern\n")
+	writeBSL(t, root, deep+"/Расширения/Legacy/"+module, "// legacy\n")
+
+	idx, err := NewIndex(root, t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	<-idx.Done()
+	if err := idx.BuildError(); err != nil {
+		t.Fatal(err)
+	}
+	if got := idx.ModuleNames(); !slices.Equal(got, []string{"ext.Legacy." + suffix, "ext.Modern." + suffix}) {
+		t.Errorf("module names = %v", got)
+	}
+	if got := idx.ExtensionLayout().Dirs; !slices.Equal(got, []string{deep}) {
+		t.Errorf("indexed extension prefixes = %v, want %q", got, deep)
+	}
+	wantWrap := WrappedPathState{Files: 1, Total: 2}
+	if got := idx.WrappedPaths(); got != wantWrap {
+		t.Errorf("wrapped paths = %+v, want %+v", got, wantWrap)
+	}
+
+	const moved = "custom/production/renamed"
+	if err := os.Rename(filepath.Join(root, filepath.FromSlash(deep)), filepath.Join(root, filepath.FromSlash(moved))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if got := idx.ExtensionLayout().Dirs; !slices.Equal(got, []string{moved}) {
+		t.Errorf("updated layout prefixes = %v, want %q", got, moved)
+	}
+	if got := idx.WrappedPaths(); got != wantWrap {
+		t.Errorf("updated wrapped paths = %+v, want %+v", got, wantWrap)
 	}
 }

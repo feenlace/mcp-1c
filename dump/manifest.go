@@ -122,6 +122,10 @@ func (m *Manifest) Save(cacheDir string) error {
 // Diff walks dumpDir and compares the current BSL files against the manifest.
 // Returns which files were added, modified, or deleted.
 func (m *Manifest) Diff(dumpDir string) (*DiffResult, error) {
+	return m.diff(dumpDir, nil)
+}
+
+func (m *Manifest) diff(dumpDir string, visit func(rel, path string, entry fs.DirEntry)) (*DiffResult, error) {
 	result := &DiffResult{}
 	seen := make(map[string]bool, len(m.Files))
 
@@ -139,6 +143,9 @@ func (m *Manifest) Diff(dumpDir string) (*DiffResult, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		seen[rel] = true
+		if visit != nil {
+			visit(rel, path, d)
+		}
 
 		info, err := d.Info()
 		if err != nil {

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"iter"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -273,7 +275,7 @@ func (l extensionLayout) empty() bool {
 // did before, filed every child under the container's name and collided them with
 // each other. The closest matching ancestor wins.
 func (l extensionLayout) moduleKey(relPath string) string {
-	if name, inside := l.matchExtensionPrefix(filepath.ToSlash(relPath)); name != "" {
+	if name, inside := l.indexedExtensionPrefix(filepath.ToSlash(relPath)); name != "" {
 		return NFC("ext." + name + "." + bslPathToModuleName(inside))
 	}
 	if l.self != "" {
@@ -300,6 +302,104 @@ func (l extensionLayout) matchExtensionPrefix(path string) (string, string) {
 		}
 	}
 	return "", path
+}
+
+// An existing legacy key takes precedence over a newly discovered deep prefix.
+func (l extensionLayout) indexedExtensionPrefix(path string) (string, string) {
+	name, inside := l.matchExtensionPrefix(path)
+	if name != "" && isDeepExtensionPrefix(path[:len(path)-len(inside)-1]) && l.legacyNamespace(path) != "" {
+		return "", path
+	}
+	return name, inside
+}
+
+func isDeepExtensionPrefix(prefix string) bool {
+	return strings.Count(prefix, "/") >= 2
+}
+
+func (l extensionLayout) hasDeepExtensions() bool {
+	for prefix := range l.byPrefix {
+		if isDeepExtensionPrefix(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l extensionLayout) deepExtensionPrefix(path string) string {
+	name, inside := l.matchExtensionPrefix(path)
+	if name != "" {
+		prefix := path[:len(path)-len(inside)-1]
+		if isDeepExtensionPrefix(prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+// legacyNamespace uses the same anchor as bslPathToModuleName, including a
+// wrapped legacy tree. Shallow manifests and self already owned their keys.
+func (l extensionLayout) legacyNamespace(path string) string {
+	if l.self != "" || !strings.Contains(path, extensionDirName+"/") {
+		return ""
+	}
+	name, inside := l.matchExtensionPrefix(path)
+	if name != "" && !isDeepExtensionPrefix(path[:len(path)-len(inside)-1]) {
+		return ""
+	}
+	parts := strings.Split(path, "/")
+	parts = parts[anchorIndex(parts):]
+	if len(parts) >= 4 && parts[0] == extensionDirName {
+		return NFC(parts[1])
+	}
+	return ""
+}
+
+// protectLegacyNamespaces only reserves namespaces represented by indexed paths.
+func (l extensionLayout) protectLegacyNamespaces(paths iter.Seq[string]) extensionLayout {
+	if !l.hasDeepExtensions() {
+		return l
+	}
+	legacy := make(map[string]bool)
+	for path := range paths {
+		if name := l.legacyNamespace(path); name != "" {
+			legacy[name] = true
+		}
+	}
+	if len(legacy) == 0 {
+		return l
+	}
+	l.byPrefix = maps.Clone(l.byPrefix)
+	for prefix, name := range l.byPrefix {
+		if isDeepExtensionPrefix(prefix) && legacy[NFC(name)] {
+			delete(l.byPrefix, prefix)
+		}
+	}
+	return l
+}
+
+// persistedExtensionLayout lets stored docIDs decide whether a candidate was
+// used. An unchanged cache can predate an XML-only layout change.
+func (l extensionLayout) persistedExtensionLayout(paths map[string]string) extensionLayout {
+	if !l.hasDeepExtensions() {
+		return l
+	}
+	var unused map[string]bool
+	for path, id := range paths {
+		if prefix := l.deepExtensionPrefix(path); prefix != "" && l.moduleKey(path) != id {
+			if unused == nil {
+				unused = make(map[string]bool)
+			}
+			unused[prefix] = true
+		}
+	}
+	if len(unused) != 0 {
+		l.byPrefix = maps.Clone(l.byPrefix)
+		for prefix := range unused {
+			delete(l.byPrefix, prefix)
+		}
+	}
+	return l
 }
 
 // detectExtensionLayout reads dir and decides which of the two shapes it is, or
@@ -446,7 +546,7 @@ func (l *extensionLayout) dropPrefixNameCollisions() {
 		shallow[NFC(name)]++
 	}
 	for prefix, name := range l.byPrefix {
-		if strings.Count(prefix, "/") == 1 {
+		if !isDeepExtensionPrefix(prefix) {
 			shallow[NFC(name)]++
 		} else {
 			deep[NFC(name)]++
@@ -454,7 +554,7 @@ func (l *extensionLayout) dropPrefixNameCollisions() {
 	}
 	for prefix, name := range l.byPrefix {
 		name = NFC(name)
-		if strings.Count(prefix, "/") == 1 {
+		if !isDeepExtensionPrefix(prefix) {
 			if shallow[name] > 1 {
 				delete(l.byPrefix, prefix)
 			}
@@ -1085,50 +1185,32 @@ func (l extensionLayout) summary() ExtensionLayoutSummary {
 	return s
 }
 
-// InspectExtensionLayout reads dir and reports what its extension layout amounts
-// to. It is the startup-time entry point, used before an index exists; the index's
-// own answer, taken from the layout it actually keyed with, is ExtensionLayout.
+// InspectExtensionLayout reports manifest discovery before BSL paths are known.
+// ExtensionLayout reports the finalized index layout once names are loaded.
 func InspectExtensionLayout(dir string) ExtensionLayoutSummary {
 	return detectExtensionLayout(dir).summary()
 }
 
-// layout resolves this index's extension layout, reading the manifests the first
-// time and reusing that answer afterwards. It is the ONLY place idx.extLayout is
-// read, and TestExtensionLayoutIsNeverReadAroundItsOnce fails the build when a
-// second one appears.
-//
-// THE FIELD IS NOT THE LAYOUT UNTIL THE ONCE HAS RUN, and that distinction is not
-// pedantry; it was a shipped defect. noteWrappedPaths read idx.extLayout directly,
-// and the only caller that ever ran the Once was moduleKeyFor, which derives keys
-// FROM PATHS. A cold build goes through it for every file. The warm manifest start
-// and the read-only generation open take their DocIDs out of a manifest and never
-// derive a key at all, so on those paths the field was still the zero value: an
-// -AllExtensions container measured {Files:0 Total:2} cold and {Files:2 Total:2}
-// warm over byte-identical keys, and the wrapped-path notice then told the operator
-// on EVERY answer that the extension namespace was being lost and to restart
-// against the dump root, which reproduces it. Reading the field is therefore an
-// ordering assumption about a caller in another file, which is exactly the kind of
-// assumption a sync.Once exists to remove.
-//
-// Cost on the warm paths is what detectExtensionLayout's own COST paragraph states
-// and TestLayoutDetectionCostIsBounded measures, paid once per process. It was
-// already being paid: withIndexProtectionNotice in tools/index_notice.go asks this
-// index for ExtensionLayout on the first tool response either way.
-//
-// Safe to call with idx.mu held. detectExtensionLayout takes no index lock; it
-// reads the filesystem from idx.dir, which is fixed at construction.
+// layout returns manifest discovery for the index's initial dump or the latest
+// successful reload. It takes no index lock and is safe under idx.mu.
 func (idx *Index) layout() extensionLayout {
+	if current := idx.reloadLayout.Load(); current != nil {
+		return *current
+	}
 	idx.extLayoutOnce.Do(func() { idx.extLayout = detectExtensionLayout(idx.dir) })
 	return idx.extLayout
 }
 
-// ExtensionLayout reports the layout THIS INDEX derived its keys with, which is
-// the one a tool answer should describe. It is the layout read once behind
-// extLayoutOnce, so asking for it does not read the disk again and cannot disagree
-// with the keys already served.
+// ExtensionLayout reports the layout reconciled with loaded docIDs. While
+// the initial build is running, it reports manifest discovery.
 func (idx *Index) ExtensionLayout() ExtensionLayoutSummary {
 	if idx == nil {
 		return ExtensionLayoutSummary{}
+	}
+	if state := idx.wrapped.Load(); state != nil {
+		layout := state.layout
+		layout.Dirs = slices.Clone(layout.Dirs)
+		return layout
 	}
 	return idx.layout().summary()
 }

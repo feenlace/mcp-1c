@@ -321,7 +321,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	}
 
 	oldShards, oldReg := idx.swapGeneration(sigAfter, shards, reg,
-		names, pathByName, pathToDocID, NewPathIndex(names))
+		names, pathByName, pathToDocID, NewPathIndex(names), detectExtensionLayout(idx.dir))
 
 	// Retire the old generation only AFTER the swap has published its replacement.
 	// alias.Swap took the alias write lock, so no search is inside these shards and
@@ -381,6 +381,7 @@ func (idx *Index) swapGeneration(
 	names []string,
 	pathByName, pathToDocID map[string]string,
 	pathIndex *PathIndex,
+	layout extensionLayout,
 ) (oldShards []bleve.Index, oldReg *readerRegistration) {
 	idx.mu.Lock()
 	oldShards = idx.shards
@@ -413,6 +414,7 @@ func (idx *Index) swapGeneration(
 	// is derived from pathToDocID, so taken one line earlier it would measure the
 	// generation this reload is replacing.
 	idx.pathIndex = pathIndex
+	idx.reloadLayout.Store(&layout)
 	idx.noteCollapsedKeys(names)
 	// The attached generation is always opened read-only, so an index that was
 	// serving a legacy read-write flat cache becomes read-only after its first

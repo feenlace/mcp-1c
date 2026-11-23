@@ -295,7 +295,7 @@ func TestCollapsedKeysZeroValueIsSafe(t *testing.T) {
 // about. DeleteDoc only removes.
 var namesWriters = map[string]bool{ // func name -> must record collapsed keys
 	"loadBSLFiles":            true,
-	"loadBSLPaths":            true,
+	"installBSLPaths":         true,
 	"loadFromManifestAndDiff": true,
 	"loadNamesReadOnly":       true,
 	"swapGeneration":          true,

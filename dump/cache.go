@@ -118,6 +118,10 @@ func isFlatShardEntry(e os.DirEntry) bool {
 // surviving evidence that the shards beside it are foreign, which is the same end
 // state by a different route.
 func removeFlatCacheContents(cpath string) []string {
+	return removeFlatCacheContentsWithLock(cpath, false)
+}
+
+func removeFlatCacheContentsWithLock(cpath string, keepLock bool) []string {
 	if cpath == "" {
 		return nil
 	}
@@ -142,8 +146,8 @@ func removeFlatCacheContents(cpath string) []string {
 
 	// Then everything else that is neither a generation nor the manifest.
 	for _, e := range entries {
-		if e.Name() == generationsDirName {
-			continue // preserve immutable generations
+		if e.Name() == generationsDirName || (keepLock && e.Name() == serveLockName) {
+			continue
 		}
 		if e.Name() == manifestFileName || isFlatShardEntry(e) {
 			continue

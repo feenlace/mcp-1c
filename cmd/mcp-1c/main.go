@@ -665,11 +665,8 @@ func dumpPathFault(dumpDir string) error {
 // describes. «One root below the path, one extension below the path» therefore
 // holds for a tree where those are DIFFERENT DIRECTORIES.
 //
-// Dirs carries the prefix that reaches each one, one segment for a child and two
-// for a grandchild, and a name in NestedRoots is a single directory name that can
-// carry no separator at all, so a grandchild's prefix cannot match one. The names
-// are compared and never rendered: they are read off disk, and the prose here
-// carries no тире.
+// Dirs carries the relative prefix for each candidate. A NestedRoots entry is a
+// single directory name, so deeper prefixes cannot match it.
 func extensionRootsAmong(nested []string, layout dump.ExtensionLayoutSummary) int {
 	n := 0
 	for _, root := range nested {
@@ -683,8 +680,7 @@ func extensionRootsAmong(nested []string, layout dump.ExtensionLayoutSummary) in
 	return n
 }
 
-// extensionsOutsideRoots is how many of the extensions the detection recognised lie
-// outside every one of nested.
+// extensionsOutsideRoots counts discovered extension candidates outside nested.
 //
 // IT ANSWERS A DIFFERENT QUESTION FROM extensionRootsAmong, and the two answers
 // decide different sentences. That one asks whether a root IS an extension, which is
@@ -931,8 +927,8 @@ func reportDumpRootAndLayout(dumpDir string) {
 	if msg := nestedDumpRootMessage(insp, layout); msg != "" {
 		slog.Error(msg, "dump", dumpDir,
 			"roots", strings.Join(insp.NestedRoots, ","),
-			"extensions", layout.Extensions,
-			"extension_dirs", strings.Join(layout.Dirs, ","))
+			"extension_candidates", layout.Extensions,
+			"extension_candidate_dirs", strings.Join(layout.Dirs, ","))
 	}
 	if msg := extensionLayoutDoubtMessage(layout); msg != "" {
 		slog.Error(msg, "dump", dumpDir, "undecided", layout.Undecided(),

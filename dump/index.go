@@ -1194,7 +1194,7 @@ type Index struct {
 	// atomic, same reason, same recompute-never-persist argument; see
 	// wrapped_paths.go for why it is a separate number from collapsed and not a
 	// second field of it.
-	wrapped atomic.Pointer[WrappedPathState]
+	wrapped atomic.Pointer[indexedLayoutState]
 	// cacheDir is the cache location this index was opened with, in NewIndex
 	// semantics (empty = the platform cache dir). Reload needs it to build the
 	// replacement generation under the SAME cache the current one lives in;
@@ -1229,6 +1229,7 @@ type Index struct {
 	// file instead would put a file open on every .bsl in the dump.
 	extLayout     extensionLayout
 	extLayoutOnce sync.Once
+	reloadLayout  atomic.Pointer[extensionLayout]
 	ctx           context.Context
 	cancel        context.CancelFunc
 	done          chan struct{}
@@ -1239,8 +1240,8 @@ type Index struct {
 //
 // It is the single chokepoint for deriving a key FROM A PATH, so a file cannot be
 // keyed one way by the cold build and another by the warm incremental diff. Its
-// four callers are loadBSLFiles, loadBSLPaths, and the Added/Modified branches of
-// loadFromManifestAndDiff and applyIncrementalUpdate.
+// Bulk loaders additionally resolve legacy ownership against their BSL inventory
+// before using extensionLayout.moduleKey.
 //
 // What does NOT go through it is a key that was already derived once and written
 // down: readGenerationNames and the unchanged half of a manifest diff take the
@@ -1485,7 +1486,9 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 				// immutable-generation path (OpenGenerationReadOnly) instead.
 				idx.shards = shards
 				idx.alias.Add(shards...)
-				idx.acquireCacheLock(cpath)
+				if pid, held := readCacheLock(cpath); !held || pid == os.Getpid() {
+					idx.acquireCacheLock(cpath)
+				}
 
 				// Fast startup: populate index from manifest, then apply incremental diff.
 				go func() {
@@ -1499,6 +1502,9 @@ func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
 						}
 					}
 
+					if idx.Ready() || idx.BuildError() != nil {
+						return
+					}
 					idx.pathIndex = NewPathIndex(idx.names)
 					idx.ready.Store(true)
 					slog.Info("Opened cached index",
@@ -1796,8 +1802,11 @@ func (idx *Index) buildShards(cpath string, useCache bool) {
 		idx.setBuildErr(fmt.Errorf("loading BSL paths: %w", err))
 		return
 	}
-	slices.Sort(idx.names)
+	idx.buildLoadedShards(cpath, useCache)
+}
 
+func (idx *Index) buildLoadedShards(cpath string, useCache bool) {
+	slices.Sort(idx.names)
 	total := len(idx.names)
 	if total == 0 {
 		idx.pathIndex = NewPathIndex(nil)
@@ -2156,6 +2165,18 @@ func (idx *Index) loadBSLFiles(dir string) error {
 		return fmt.Errorf("walking dump directory: %w", err)
 	}
 
+	layout := idx.layout()
+	if layout.hasDeepExtensions() {
+		relPaths := func(yield func(string) bool) {
+			for _, path := range paths {
+				if rel, err := filepath.Rel(dir, path); err == nil && !yield(filepath.ToSlash(rel)) {
+					return
+				}
+			}
+		}
+		layout = layout.protectLegacyNamespaces(relPaths)
+	}
+
 	// Phase 2: read files in parallel using a worker pool.
 	results := make(chan loadedModule, len(paths))
 	var wg sync.WaitGroup
@@ -2185,7 +2206,7 @@ func (idx *Index) loadBSLFiles(dir string) error {
 				return
 			}
 			relSlash := filepath.ToSlash(rel)
-			name := idx.moduleKeyFor(rel)
+			name := layout.moduleKey(rel)
 			results <- loadedModule{name: name, relPath: relSlash, content: stripBOM(string(data)), stamp: stamp}
 		}(p)
 	}
@@ -2227,6 +2248,7 @@ func (idx *Index) loadBSLFiles(dir string) error {
 // Populates idx.names, idx.pathByName, and idx.pathToDocID.
 // This is the fast startup path (~0.5s) used when cached shards exist.
 func (idx *Index) loadBSLPaths(dir string) error {
+	var paths []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -2241,32 +2263,46 @@ func (idx *Index) loadBSLPaths(dir string) error {
 		// (target under root) is kept and served. Mirrors the depgraph / compat
 		// EvalSymlinks containment. The symlink-type gate keeps the fast startup
 		// path allocation-free for the ordinary regular-file case.
-		if d.Type()&fs.ModeSymlink != 0 && !pathWithinRoot(dir, path) {
+		if !indexableBSLPath(dir, path, d) {
 			return nil
 		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return nil
 		}
-		relSlash := filepath.ToSlash(rel)
-		name := idx.moduleKeyFor(rel)
-		absPath, err := filepath.Abs(path)
-		if err != nil {
-			absPath = path
-		}
-		idx.names = append(idx.names, name)
-		idx.pathByName[name] = absPath
-		if idx.pathToDocID == nil {
-			idx.pathToDocID = make(map[string]string)
-		}
-		idx.pathToDocID[relSlash] = name
+		paths = append(paths, filepath.ToSlash(rel))
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("walking dump directory: %w", err)
+		return err
 	}
-	idx.noteCollapsedKeys(idx.names)
+	layout := idx.layout().protectLegacyNamespaces(slices.Values(paths))
+	idx.installBSLPaths(dir, paths, layout)
 	return nil
+}
+
+func indexableBSLPath(dir, path string, entry fs.DirEntry) bool {
+	return entry.Type()&fs.ModeSymlink == 0 || pathWithinRoot(dir, path)
+}
+
+func (idx *Index) installBSLPaths(dir string, paths []string, layout extensionLayout) {
+	names := make([]string, 0, len(paths))
+	pathByName := make(map[string]string, len(paths))
+	pathToDocID := make(map[string]string, len(paths))
+	for _, rel := range paths {
+		absPath, err := filepath.Abs(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		name := layout.moduleKey(rel)
+		names = append(names, name)
+		pathByName[name] = absPath
+		pathToDocID[rel] = name
+	}
+	idx.mu.Lock()
+	idx.names, idx.pathByName, idx.pathToDocID = names, pathByName, pathToDocID
+	idx.noteCollapsedKeys(names)
+	idx.mu.Unlock()
 }
 
 // contentForScan returns the BSL source for name for a full-index scan. It uses
@@ -3159,14 +3195,34 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 
-	// Diff walks the filesystem once to detect changes.
-	diff, err := manifest.Diff(idx.dir)
+	// Reuse the diff walk's paths when a deep namespace can change ownership.
+	layout := idx.layout()
+	var paths []string
+	var visit func(string, string, fs.DirEntry)
+	if layout.hasDeepExtensions() {
+		visit = func(rel, path string, entry fs.DirEntry) {
+			if indexableBSLPath(idx.dir, path, entry) {
+				paths = append(paths, rel)
+			}
+		}
+	}
+	diff, err := manifest.diff(idx.dir, visit)
 	if err != nil {
 		return fmt.Errorf("computing diff: %w", err)
 	}
-
 	if diff.Empty() {
 		return nil
+	}
+	if visit != nil {
+		finalized := layout.protectLegacyNamespaces(slices.Values(paths))
+		for _, path := range paths {
+			if prior, ok := manifest.Files[path]; ok && layout.deepExtensionPrefix(path) != "" &&
+				NFC(prior.DocID) != finalized.moduleKey(path) {
+				idx.rebuildFlatAfterLayoutChange(cacheDir, paths, finalized)
+				return nil
+			}
+		}
+		layout = finalized
 	}
 
 	// Apply deletions.
@@ -3219,7 +3275,7 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 			slog.Warn("Cannot read file", "path", relPath, "error", err)
 			continue
 		}
-		docID := idx.moduleKeyFor(relPath)
+		docID := layout.moduleKey(relPath)
 		content := stripBOM(string(data))
 
 		parts := parseModuleName(docID)
@@ -3296,6 +3352,30 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string) error {
 	idx.saveManifest(cacheDir)
 
 	return nil
+}
+
+// A surviving path changing docID invalidates its old shard placement as well
+// as the manifest. Rebuild from the current diff inventory before applying any
+// incremental deletion or addition.
+func (idx *Index) rebuildFlatAfterLayoutChange(cacheDir string, paths []string, layout extensionLayout) {
+	idx.alias.Remove(idx.shards...)
+	var closeErr error
+	for _, shard := range idx.shards {
+		closeErr = errors.Join(closeErr, shard.Close())
+	}
+	idx.shards = nil
+	if closeErr != nil {
+		idx.setBuildErr(fmt.Errorf("closing stale flat shards: %w", closeErr))
+		return
+	}
+
+	useCache := false
+	if pid, held := readCacheLock(cacheDir); held && pid == os.Getpid() && idx.lockDir == cacheDir {
+		removeFlatCacheContentsWithLock(cacheDir, true)
+		useCache = len(cacheShardDirs(cacheDir)) == 0
+	}
+	idx.installBSLPaths(idx.dir, paths, layout)
+	idx.buildLoadedShards(cacheDir, useCache)
 }
 
 // ModuleCount returns the number of indexed BSL modules.
