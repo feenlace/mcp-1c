@@ -297,7 +297,7 @@ func TestReload_BuildFailureKeepsOldIndexServing(t *testing.T) {
 	injected := errors.New("внедрённый сбой сборки поколения")
 	orig := reloadBuildGeneration
 	var called atomic.Bool
-	reloadBuildGeneration = func(dumpDir, cache, gensig string) (*readerRegistration, error) {
+	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath, gensig string) (*readerRegistration, error) {
 		called.Store(true)
 		return nil, injected
 	}
@@ -376,7 +376,7 @@ func TestReload_BuildPanicKeepsOldIndexServing(t *testing.T) {
 	const panicText = "внедрённая паника сборки поколения"
 	orig := reloadBuildGeneration
 	var called atomic.Bool
-	reloadBuildGeneration = func(dumpDir, cache, gensig string) (*readerRegistration, error) {
+	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath, gensig string) (*readerRegistration, error) {
 		called.Store(true)
 		panic(panicText)
 	}
@@ -461,7 +461,7 @@ func TestReload_RefusedWhileNotReady(t *testing.T) {
 	if _, err := ph.Reload(); !errors.Is(err, ErrReloadNotReady) {
 		t.Fatalf("Reload on a not-ready index: %v, want ErrReloadNotReady", err)
 	}
-	ph.FinishServeOpen(t.TempDir(), unclaimedGeneration("нет-такого-поколения"), nil)
+	ph.FinishServeOpen(t.TempDir(), nil, errors.New("simulated serve build failure"))
 	<-ph.Done()
 	if _, err := ph.Reload(); err == nil {
 		t.Fatal("Reload on an index whose build failed reported success")
@@ -484,10 +484,10 @@ func TestReload_SecondCallerIsToldNotQueued(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	orig := reloadBuildGeneration
-	reloadBuildGeneration = func(dumpDir, cache, gensig string) (*readerRegistration, error) {
+	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath, gensig string) (*readerRegistration, error) {
 		close(entered)
 		<-release
-		return orig(dumpDir, cache, gensig)
+		return orig(opts, dumpDir, cpath, gensig)
 	}
 	defer func() { reloadBuildGeneration = orig }()
 

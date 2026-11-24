@@ -125,8 +125,17 @@ func TestDeepExtensionBudgetLeavesShallowSourcesUsable(t *testing.T) {
 		t.Errorf("layout summary = %+v, want the first deep candidate, both shallow roots and truncation", got)
 	}
 	// Root + 4 immediate candidates + 4 second-level candidates + 64 deep ones.
-	if got := layout.cost.Lstats; got != 9+maxDeepProbeChildren {
-		t.Errorf("manifest candidates = %d, want %d", got, 9+maxDeepProbeChildren)
+	if got := layout.cost.Lstats; got != 9+DefaultExtensionDeepScanLimit {
+		t.Errorf("manifest candidates = %d, want %d", got, 9+DefaultExtensionDeepScanLimit)
+	}
+	raised, err := NewIndexOptions(96)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := raised.InspectExtensionLayout(root); got.ScanTruncated ||
+		!slices.Contains(got.Dirs, "a-wide/branch-2/candidate-23") ||
+		!slices.Contains(got.Dirs, "a-wide/branch-0/candidate-01/extension") {
+		t.Errorf("raised limit did not finish the deep scan: %+v", got)
 	}
 	idx, err := NewIndex(root, t.TempDir(), false)
 	if err != nil {

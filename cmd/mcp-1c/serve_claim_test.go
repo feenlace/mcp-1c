@@ -79,7 +79,7 @@ func serveReapOpenAndWait(t *testing.T, dumpDir, cacheDir string) (*dump.Index, 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	idx, err := openServeIndexLocal(ctx, dumpDir, cacheDir, false)
+	idx, err := openServeIndexLocal(ctx, dumpDir, cacheDir, false, dump.IndexOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("openServeIndexLocal returned an error: %w", err)
 	}

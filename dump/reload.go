@@ -109,8 +109,8 @@ var ErrReloadClosed = errors.New("dump: index is closed")
 // Production always builds WITH a claim: a reload must come away already holding
 // the generation it is about to serve, because a generation that is merely READY
 // in the arena is a legal target for every reaper there (see buildGeneration).
-var reloadBuildGeneration = func(dir, cacheDir, gensig string) (*readerRegistration, error) {
-	return buildGeneration(dir, cacheDir, gensig, withClaim)
+var reloadBuildGeneration = func(opts IndexOptions, dir, cpath, gensig string) (*readerRegistration, error) {
+	return opts.buildGeneration(dir, cpath, gensig, withClaim)
 }
 
 // Reload picks up on-disk changes to the dump WITHOUT restarting the process, so
@@ -200,7 +200,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 		rep.Elapsed = time.Since(start)
 		// A successful no-op also restores a removed mapping. The snapshot above
 		// is protected by mu, and reloadMu keeps this publication serial with swaps.
-		if cpath, err := cachePath(idx.dir, cacheDir); err == nil {
+		if cpath, err := idx.options.CacheDir(idx.dir, cacheDir); err == nil {
 			writeDumpInfo(cpath, idx.dir, before, rep.Elapsed)
 		} else {
 			slog.Warn("dump: could not resolve cache for dump.json", "error", err)
@@ -208,7 +208,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 		return rep, nil
 	}
 
-	cpath, err := cachePath(idx.dir, cacheDir)
+	cpath, err := idx.options.CacheDir(idx.dir, cacheDir)
 	if err != nil {
 		rep.Elapsed = time.Since(start)
 		return rep, fmt.Errorf("dump: no writable cache directory for a reload "+
@@ -242,7 +242,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 				buildErr = fmt.Errorf("panic during the reload build of %s: %v", idx.dir, r)
 			}
 		}()
-		reg, buildErr = reloadBuildGeneration(idx.dir, cacheDir, sigAfter)
+		reg, buildErr = reloadBuildGeneration(idx.options, idx.dir, cpath, sigAfter)
 	}()
 	// From here on the reload HOLDS a claim on the new generation, so every early
 	// return has to release it — otherwise the generation would stay pinned for the
@@ -321,7 +321,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	}
 
 	oldShards, oldReg := idx.swapGeneration(sigAfter, shards, reg,
-		names, pathByName, pathToDocID, NewPathIndex(names), detectExtensionLayout(idx.dir))
+		names, pathByName, pathToDocID, NewPathIndex(names), idx.options.detectExtensionLayout(idx.dir))
 
 	// Retire the old generation only AFTER the swap has published its replacement.
 	// alias.Swap took the alias write lock, so no search is inside these shards and
@@ -338,7 +338,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 
 	// Best-effort: reclaim generations no live reader holds. A GC failure must
 	// never turn a successful reload into a failed one.
-	if dropped, gcErr := GCGenerations(idx.dir, cacheDir, sigAfter); gcErr != nil {
+	if dropped, gcErr := idx.options.GCGenerations(idx.dir, cacheDir, sigAfter); gcErr != nil {
 		slog.Warn("dump: reload GC of old generations failed", "error", gcErr)
 	} else if len(dropped) > 0 {
 		slog.Info("dump: reload reaped old generations", "count", len(dropped))

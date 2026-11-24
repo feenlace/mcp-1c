@@ -31,6 +31,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/feenlace/mcp-1c/dump"
 )
 
 // roCacheFreeze clears every write bit under root and restores them before the
@@ -145,7 +147,7 @@ func TestReadOnlyCache_ServeOpenServesAndReportsWhatAPeerCouldReap(t *testing.T)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	idx, err := openServeIndexLocal(ctx, dumpDir, cacheDir, false)
+	idx, err := openServeIndexLocal(ctx, dumpDir, cacheDir, false, dump.IndexOptions{})
 	if err != nil {
 		t.Fatalf("the placeholder open must not fail synchronously: %v", err)
 	}

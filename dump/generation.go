@@ -475,9 +475,15 @@ func openReadOnlyFrom(dumpDir, cacheDir, genDir string, held *readerRegistration
 // additionally records its start time for dump.json build_seconds, and cacheDir is
 // not known here (the caller passes it to FinishServeOpen, which records it there).
 func NewServePlaceholder(dumpDir string) *Index {
+	return (IndexOptions{}).NewServePlaceholder(dumpDir)
+}
+
+// NewServePlaceholder starts an async serve open with these index options.
+func (opts IndexOptions) NewServePlaceholder(dumpDir string) *Index {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Index{
 		dir:            dumpDir,
+		options:        opts,
 		serveStartedAt: time.Now(),
 		alias:          bleve.NewIndexAlias(),
 		contentByName:  make(map[string]cachedModule),
@@ -563,10 +569,23 @@ func (idx *Index) FinishServeOpen(cacheDir string, gen *ServeGeneration, prepErr
 	// re-resolving one from the environment.
 	idx.cacheDir = cacheDir
 
-	cpath, err := cachePath(idx.dir, cacheDir)
+	cpath, err := idx.options.CacheDir(idx.dir, cacheDir)
 	if err != nil {
 		idx.setBuildErr(fmt.Errorf("serve open: resolve cache path: %w", err))
 		return
+	}
+	if idx.options.deepScanLimit() != gen.options.deepScanLimit() {
+		idx.setBuildErr(fmt.Errorf("serve open: prepared generation uses a different extension deep scan limit"))
+		return
+	}
+	if cpath != gen.cachePath {
+		// Preserve equivalent spellings of the same cache directory.
+		a, aErr := os.Stat(cpath)
+		b, bErr := os.Stat(gen.cachePath)
+		if aErr != nil || bErr != nil || !os.SameFile(a, b) {
+			idx.setBuildErr(fmt.Errorf("serve open: prepared generation belongs to a different cache directory"))
+			return
+		}
 	}
 	idx.metadata, _ = openDumpInfoMetadata(cpath, idx.dir)
 	genDir := generationDir(cpath, gensig)
@@ -713,7 +732,12 @@ func (idx *Index) attachReadOnlyShards(genDir string, held *readerRegistration) 
 // process that claims it while this pass is deciding is detected and the
 // generation is put back rather than deleted underneath it.
 func GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
-	cpath, err := cachePath(dir, cacheDir)
+	return (IndexOptions{}).GCGenerations(dir, cacheDir, keepGensig)
+}
+
+// GCGenerations reaps old generations within the selected cache directory.
+func (opts IndexOptions) GCGenerations(dir, cacheDir, keepGensig string) ([]string, error) {
+	cpath, err := opts.CacheDir(dir, cacheDir)
 	if err != nil {
 		return nil, err
 	}
@@ -971,6 +995,10 @@ func ReapStaleBuildDirs(dir, cacheDir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return reapStaleBuildDirs(cpath)
+}
+
+func reapStaleBuildDirs(cpath string) ([]string, error) {
 	gensDir := generationsDir(cpath)
 	entries, err := os.ReadDir(gensDir)
 	if err != nil {
@@ -1252,7 +1280,11 @@ func readGenerationNames(dumpDir, genDir string) (names []string, pathByName, pa
 // losers discard their temp dir). That is safe but redundant; the single-leader
 // optimization lives in the (deferred) advanced coordination layer.
 func BuildGeneration(dir, cacheDir, gensig string) error {
-	_, err := buildGeneration(dir, cacheDir, gensig, noClaim)
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		return fmt.Errorf("no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
+	}
+	_, err = (IndexOptions{}).buildGeneration(dir, cpath, gensig, noClaim)
 	return err
 }
 
@@ -1290,12 +1322,7 @@ const (
 // adopt race — fall back to the ordinary registerReader path and its
 // claim/READY barrier, which is fail-closed but, as registerReader documents,
 // still has an open window.
-func buildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*readerRegistration, error) {
-	cpath, err := cachePath(dir, cacheDir)
-	if err != nil {
-		return nil, fmt.Errorf("no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
-	}
-
+func (opts IndexOptions) buildGeneration(dir, cpath, gensig string, claim buildClaim) (*readerRegistration, error) {
 	genDir := generationDir(cpath, gensig)
 	if generationReadyDir(genDir) {
 		return claimBuiltGeneration(genDir, claim) // already built and adopted
@@ -1320,7 +1347,7 @@ func buildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*readerReg
 		}
 	}()
 
-	if err := buildGenerationInto(dir, tmpDir); err != nil {
+	if err := opts.buildGenerationInto(dir, tmpDir); err != nil {
 		return nil, fmt.Errorf("building generation %q: %w", gensig, err)
 	}
 
@@ -1439,7 +1466,11 @@ func forceDropGeneration(genDir, gensig string) {
 // IT PUBLISHES AN UNCLAIMED GENERATION; see AdoptFlatGeneration for why a caller
 // that intends to serve the result must use PrepareServeGeneration instead.
 func ForceRebuildGeneration(dir, cacheDir, gensig string) error {
-	_, err := forceRebuildGeneration(dir, cacheDir, gensig, noClaim)
+	cpath, err := cachePath(dir, cacheDir)
+	if err != nil {
+		return fmt.Errorf("force-rebuild: no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
+	}
+	_, err = (IndexOptions{}).forceRebuildGeneration(dir, cpath, gensig, noClaim)
 	return err
 }
 
@@ -1454,13 +1485,9 @@ func ForceRebuildGeneration(dir, cacheDir, gensig string) error {
 // existing generation in place, the build no-ops on it, and the claim is then the
 // ordinary post-adopt one on a generation that was already published. Both cases
 // come back through buildGeneration, which picks the right one.
-func forceRebuildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*readerRegistration, error) {
-	cpath, err := cachePath(dir, cacheDir)
-	if err != nil {
-		return nil, fmt.Errorf("force-rebuild: no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
-	}
+func (opts IndexOptions) forceRebuildGeneration(dir, cpath, gensig string, claim buildClaim) (*readerRegistration, error) {
 	forceDropGeneration(generationDir(cpath, gensig), gensig)
-	reg, err := buildGeneration(dir, cacheDir, gensig, claim)
+	reg, err := opts.buildGeneration(dir, cpath, gensig, claim)
 	if err != nil {
 		return nil, fmt.Errorf("force-rebuild: building generation %q: %w", gensig, err)
 	}
@@ -1471,11 +1498,12 @@ func forceRebuildGeneration(dir, cacheDir, gensig string, claim buildClaim) (*re
 // synchronously, then closes the freshly-built shards (releasing their exclusive
 // flock) so the directory can be renamed and later opened read-only. On build
 // failure buildShards removes targetDir; this returns the build error.
-func buildGenerationInto(dumpDir, targetDir string) error {
+func (opts IndexOptions) buildGenerationInto(dumpDir, targetDir string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	idx := &Index{
 		dir:           dumpDir,
+		options:       opts,
 		alias:         bleve.NewIndexAlias(),
 		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
@@ -1616,6 +1644,10 @@ func migrateFlatToGeneration(dir, cacheDir string, claim buildClaim) (string, *r
 	if err != nil {
 		return "", nil, false, err
 	}
+	return (IndexOptions{}).migrateFlatToGeneration(dir, cpath, claim)
+}
+
+func (opts IndexOptions) migrateFlatToGeneration(dir, cpath string, claim buildClaim) (string, *readerRegistration, bool, error) {
 	gensig, err := GenSig(dir)
 	if err != nil {
 		return "", nil, false, fmt.Errorf("computing generation signature for migration: %w", err)
@@ -1653,7 +1685,7 @@ func migrateFlatToGeneration(dir, cacheDir string, claim buildClaim) (string, *r
 	// backward-compatible fallback until a later (deferred) flat-cache GC.
 	slog.Info("Legacy flat cache not safely adoptable; building a fresh generation once",
 		"gen", gensig, "reason", reason)
-	reg, err := buildGeneration(dir, cacheDir, gensig, claim)
+	reg, err := opts.buildGeneration(dir, cpath, gensig, claim)
 	if err != nil {
 		return gensig, nil, false, fmt.Errorf("building generation for migration: %w", err)
 	}

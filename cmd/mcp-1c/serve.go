@@ -34,23 +34,23 @@ import (
 // ctx is cancelled by main once s.Run returns, so a background build in flight at
 // shutdown cannot wedge process exit: the goroutine checks ctx between steps and
 // FinishServeOpen always closes the placeholder's Done() channel exactly once.
-func openServeIndexLocal(ctx context.Context, dumpDir, cacheDir string, reindex bool) (*dump.Index, error) {
+func openServeIndexLocal(ctx context.Context, dumpDir, cacheDir string, reindex bool, opts dump.IndexOptions) (*dump.Index, error) {
 	// No writable cache => no shared on-disk generation for processes to coexist on.
 	// Fall back to the legacy in-memory build, which still serves. CacheDir wraps the
 	// same cachePath resolution BuildGeneration/BuildCache use to report "no writable
 	// cache", so branching on it here keeps this path consistent with the rest of the
 	// dump package.
-	if _, err := dump.CacheDir(dumpDir, cacheDir); err != nil {
+	if _, err := opts.CacheDir(dumpDir, cacheDir); err != nil {
 		slog.Warn("serve index: no writable cache directory; serving a single in-memory "+
 			"index (no concurrent multi-process serve without a shared cache)",
 			"dump", dumpDir, "error", err)
-		return dump.NewIndex(dumpDir, cacheDir, reindex)
+		return opts.NewIndex(dumpDir, cacheDir, reindex)
 	}
 
 	// Hand back a not-yet-ready placeholder NOW, before ANY dump-size-dependent work
 	// (the GenSig directory walk and the adopt/build both run in the goroutine below),
 	// so the MCP initialize handshake returns immediately regardless of dump size.
-	placeholder := dump.NewServePlaceholder(dumpDir)
+	placeholder := opts.NewServePlaceholder(dumpDir)
 	go func() {
 		var (
 			gen     *dump.ServeGeneration
@@ -69,7 +69,7 @@ func openServeIndexLocal(ctx context.Context, dumpDir, cacheDir string, reindex 
 				prepErr = ctx.Err()
 				return
 			}
-			gen, prepErr = dump.PrepareServeGeneration(ctx, dumpDir, cacheDir, reindex)
+			gen, prepErr = opts.PrepareServeGeneration(ctx, dumpDir, cacheDir, reindex)
 		}()
 
 		// Finish the open IN PLACE on the placeholder. FinishServeOpen opens the
@@ -89,7 +89,7 @@ func openServeIndexLocal(ctx context.Context, dumpDir, cacheDir string, reindex 
 		// The generation has been claimed since before it entered the shared arena, so
 		// reaping older unheld generations now cannot touch the one being served.
 		// Best-effort: a GC error must never disturb serving.
-		if removed, gcErr := dump.GCGenerations(dumpDir, cacheDir, gen.Gensig()); gcErr != nil {
+		if removed, gcErr := opts.GCGenerations(dumpDir, cacheDir, gen.Gensig()); gcErr != nil {
 			slog.Warn("serve index: old-generation GC failed", "dump", dumpDir, "error", gcErr)
 		} else if len(removed) > 0 {
 			slog.Info("serve index: reaped old generations", "dump", dumpDir, "removed", removed)

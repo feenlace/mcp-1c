@@ -19,12 +19,20 @@ import (
 //	Linux: ~/.cache/mcp-1c/<hash>  (or $XDG_CACHE_HOME)
 //	Windows: %LocalAppData%/mcp-1c/<hash>
 func cachePath(dumpDir, cacheDir string) (string, error) {
+	return (IndexOptions{}).CacheDir(dumpDir, cacheDir)
+}
+
+// CacheDir resolves the per-dump cache directory for these index options.
+func (opts IndexOptions) CacheDir(dumpDir, cacheDir string) (string, error) {
 	absDir, err := filepath.Abs(dumpDir)
 	if err != nil {
 		return "", err
 	}
 	h := sha256.Sum256([]byte(absDir))
 	hash := hex.EncodeToString(h[:8]) // first 16 hex chars
+	if limit := opts.deepScanLimit(); limit != DefaultExtensionDeepScanLimit {
+		hash += "-deep-" + strconv.Itoa(limit)
+	}
 
 	if cacheDir != "" {
 		return filepath.Join(cacheDir, hash), nil

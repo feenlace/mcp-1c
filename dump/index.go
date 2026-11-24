@@ -1219,6 +1219,7 @@ type Index struct {
 	mu        sync.RWMutex
 	contentMu sync.RWMutex // protects lazy content loading
 	buildErr  atomic.Pointer[error]
+	options   IndexOptions
 	// extLayout is how this dump root relates to configuration extensions, read
 	// from the manifests ONCE and then reused for every key derived from it. See
 	// extlayout.go; the zero value is an ordinary dump and changes no key.
@@ -1391,14 +1392,20 @@ type loadedModule struct {
 // asynchronously in a background goroutine and becomes available when Ready()
 // returns true. If reindex is true, any existing cache is discarded and rebuilt.
 func NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
-	return newIndex(dir, cacheDir, reindex, false)
+	return (IndexOptions{}).NewIndex(dir, cacheDir, reindex)
 }
 
-func newIndex(dir, cacheDir string, reindex, prewarm bool) (*Index, error) {
+// NewIndex creates an index with the selected discovery and cache options.
+func (opts IndexOptions) NewIndex(dir, cacheDir string, reindex bool) (*Index, error) {
+	return opts.newIndex(dir, cacheDir, reindex, false)
+}
+
+func (opts IndexOptions) newIndex(dir, cacheDir string, reindex, prewarm bool) (*Index, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	idx := &Index{
 		dir:           dir,
 		cacheDir:      cacheDir,
+		options:       opts,
 		alias:         bleve.NewIndexAlias(),
 		contentByName: make(map[string]cachedModule),
 		pathByName:    make(map[string]string),
@@ -1407,7 +1414,7 @@ func newIndex(dir, cacheDir string, reindex, prewarm bool) (*Index, error) {
 		done:          make(chan struct{}),
 	}
 
-	cpath, cacheErr := cachePath(dir, cacheDir)
+	cpath, cacheErr := opts.CacheDir(dir, cacheDir)
 	useCache := cacheErr == nil
 	if useCache {
 		idx.metadata, _ = openDumpInfoMetadata(cpath, dir)
@@ -1541,7 +1548,7 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 		// generations subtree, which a concurrent reader may hold.
 		slog.Warn("reindex: could not compute generation signature; falling back to a "+
 			"flat rebuild (generations preserved)", "dir", dir, "error", err)
-		if cpath, cerr := cachePath(dir, cacheDir); cerr == nil {
+		if cpath, cerr := idx.options.CacheDir(dir, cacheDir); cerr == nil {
 			removeFlatCacheContents(cpath)
 			idx.acquireCacheLock(cpath)
 			idx.buildShards(cpath, true)
@@ -1551,7 +1558,7 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 		return idx.BuildError()
 	}
 
-	cpath, err := cachePath(dir, cacheDir)
+	cpath, err := idx.options.CacheDir(dir, cacheDir)
 	if err != nil {
 		return fmt.Errorf("reindex: no writable cache directory: %w", err)
 	}
@@ -1567,7 +1574,7 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 	// only then claiming would publish this generation into the shared arena READY
 	// and held by nobody, and a co-located reaper firing in that window deletes the
 	// generation this reindex is about to serve.
-	reg, err := forceRebuildGeneration(dir, cacheDir, gensig, withClaim)
+	reg, err := idx.options.forceRebuildGeneration(dir, cpath, gensig, withClaim)
 	if err != nil {
 		return fmt.Errorf("reindex: building generation: %w", err)
 	}
@@ -1611,7 +1618,7 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 	}
 
 	// Now that a fresh generation is current, reap old, unheld generations.
-	if dropped, gcErr := GCGenerations(dir, cacheDir, gensig); gcErr != nil {
+	if dropped, gcErr := idx.options.GCGenerations(dir, cacheDir, gensig); gcErr != nil {
 		slog.Warn("reindex: GC of old generations failed", "error", gcErr)
 	} else if len(dropped) > 0 {
 		slog.Info("reindex: GC removed old generations", "count", len(dropped))
@@ -1654,8 +1661,13 @@ func (idx *Index) acquireCacheLock(cpath string) {
 // (nothing would be persisted, so every serve would rebuild) or if the build
 // fails.
 func BuildCache(dir, cacheDir string, reindex bool) error {
+	return (IndexOptions{}).BuildCache(dir, cacheDir, reindex)
+}
+
+// BuildCache pre-warms the cache addressed by these index options.
+func (opts IndexOptions) BuildCache(dir, cacheDir string, reindex bool) error {
 	start := time.Now()
-	cpath, err := cachePath(dir, cacheDir)
+	cpath, err := opts.CacheDir(dir, cacheDir)
 	if err != nil {
 		return fmt.Errorf("no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
 	}
@@ -1674,7 +1686,7 @@ func BuildCache(dir, cacheDir string, reindex bool) error {
 			"delete %s and retry", cpath, who, filepath.Join(cpath, serveLockName))
 	}
 
-	idx, err := newIndex(dir, cacheDir, reindex, true)
+	idx, err := opts.newIndex(dir, cacheDir, reindex, true)
 	if err != nil {
 		return err
 	}
@@ -3370,7 +3382,7 @@ func (idx *Index) prewarmGeneration(cpath string) error {
 	if err != nil {
 		return err
 	}
-	reg, err := buildGeneration(idx.dir, idx.cacheDir, gensig, withClaim)
+	reg, err := idx.options.buildGeneration(idx.dir, cpath, gensig, withClaim)
 	if err != nil {
 		return err
 	}

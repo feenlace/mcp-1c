@@ -766,7 +766,7 @@ func TestServeClaim_FinishServeOpenReleasesTheClaimItCannotUse(t *testing.T) {
 // generation with no claim is one that entered the arena unheld; serving it is
 // the silent degradation the whole registry exists to prevent.
 func TestServeClaim_HeldGenerationRefusesAnUnclaimedGeneration(t *testing.T) {
-	gen, err := heldGeneration("deadbeefdeadbeef", nil)
+	gen, err := (IndexOptions{}).heldGeneration("", "deadbeefdeadbeef", nil)
 	if err == nil {
 		t.Fatalf("heldGeneration accepted a generation with no reader claim and returned %v", gen)
 	}
@@ -795,7 +795,7 @@ func TestServeClaim_HeldGenerationRefusesAnUnclaimedGeneration(t *testing.T) {
 		t.Fatalf("registerReader: %v", err)
 	}
 	t.Cleanup(reg.Close)
-	if _, err := heldGeneration(gensig, reg); err != nil {
+	if _, err := (IndexOptions{}).heldGeneration("", gensig, reg); err != nil {
 		t.Fatalf("CONTROL FAILED: heldGeneration refused a generation WITH a live claim: %v", err)
 	}
 }

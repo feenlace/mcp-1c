@@ -67,6 +67,7 @@ func main() {
 	nativeCheckFileDB := flag.String("native-check-file-db", "", "Explicit owned synthetic file database directory for help source builds only")
 	nativeCheckOutputRoot := flag.String("native-check-output-root", "", "Existing separate output directory for explicitly requested trusted help source builds")
 	dumpDir := flag.String("dump", "", "Path to DumpConfigToFiles output (enables search_code)")
+	deepScanLimit := flag.Int("extension-deep-scan-limit", dump.DefaultExtensionDeepScanLimit, "Positive limit on deep extension directory manifest probes across the dump after shallow discovery")
 	cacheDir := flag.String("cache-dir", "", "Directory for index cache and logs (default: platform cache dir)")
 	reindex := flag.Bool("reindex", false, "Force rebuild of search index cache")
 	buildIndex := flag.Bool("build-index", false, "Build (or refresh) the search index cache for --dump and exit. Pre-warms the on-disk cache so a later start opens it instantly instead of doing an in-memory cold build. Requires --dump and a writable cache dir (--cache-dir or MCP_1C_CACHE_DIR).")
@@ -84,6 +85,11 @@ func main() {
 	maxResponseSize := flag.Int("max-response-size", 0, "Maximum size of a 1C HTTP response, in mebibytes (MiB). A larger response is rejected with a clear error instead of a cryptic decode failure. Default: 128.")
 	requestTimeout := flag.Int("request-timeout", 0, "Timeout for an HTTP request to 1C, in seconds. Raise it if fetching a very large response (e.g. extensions of a big database) times out. Default: 300.")
 	flag.Parse()
+	indexOptions, optsErr := dump.NewIndexOptions(*deepScanLimit)
+	if optsErr != nil {
+		fmt.Fprintf(os.Stderr, "--extension-deep-scan-limit: %v\n", optsErr)
+		os.Exit(2)
+	}
 
 	if *cacheDir == "" {
 		*cacheDir = os.Getenv("MCP_1C_CACHE_DIR")
@@ -150,7 +156,7 @@ func main() {
 		dump.SetShowProgress(effectiveTTY && !*debug)
 		fmt.Printf("Building search index for %s ...\n", *dumpDir)
 		start := time.Now()
-		if err := dump.BuildCache(*dumpDir, *cacheDir, *reindex); err != nil {
+		if err := indexOptions.BuildCache(*dumpDir, *cacheDir, *reindex); err != nil {
 			fmt.Fprintf(os.Stderr, "build-index failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -335,10 +341,10 @@ func main() {
 		// puts it in front of the person who typed the flag; answering from the build
 		// goroutine would put it in a report that is not sequenced against the end of
 		// the process and goes missing outright over repeated starts.
-		reportDumpRootAndLayout(*dumpDir)
+		reportDumpRootAndLayout(*dumpDir, indexOptions)
 
 		var err error
-		dumpIndex, err = openServeIndexLocal(serveBuildCtx, *dumpDir, *cacheDir, *reindex)
+		dumpIndex, err = openServeIndexLocal(serveBuildCtx, *dumpDir, *cacheDir, *reindex, indexOptions)
 		if err != nil {
 			// UNREACHABLE TODAY, and kept anyway. openServeIndexLocal returns an
 			// error only by handing back dump.NewIndex's, and NewIndex has exactly
@@ -920,9 +926,9 @@ func extensionLayoutDoubtMessage(layout dump.ExtensionLayoutSummary) string {
 //
 // ONE LAYOUT DETECTION, used by both messages, so the two cannot describe
 // different readings of the same tree.
-func reportDumpRootAndLayout(dumpDir string) {
+func reportDumpRootAndLayout(dumpDir string, opts dump.IndexOptions) {
 	insp := dump.InspectDumpRoot(dumpDir)
-	layout := dump.InspectExtensionLayout(dumpDir)
+	layout := opts.InspectExtensionLayout(dumpDir)
 
 	if msg := nestedDumpRootMessage(insp, layout); msg != "" {
 		slog.Error(msg, "dump", dumpDir,

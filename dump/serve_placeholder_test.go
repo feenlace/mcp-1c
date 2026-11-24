@@ -3,6 +3,7 @@ package dump
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -25,8 +26,8 @@ func mustPrepareServeGeneration(t *testing.T, dir, cacheDir string) *ServeGenera
 // unclaimedGeneration names a generation WITHOUT a claim on it, for the failure
 // tests: the generation does not exist, so there was never anything to claim.
 // FinishServeOpen must refuse it before it reaches the attach.
-func unclaimedGeneration(gensig string) *ServeGeneration {
-	return &ServeGeneration{gensig: gensig}
+func unclaimedGeneration(cpath, gensig string) *ServeGeneration {
+	return &ServeGeneration{gensig: gensig, cachePath: cpath}
 }
 
 // chanClosed reports whether ch is already closed, without blocking.
@@ -140,6 +141,48 @@ func TestServePlaceholder_FinishSuccess(t *testing.T) {
 	}
 }
 
+func TestServePlaceholder_RejectsClaimFromDifferentDeepScanLimit(t *testing.T) {
+	dir, cacheDir := t.TempDir(), t.TempDir()
+	mkBSLFile(t, dir, "Catalogs/Тест/Ext/ObjectModule.bsl", "Процедура П()\nКонецПроцедуры\n")
+	defaultGen := mustPrepareServeGeneration(t, dir, cacheDir)
+	defer defaultGen.Release()
+
+	explicitDefault, err := NewIndexOptions(DefaultExtensionDeepScanLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cpath, err := explicitDefault.CacheDir(dir, cacheDir); err != nil || cpath != defaultGen.cachePath {
+		t.Fatalf("explicit default cache = %q, %v, want %q", cpath, err, defaultGen.cachePath)
+	}
+
+	raised, err := NewIndexOptions(128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raisedGen, err := raised.PrepareServeGeneration(context.Background(), dir, cacheDir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raisedGen.Release()
+	if raisedGen.cachePath != defaultGen.cachePath+"-deep-128" || raisedGen.Gensig() != defaultGen.Gensig() {
+		t.Fatal("the raised limit must use a separate cache path with the same dump signature")
+	}
+	claimPath := raisedGen.reg.path
+	if _, err := os.Stat(claimPath); err != nil {
+		t.Fatalf("expected a live claim before finish: %v", err)
+	}
+
+	ph := NewServePlaceholder(dir)
+	ph.FinishServeOpen(cacheDir, raisedGen, nil)
+	defer ph.Close()
+	if err := ph.BuildError(); ph.Ready() || err == nil || !strings.Contains(err.Error(), "different extension deep scan limit") {
+		t.Fatalf("finish adopted a mismatched claim: ready=%v, error=%v", ph.Ready(), err)
+	}
+	if _, err := os.Stat(claimPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("finish did not release the mismatched claim: %v", err)
+	}
+}
+
 // TestServePlaceholder_FinishFailurePrepErr covers the caller-supplied build
 // failure funnel: FinishServeOpen(prepErr!=nil) must record BuildError(), keep
 // Ready()==false, still close Done(), surface the error through Search(), and let
@@ -179,9 +222,13 @@ func TestServePlaceholder_FinishMissingGeneration(t *testing.T) {
 	cacheDir := t.TempDir()
 	mkBSLFile(t, dir, "Catalogs/Тест/Ext/ObjectModule.bsl", "Процедура П()\nКонецПроцедуры\n")
 
+	cpath, err := CacheDir(dir, cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ph := NewServePlaceholder(dir)
 	// A gensig that was never built — generationReadyDir is false.
-	ph.FinishServeOpen(cacheDir, unclaimedGeneration("0000000000000000"), nil)
+	ph.FinishServeOpen(cacheDir, unclaimedGeneration(cpath, "0000000000000000"), nil)
 
 	if ph.Ready() {
 		t.Fatal("Ready() must stay false when the generation is missing")

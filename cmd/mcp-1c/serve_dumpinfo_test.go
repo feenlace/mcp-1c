@@ -28,7 +28,7 @@ func openServeIndexReady(t *testing.T, dumpDir, cacheDir string) *dump.Index {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	idx, err := openServeIndexLocal(ctx, dumpDir, cacheDir, false)
+	idx, err := openServeIndexLocal(ctx, dumpDir, cacheDir, false, dump.IndexOptions{})
 	if err != nil {
 		t.Fatalf("openServeIndexLocal: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestCancelledServeDoesNotWriteDumpInfo(t *testing.T) {
 	dumpDir, cacheDir := writeServeDumpInfoFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	idx, err := openServeIndexLocal(ctx, dumpDir, cacheDir, false)
+	idx, err := openServeIndexLocal(ctx, dumpDir, cacheDir, false, dump.IndexOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

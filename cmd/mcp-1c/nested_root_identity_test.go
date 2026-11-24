@@ -88,7 +88,7 @@ func nestedIdentityWrite(t *testing.T, root, rel, body string) {
 func nestedIdentityReport(t *testing.T, dir string) string {
 	t.Helper()
 	out := captureAtErrorLevel(t)
-	reportDumpRootAndLayout(dir)
+	reportDumpRootAndLayout(dir, dump.IndexOptions{})
 	rec := out.String()
 	if rec == "" {
 		t.Fatalf("%s produced no startup record at all, so there is no sentence to check", dir)

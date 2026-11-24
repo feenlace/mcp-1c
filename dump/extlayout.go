@@ -163,9 +163,6 @@ const (
 	// above.
 	maxNestedProbeChildren = maxExtensionScan
 
-	// Deep probes get their own budget so they cannot displace shallow roots.
-	maxDeepProbeChildren = maxNestedProbeChildren
-
 	// maxExtensionNameRunes bounds an accepted extension name. It is a bound on
 	// what becomes a key component and a rendered string, not a platform limit.
 	maxExtensionNameRunes = 128
@@ -473,12 +470,20 @@ func (l extensionLayout) persistedExtensionLayout(paths map[string]string) exten
 // drop a manifest into an already-indexed tree, and the remedy is the one that
 // already exists for every such case, `--reindex`.
 func detectExtensionLayout(dir string) extensionLayout {
-	return detectExtensionLayoutMode(dir, nil)
+	return (IndexOptions{}).detectExtensionLayout(dir)
+}
+
+func (opts IndexOptions) detectExtensionLayout(dir string) extensionLayout {
+	return detectExtensionLayoutWithLimit(dir, nil, opts.deepScanLimit())
 }
 
 // Form lookup must prove its source unique. Keep roots whose manifest names
 // collide, and record every bounded descent skipped without a verdict.
 func detectExtensionLayoutMode(dir string, bound *os.Root) extensionLayout {
+	return detectExtensionLayoutWithLimit(dir, bound, DefaultExtensionDeepScanLimit)
+}
+
+func detectExtensionLayoutWithLimit(dir string, bound *os.Root, deepLimit int) extensionLayout {
 	strict := bound != nil
 	var l extensionLayout
 	readDir := func(path string) ([]os.DirEntry, error) {
@@ -565,7 +570,7 @@ func detectExtensionLayoutMode(dir string, bound *os.Root) extensionLayout {
 		}
 	}
 	if !strict {
-		l.probeDeepExtensions(dir, deepParents)
+		l.probeDeepExtensions(dir, deepParents, deepLimit)
 	}
 	return l
 }
@@ -632,7 +637,7 @@ func (l *extensionLayout) probeNestedExtensionsMode(root, child string, budget *
 	}
 }
 
-func (l *extensionLayout) probeDeepExtensions(root string, pending []string) {
+func (l *extensionLayout) probeDeepExtensions(root string, pending []string, limit int) {
 	probed := 0
 	for len(pending) > 0 {
 		parent := pending[0]
@@ -648,7 +653,7 @@ func (l *extensionLayout) probeDeepExtensions(root string, pending []string) {
 			if !e.IsDir() || belongsToSelfExtension(e.Name()) {
 				continue
 			}
-			if probed == maxDeepProbeChildren {
+			if probed == limit {
 				l.doubts = append(l.doubts, layoutDoubt{dir: parent, reason: doubtScanTruncated})
 				return
 			}
@@ -1194,13 +1199,18 @@ func InspectExtensionLayout(dir string) ExtensionLayoutSummary {
 	return detectExtensionLayout(dir).summary()
 }
 
+// InspectExtensionLayout reports discovery with the selected deep probe limit.
+func (opts IndexOptions) InspectExtensionLayout(dir string) ExtensionLayoutSummary {
+	return opts.detectExtensionLayout(dir).summary()
+}
+
 // layout returns manifest discovery for the index's initial dump or the latest
 // successful reload. It takes no index lock and is safe under idx.mu.
 func (idx *Index) layout() extensionLayout {
 	if current := idx.reloadLayout.Load(); current != nil {
 		return *current
 	}
-	idx.extLayoutOnce.Do(func() { idx.extLayout = detectExtensionLayout(idx.dir) })
+	idx.extLayoutOnce.Do(func() { idx.extLayout = idx.options.detectExtensionLayout(idx.dir) })
 	return idx.extLayout
 }
 

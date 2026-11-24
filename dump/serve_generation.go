@@ -32,8 +32,10 @@ import (
 // A nil *ServeGeneration is usable: Gensig returns "" and Release does nothing, so
 // the failure paths that have no generation need no special case.
 type ServeGeneration struct {
-	gensig string
-	reg    *readerRegistration
+	gensig    string
+	cachePath string
+	options   IndexOptions
+	reg       *readerRegistration
 }
 
 // Gensig returns the signature of the prepared generation, or "" for a nil handle.
@@ -102,15 +104,25 @@ func (g *ServeGeneration) Release() {
 // keeping the whole of that lifetime inside one package is what stops it becoming
 // exported machinery that any caller could half-use.
 func PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reindex bool) (*ServeGeneration, error) {
+	return (IndexOptions{}).PrepareServeGeneration(ctx, dumpDir, cacheDir, reindex)
+}
+
+// PrepareServeGeneration claims a generation from the selected cache directory.
+func (opts IndexOptions) PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reindex bool) (*ServeGeneration, error) {
 	gensig, err := GenSig(dumpDir)
 	if err != nil {
 		return nil, fmt.Errorf("computing dump signature for %s: %w", dumpDir, err)
 	}
 
+	cpath, err := opts.CacheDir(dumpDir, cacheDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the cache path for %s: %w", dumpDir, err)
+	}
+
 	// Reap abandoned .building-* temp generation dirs left by a builder that died
 	// mid-build (SIGKILL / OOM / power loss) before adopting or rolling back — nothing
 	// else reaps them. Best-effort: a reap error must never fail a serve open.
-	if reaped, rErr := ReapStaleBuildDirs(dumpDir, cacheDir); rErr != nil {
+	if reaped, rErr := reapStaleBuildDirs(cpath); rErr != nil {
 		slog.Warn("serve index: stale build-dir reap failed", "dump", dumpDir, "error", rErr)
 	} else if len(reaped) > 0 {
 		slog.Info("serve index: reaped abandoned build temp dirs", "dump", dumpDir, "reaped", reaped)
@@ -122,15 +134,15 @@ func PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reind
 
 	// Read fast-path: a READY generation for this signature lets N processes coexist
 	// read-only. Skipped while reindex forces a fresh build.
-	if !reindex && GenerationReady(dumpDir, cacheDir, gensig) {
-		return claimExistingGeneration(dumpDir, cacheDir, gensig)
+	if !reindex && generationReadyDir(generationDir(cpath, gensig)) {
+		return opts.claimExistingGeneration(cpath, gensig)
 	}
 
 	// Adopt an existing legacy flat cache as a generation first (an O(shards) rename
 	// that re-indexes nothing and reclaims the flat cache); only a genuinely cache-less
 	// dump — or an explicit reindex — falls through to the full cold build.
 	if !reindex {
-		g, reg, migrated, adoptErr := migrateFlatToGeneration(dumpDir, cacheDir, withClaim)
+		g, reg, migrated, adoptErr := opts.migrateFlatToGeneration(dumpDir, cpath, withClaim)
 		switch {
 		case adoptErr != nil:
 			slog.Warn("serve index: flat->generation adopt failed; falling back to a full build",
@@ -138,7 +150,7 @@ func PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reind
 		case migrated:
 			slog.Info("serve index: adopted existing cache as generation without reindex",
 				"dump", dumpDir, "gensig", g)
-			return heldGeneration(g, reg)
+			return opts.heldGeneration(cpath, g, reg)
 		}
 	}
 
@@ -151,17 +163,17 @@ func PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reind
 		// generation first — but only when no co-located process is still serving this
 		// exact generation, so a concurrent reader is never yanked (in that case the
 		// drop is skipped and the build no-ops, preserving the in-use generation).
-		reg, rErr := forceRebuildGeneration(dumpDir, cacheDir, gensig, withClaim)
+		reg, rErr := opts.forceRebuildGeneration(dumpDir, cpath, gensig, withClaim)
 		if rErr != nil {
 			return nil, fmt.Errorf("force-rebuilding dump generation for %s: %w", dumpDir, rErr)
 		}
-		return heldGeneration(gensig, reg)
+		return opts.heldGeneration(cpath, gensig, reg)
 	}
-	reg, err := buildGeneration(dumpDir, cacheDir, gensig, withClaim)
+	reg, err := opts.buildGeneration(dumpDir, cpath, gensig, withClaim)
 	if err != nil {
 		return nil, fmt.Errorf("building dump generation for %s: %w", dumpDir, err)
 	}
-	return heldGeneration(gensig, reg)
+	return opts.heldGeneration(cpath, gensig, reg)
 }
 
 // claimExistingGeneration claims a generation that was ALREADY in the arena when
@@ -180,12 +192,8 @@ func PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reind
 // A generation that was actually REAPED mid-claim is still caught, by the checks
 // that can see it: FinishServeOpen re-tests the READY sentinel before attaching,
 // and openCachedShards fails on the vanished shard directories.
-func claimExistingGeneration(dumpDir, cacheDir, gensig string) (*ServeGeneration, error) {
-	cpath, err := cachePath(dumpDir, cacheDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolving the cache path for %s: %w", dumpDir, err)
-	}
-	return heldGeneration(gensig, claimOrServeUnprotected(generationDir(cpath, gensig)))
+func (opts IndexOptions) claimExistingGeneration(cpath, gensig string) (*ServeGeneration, error) {
+	return opts.heldGeneration(cpath, gensig, claimOrServeUnprotected(generationDir(cpath, gensig)))
 }
 
 // heldGeneration wraps the registration a producing path came away with, and
@@ -197,7 +205,7 @@ func claimExistingGeneration(dumpDir, cacheDir, gensig string) (*ServeGeneration
 // always returns one — so this is a guard against a future edit rather than a
 // reachable state today, which is why it names what went wrong rather than
 // trying to recover.
-func heldGeneration(gensig string, reg *readerRegistration) (*ServeGeneration, error) {
+func (opts IndexOptions) heldGeneration(cpath, gensig string, reg *readerRegistration) (*ServeGeneration, error) {
 	if reg == nil {
 		slog.Error("dump: refusing to serve an index generation that was prepared without a reader claim; "+
 			"another process could delete it while it is being served. Give this server its own cache "+
@@ -206,5 +214,5 @@ func heldGeneration(gensig string, reg *readerRegistration) (*ServeGeneration, e
 		return nil, fmt.Errorf("the prepared generation %s carries no reader claim, so it cannot be served",
 			gensig)
 	}
-	return &ServeGeneration{gensig: gensig, reg: reg}, nil
+	return &ServeGeneration{gensig: gensig, cachePath: cpath, options: opts, reg: reg}, nil
 }

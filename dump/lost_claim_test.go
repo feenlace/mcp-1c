@@ -555,7 +555,7 @@ func TestLostClaim_AnOpenThatFailedDescribesNothing(t *testing.T) {
 
 	idx := NewServePlaceholder(dumpDir)
 	t.Cleanup(func() { _ = idx.Close() })
-	idx.FinishServeOpen(cacheDir, &ServeGeneration{gensig: gensig}, nil)
+	idx.FinishServeOpen(cacheDir, mustPrepareServeGeneration(t, dumpDir, cacheDir), nil)
 	<-idx.Done()
 
 	if idx.Ready() {

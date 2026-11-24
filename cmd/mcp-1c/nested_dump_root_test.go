@@ -60,7 +60,7 @@ func TestNestedDumpRootNoticeIsDeliveredAtErrorLevel(t *testing.T) {
 	out := captureAtErrorLevel(t)
 	parent := customerShapedTree(t)
 
-	reportDumpRootAndLayout(parent)
+	reportDumpRootAndLayout(parent, dump.IndexOptions{})
 
 	got := out.String()
 	if got == "" {
@@ -110,7 +110,7 @@ func TestNestedDumpRootNoticeIsSilentOnAProperRoot(t *testing.T) {
 		}
 	}
 	out := captureAtErrorLevel(t)
-	reportDumpRootAndLayout(root)
+	reportDumpRootAndLayout(root, dump.IndexOptions{})
 	if out.Len() != 0 {
 		t.Errorf("a correctly pointed --dump produced output:\n%s", out.String())
 	}
@@ -123,14 +123,14 @@ func TestNestedDumpRootNoticeIsSilentOnAProperRoot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(plain, "notes"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	reportDumpRootAndLayout(plain)
+	reportDumpRootAndLayout(plain, dump.IndexOptions{})
 	if out.Len() != 0 {
 		t.Errorf("an ordinary directory produced output:\n%s", out.String())
 	}
 
 	// Positive control for the capture itself.
 	out.Reset()
-	reportDumpRootAndLayout(customerShapedTree(t))
+	reportDumpRootAndLayout(customerShapedTree(t), dump.IndexOptions{})
 	if out.Len() == 0 {
 		t.Fatal("positive control failed: the customer's shape published nothing either, " +
 			"so the assertions above say nothing about the check")
@@ -157,7 +157,7 @@ func TestRealDumpRootsOnThisMachineStaySilent(t *testing.T) {
 		}
 		checked++
 		out.Reset()
-		reportDumpRootAndLayout(r)
+		reportDumpRootAndLayout(r, dump.IndexOptions{})
 		if out.Len() != 0 {
 			t.Errorf("a real dump root produced output:\n%s\n%s", r, out.String())
 		}
@@ -174,7 +174,7 @@ func TestRealDumpRootsOnThisMachineStaySilent(t *testing.T) {
 		return
 	}
 	out.Reset()
-	reportDumpRootAndLayout(container)
+	reportDumpRootAndLayout(container, dump.IndexOptions{})
 	got := out.String()
 	if got == "" {
 		t.Fatal("the container of two extension dumps produced nothing")
@@ -443,8 +443,8 @@ func TestMainReportsNestedDumpRootsBeforeServing(t *testing.T) {
 
 	// It must receive the resolved flag value, not something else that happens to
 	// be a string.
-	if len(report[0].Args) != 1 {
-		t.Fatalf("reportDumpRootAndLayout is called with %d arguments, want 1", len(report[0].Args))
+	if len(report[0].Args) != 2 {
+		t.Fatalf("reportDumpRootAndLayout is called with %d arguments, want 2", len(report[0].Args))
 	}
 	star, ok := report[0].Args[0].(*ast.StarExpr)
 	if !ok {
