@@ -35,6 +35,7 @@ type ServeGeneration struct {
 	gensig    string
 	cachePath string
 	options   IndexOptions
+	layout    extensionLayout
 	reg       *readerRegistration
 }
 
@@ -109,11 +110,12 @@ func PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reind
 
 // PrepareServeGeneration claims a generation from the selected cache directory.
 func (opts IndexOptions) PrepareServeGeneration(ctx context.Context, dumpDir, cacheDir string, reindex bool) (*ServeGeneration, error) {
-	gensig, err := GenSig(dumpDir)
+	input, err := opts.observeGeneration(dumpDir)
 	if err != nil {
 		return nil, fmt.Errorf("computing dump signature for %s: %w", dumpDir, err)
 	}
 
+	gensig := input.sig
 	cpath, err := opts.CacheDir(dumpDir, cacheDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolving the cache path for %s: %w", dumpDir, err)
@@ -135,14 +137,14 @@ func (opts IndexOptions) PrepareServeGeneration(ctx context.Context, dumpDir, ca
 	// Read fast-path: a READY generation for this signature lets N processes coexist
 	// read-only. Skipped while reindex forces a fresh build.
 	if !reindex && generationReadyDir(generationDir(cpath, gensig)) {
-		return opts.claimExistingGeneration(cpath, gensig)
+		return opts.claimExistingGeneration(cpath, input)
 	}
 
 	// Adopt an existing legacy flat cache as a generation first (an O(shards) rename
 	// that re-indexes nothing and reclaims the flat cache); only a genuinely cache-less
 	// dump — or an explicit reindex — falls through to the full cold build.
 	if !reindex {
-		g, reg, migrated, adoptErr := opts.migrateFlatToGeneration(dumpDir, cpath, withClaim)
+		g, reg, migrated, adoptErr := opts.migrateFlatToGeneration(dumpDir, cpath, input, withClaim)
 		switch {
 		case adoptErr != nil:
 			slog.Warn("serve index: flat->generation adopt failed; falling back to a full build",
@@ -150,7 +152,7 @@ func (opts IndexOptions) PrepareServeGeneration(ctx context.Context, dumpDir, ca
 		case migrated:
 			slog.Info("serve index: adopted existing cache as generation without reindex",
 				"dump", dumpDir, "gensig", g)
-			return opts.heldGeneration(cpath, g, reg)
+			return opts.heldGeneration(cpath, input, reg)
 		}
 	}
 
@@ -163,17 +165,17 @@ func (opts IndexOptions) PrepareServeGeneration(ctx context.Context, dumpDir, ca
 		// generation first — but only when no co-located process is still serving this
 		// exact generation, so a concurrent reader is never yanked (in that case the
 		// drop is skipped and the build no-ops, preserving the in-use generation).
-		reg, rErr := opts.forceRebuildGeneration(dumpDir, cpath, gensig, withClaim)
+		reg, rErr := opts.forceRebuildGeneration(dumpDir, cpath, input, withClaim)
 		if rErr != nil {
 			return nil, fmt.Errorf("force-rebuilding dump generation for %s: %w", dumpDir, rErr)
 		}
-		return opts.heldGeneration(cpath, gensig, reg)
+		return opts.heldGeneration(cpath, input, reg)
 	}
-	reg, err := opts.buildGeneration(dumpDir, cpath, gensig, withClaim)
+	reg, err := opts.buildGeneration(dumpDir, cpath, input, withClaim)
 	if err != nil {
 		return nil, fmt.Errorf("building dump generation for %s: %w", dumpDir, err)
 	}
-	return opts.heldGeneration(cpath, gensig, reg)
+	return opts.heldGeneration(cpath, input, reg)
 }
 
 // claimExistingGeneration claims a generation that was ALREADY in the arena when
@@ -192,8 +194,8 @@ func (opts IndexOptions) PrepareServeGeneration(ctx context.Context, dumpDir, ca
 // A generation that was actually REAPED mid-claim is still caught, by the checks
 // that can see it: FinishServeOpen re-tests the READY sentinel before attaching,
 // and openCachedShards fails on the vanished shard directories.
-func (opts IndexOptions) claimExistingGeneration(cpath, gensig string) (*ServeGeneration, error) {
-	return opts.heldGeneration(cpath, gensig, claimOrServeUnprotected(generationDir(cpath, gensig)))
+func (opts IndexOptions) claimExistingGeneration(cpath string, input generationInput) (*ServeGeneration, error) {
+	return opts.heldGeneration(cpath, input, claimOrServeUnprotected(generationDir(cpath, input.sig)))
 }
 
 // heldGeneration wraps the registration a producing path came away with, and
@@ -205,7 +207,8 @@ func (opts IndexOptions) claimExistingGeneration(cpath, gensig string) (*ServeGe
 // always returns one — so this is a guard against a future edit rather than a
 // reachable state today, which is why it names what went wrong rather than
 // trying to recover.
-func (opts IndexOptions) heldGeneration(cpath, gensig string, reg *readerRegistration) (*ServeGeneration, error) {
+func (opts IndexOptions) heldGeneration(cpath string, input generationInput, reg *readerRegistration) (*ServeGeneration, error) {
+	gensig := input.sig
 	if reg == nil {
 		slog.Error("dump: refusing to serve an index generation that was prepared without a reader claim; "+
 			"another process could delete it while it is being served. Give this server its own cache "+
@@ -214,5 +217,5 @@ func (opts IndexOptions) heldGeneration(cpath, gensig string, reg *readerRegistr
 		return nil, fmt.Errorf("the prepared generation %s carries no reader claim, so it cannot be served",
 			gensig)
 	}
-	return &ServeGeneration{gensig: gensig, cachePath: cpath, options: opts, reg: reg}, nil
+	return &ServeGeneration{gensig: gensig, cachePath: cpath, options: opts, layout: input.layout, reg: reg}, nil
 }

@@ -93,7 +93,7 @@ func TestSchemaBumpForcesAColdRebuildAndTheSameVersionReuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := BuildGeneration(dir, cache, oldSig); err != nil {
+	if err := buildForeignGeneration(t, dir, cache, oldSig, previousSchemaVersion); err != nil {
 		t.Fatalf("building the v%d generation: %v", previousSchemaVersion, err)
 	}
 	// PREMISE: the old generation really is on disk and adoptable ON ITS OWN TERMS.
@@ -142,6 +142,17 @@ func TestSchemaBumpForcesAColdRebuildAndTheSameVersionReuses(t *testing.T) {
 }
 
 // generationDirNames lists the generation directories in the arena, sorted.
+func buildForeignGeneration(t *testing.T, dir, cache, sig string, schema int) error {
+	t.Helper()
+	cpath := migCachePath(t, dir, cache)
+	opts := IndexOptions{}
+	_, err := opts.buildGeneration(dir, cpath, generationInput{sig: sig, layout: opts.detectExtensionLayout(dir)}, noClaim)
+	if err == nil {
+		migStampGeneration(t, dir, cache, sig, schema)
+	}
+	return err
+}
+
 func generationDirNames(t *testing.T, cacheDir, dumpDir string) []string {
 	t.Helper()
 	cpath, err := cachePath(dumpDir, cacheDir)

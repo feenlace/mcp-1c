@@ -63,7 +63,7 @@ func TestBuildShardOffline_NoTempDirDependency(t *testing.T) {
 	}
 	names := []string{"Документ.A.МодульОбъекта", "Документ.Б.МодульОбъекта"}
 
-	idx, err := buildShardOffline(dst, names, func(n string) string { return content[n] }, 0, 1, buildBSLMapping(), &atomic.Int64{})
+	idx, err := buildShardOffline(dst, names, func(n string) (string, error) { return content[n], nil }, 0, 1, buildBSLMapping(), &atomic.Int64{})
 	if err != nil {
 		t.Fatalf("buildShardOffline with an unusable os.TempDir() failed: %v "+
 			"(the scratch must be co-located with the destination, not under os.TempDir())", err)

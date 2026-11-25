@@ -83,11 +83,14 @@ func splitByHash(items []string, n int) [][]string {
 // getContent resolves a module name to its BSL source. The cold build passes a
 // resolver that reads each file from disk on demand, so the full corpus is never
 // resident at once (the dominant cold-build memory peak).
-func buildShard(path string, names []string, getContent func(name string) string, shardID, totalShards int, bslMapping *mapping.IndexMappingImpl, progress *atomic.Int64) (bleve.Index, error) {
+func buildShard(path string, names []string, getContent func(name string) (string, error), shardID, totalShards int, bslMapping *mapping.IndexMappingImpl, progress *atomic.Int64) (bleve.Index, error) {
 	if path != "" {
 		return buildShardOffline(path, names, getContent, shardID, totalShards, bslMapping, progress)
 	}
-	return buildShardInMemory(names, getContent, shardID, totalShards, bslMapping, progress)
+	return buildShardInMemory(names, func(name string) string {
+		content, _ := getContent(name)
+		return content
+	}, shardID, totalShards, bslMapping, progress)
 }
 
 // coLocateBuildScratch returns a scratch-directory prefix on the SAME filesystem
@@ -120,7 +123,7 @@ func coLocateBuildScratch(dstPath string) (prefix string, cleanup func(), err er
 
 // buildShardOffline builds a shard on disk via the bounded-memory offline
 // builder and returns the opened (mutable) index.
-func buildShardOffline(path string, names []string, getContent func(name string) string, shardID, totalShards int, bslMapping *mapping.IndexMappingImpl, progress *atomic.Int64) (bleve.Index, error) {
+func buildShardOffline(path string, names []string, getContent func(name string) (string, error), shardID, totalShards int, bslMapping *mapping.IndexMappingImpl, progress *atomic.Int64) (bleve.Index, error) {
 	// Start from a clean directory: bleve.NewBuilder writes index_meta.json with
 	// O_CREATE|O_EXCL and fails if a stale shard directory is present (e.g. from a
 	// previously interrupted build). A cold build always wants fresh shards.
@@ -149,10 +152,15 @@ func buildShardOffline(path string, names []string, getContent func(name string)
 	}
 
 	for _, name := range names {
+		content, err := getContent(name)
+		if err != nil {
+			// Close finalizes the builder and requires at least one segment.
+			// The deferred scratch cleanup discards an aborted build.
+			return nil, fmt.Errorf("shard %d reading module %q: %w", shardID, name, err)
+		}
 		parts := parseModuleName(name)
-		doc := bslDocumentFor(parts, getContent(name))
+		doc := bslDocumentFor(parts, content)
 		if err := builder.Index(name, doc); err != nil {
-			builder.Close()
 			return nil, fmt.Errorf("shard %d builder index %q: %w", shardID, name, err)
 		}
 		progress.Add(1)

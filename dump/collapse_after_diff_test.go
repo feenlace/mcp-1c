@@ -1,9 +1,12 @@
 package dump
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -167,4 +170,129 @@ func requireModuleHits(t *testing.T, idx *Index, query, category, module string,
 			seen[hit.Module] = true
 		}
 	}
+}
+
+func TestFlatUnreadableChangeDoesNotCertifyOrDelete(t *testing.T) {
+	root, flat, liveCache := t.TempDir(), t.TempDir(), t.TempDir()
+	const modified = "Catalogs/Changed/Ext/ObjectModule.bsl"
+	const deleted = "Catalogs/Deleted/Ext/ObjectModule.bsl"
+	const id = "Справочник.Changed.МодульОбъекта"
+	const newBody = "// replacementmarker new body\n"
+	mkBSLFile(t, root, modified, "// originalmarker\n")
+	mkBSLFile(t, root, deleted, "// deletemarker\n")
+	if err := BuildCache(root, flat, false); err != nil {
+		t.Fatal(err)
+	}
+	live := openReloadableIndex(t, root, liveCache)
+	oldSig := mustGenSig(t, root)
+	cpath := migCachePath(t, root, flat)
+	before, err := os.ReadFile(manifestPath(cpath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shards := cacheShardDirs(cpath)
+	oldShards := snapshotShardTree(t, shards)
+
+	mkBSLFile(t, root, modified, newBody)
+	changedPath := filepath.Join(root, filepath.FromSlash(modified))
+	if err := os.Remove(filepath.Join(root, filepath.FromSlash(deleted))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(changedPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(changedPath, 0o600) })
+	if _, err := os.ReadFile(changedPath); !errors.Is(err, os.ErrPermission) {
+		t.Skipf("fixture needs real source read denial, got %v", err)
+	}
+	if err := BuildCache(root, flat, false); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("prewarm did not report actual read failure: %v", err)
+	}
+	idx, err := NewIndex(root, flat, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-idx.Done()
+	if idx.Ready() || !errors.Is(idx.BuildError(), os.ErrPermission) {
+		t.Errorf("warm writable open published a failed update: ready=%v error=%v", idx.Ready(), idx.BuildError())
+	}
+	idx.Close()
+	after, err := os.ReadFile(manifestPath(cpath))
+	if err != nil || !bytes.Equal(after, before) || !sameSnapshot(snapshotShardTree(t, shards), oldShards) {
+		t.Fatal("an unreadable change mutated the admitted old flat cache")
+	}
+
+	newSig := mustGenSig(t, root)
+	if gen, err := live.Reload(); !errors.Is(err, os.ErrPermission) || gen.Changed ||
+		live.gensig != oldSig || !GenerationReady(root, liveCache, oldSig) || GenerationReady(root, liveCache, newSig) {
+		t.Fatalf("failed rebuild replaced an active generation: %+v, %v", gen, err)
+	}
+	if err := os.Chmod(changedPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildCache(root, flat, false); err != nil {
+		t.Fatal(err)
+	}
+	warm, err := OpenForServe(root, flat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer warm.Close()
+	<-warm.Done()
+	if err := warm.BuildError(); err != nil {
+		t.Fatal(err)
+	}
+	requireModuleHits(t, warm, "replacementmarker", "Справочник", "МодульОбъекта", map[string]string{id: newBody})
+	requireModuleHits(t, warm, "originalmarker", "Справочник", "МодульОбъекта", nil)
+}
+
+func TestFlatManifestSaveFailureCannotCertifyMixedShards(t *testing.T) {
+	root, flat := t.TempDir(), t.TempDir()
+	const rel = "Catalogs/Changed/Ext/ObjectModule.bsl"
+	const id = "Справочник.Changed.МодульОбъекта"
+	const original = "// originalmarker\n"
+	mkBSLFile(t, root, rel, original)
+	source := filepath.Join(root, filepath.FromSlash(rel))
+	before, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildCache(root, flat, false); err != nil {
+		t.Fatal(err)
+	}
+	cpath := migCachePath(t, root, flat)
+	old, err := LoadManifest(cpath)
+	if err != nil || old == nil {
+		t.Fatalf("fixture manifest: %+v, %v", old, err)
+	}
+	mkBSLFile(t, root, rel, "// replacementmarker changed content\n")
+	// The shard write succeeds but the atomic manifest save cannot start.
+	if err := os.Mkdir(manifestPath(cpath)+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildCache(root, flat, false); err == nil || !strings.Contains(err.Error(), "writing manifest tmp") {
+		t.Fatalf("expected the post-write manifest error, got %v", err)
+	}
+	if m, err := LoadManifest(cpath); err != nil || m != nil {
+		t.Fatalf("partial flat update left a valid stamp: %+v, %v", m, err)
+	}
+
+	mkBSLFile(t, root, rel, original)
+	if err := os.Chtimes(source, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if diff, err := old.Diff(root); err != nil || !diff.Empty() {
+		t.Fatalf("fixture must restore the old tuple exactly: %+v, %v", diff, err)
+	}
+	warm, err := OpenForServe(root, flat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer warm.Close()
+	<-warm.Done()
+	if err := warm.BuildError(); err != nil {
+		t.Fatal(err)
+	}
+	requireModuleHits(t, warm, "originalmarker", "Справочник", "МодульОбъекта", map[string]string{id: original})
+	requireModuleHits(t, warm, "replacementmarker", "Справочник", "МодульОбъекта", nil)
 }

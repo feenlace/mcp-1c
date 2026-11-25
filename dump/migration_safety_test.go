@@ -1,6 +1,7 @@
 package dump
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -241,16 +242,17 @@ func TestReindexDiscardsTheFlatCacheItWasAskedToDiscard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// CONTROL: the poison is live. The flat cache really does serve the fabricated
-	// name, so "the poison is gone" below cannot pass by the poison never having
-	// worked.
+	// Current-schema warm open bypasses inconsistent flat IDs without
+	// destroying the flat manifest. Explicit reindex still must discard it.
 	before := migOpen(t, dumpDir, cacheDir, false)
-	if !migHasName(before, poison) {
-		before.Close()
-		t.Fatalf("control failed: the poisoned flat manifest is not being replayed; names=%v",
-			before.ModuleNames())
+	if migHasName(before, poison) {
+		t.Errorf("warm open served an inconsistent flat ID: %v", before.ModuleNames())
 	}
 	before.Close()
+	stored, err := LoadManifest(cpath)
+	if err != nil || stored == nil || !stored.sameRevision(m) {
+		t.Fatalf("warm open replaced the old flat manifest: %+v, %v", stored, err)
+	}
 
 	// The reindex.
 	re := migOpen(t, dumpDir, cacheDir, true)
@@ -411,8 +413,8 @@ func TestGCKeepsTheNeighbouringBinarysGeneration(t *testing.T) {
 // is separated far enough to be ordered on a coarse filesystem clock.
 func migBuildGen(t *testing.T, dumpDir, cacheDir, gensig string) string {
 	t.Helper()
-	if err := BuildGeneration(dumpDir, cacheDir, gensig); err != nil {
-		t.Fatalf("BuildGeneration(%s): %v", gensig, err)
+	if err := buildForeignGeneration(t, dumpDir, cacheDir, gensig, dumpIndexSchemaVersion); err != nil {
+		t.Fatalf("seeding generation %s: %v", gensig, err)
 	}
 	cpath := migCachePath(t, dumpDir, cacheDir)
 	if !generationReadyDir(generationDir(cpath, gensig)) {
@@ -434,5 +436,84 @@ func migStampGeneration(t *testing.T, dumpDir, cacheDir, gensig string, schema i
 	m.SchemaVersion = schema
 	if err := m.Save(genDir); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFlatAdoptionAndIncrementalMutationRequireAdmittedManifest(t *testing.T) {
+	for _, remove := range []bool{false, true} {
+		name := "replaced"
+		if remove {
+			name = "missing"
+		}
+		t.Run(name, func(t *testing.T) {
+			root, cache := t.TempDir(), t.TempDir()
+			const rel = "Catalogs/Changed/Ext/ObjectModule.bsl"
+			mkBSLFile(t, root, rel, "// old\n")
+			if err := BuildCache(root, cache, false); err != nil {
+				t.Fatal(err)
+			}
+			cpath := migCachePath(t, root, cache)
+			input, err := (IndexOptions{}).observeGeneration(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			admitted, reason := flatCacheAdoptable(cpath, root, input.layout)
+			if admitted == nil {
+				t.Fatalf("intact flat cache refused: %s", reason)
+			}
+			dirs := cacheShardDirs(cpath)
+			before := snapshotShardTree(t, dirs)
+
+			if remove {
+				if err := os.Remove(manifestPath(cpath)); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				replacement, err := LoadManifest(cpath)
+				if err != nil || replacement == nil {
+					t.Fatalf("cannot load the replacement stamp: %+v, %v", replacement, err)
+				}
+				entry := replacement.Files[rel]
+				entry.DocID = "Справочник.ДругоеИмя.МодульОбъекта"
+				replacement.Files[rel] = entry
+				if err := replacement.Save(cpath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := adoptFlatShards(cpath, input.sig, dirs, admitted, noClaim); err == nil ||
+				GenerationReady(root, cache, input.sig) || !sameSnapshot(snapshotShardTree(t, dirs), before) {
+				t.Fatalf("adoption touched shards after losing the admitted stamp: %v", err)
+			}
+			if !remove {
+				got, err := LoadManifest(cpath)
+				if err != nil || got == nil || got.sameRevision(admitted) {
+					t.Fatalf("replacement stamp was not restored: %+v, %v", got, err)
+				}
+				return
+			}
+
+			// A writer that already holds the old in-memory manifest must also
+			// fail the invalidation fence before touching its opened shards.
+			mkBSLFile(t, root, rel, "// a replacement of a different size\n")
+			idx := bareIndex(t, root)
+			idx.shards, err = openCachedShards(dirs, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				for _, shard := range idx.shards {
+					shard.Close()
+				}
+			}()
+			update, err := idx.prepareFlatUpdate(admitted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opened := snapshotShardTree(t, dirs)
+			err = idx.loadFromManifestAndDiff(cpath, admitted, update)
+			if !errors.Is(err, os.ErrNotExist) || !sameSnapshot(snapshotShardTree(t, dirs), opened) {
+				t.Fatalf("missing writer stamp did not stop before mutation: %v", err)
+			}
+		})
 	}
 }

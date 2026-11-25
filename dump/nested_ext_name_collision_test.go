@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 const (
@@ -331,20 +332,17 @@ func TestSameNameFlatWithForeignOrMissingStamp(t *testing.T) {
 	}
 }
 
-func TestSameNameXMLOnlyEditKeepsAttachedDeepOwnership(t *testing.T) {
+func TestSameNameXMLOnlyEditRefreshesDeepOwnership(t *testing.T) {
 	const first, second = "wrap/exports/a", "wrap/exports/b"
 	const firstBody, secondBody = "// commonmarker firstmarker\n", "// commonmarker secondmarker\n"
 	root, cache := t.TempDir(), t.TempDir()
 	mkExtensionDump(t, filepath.Join(root, filepath.FromSlash(first)), extManifestClassic, "Legacy")
 	mkBSLFile(t, root, first+"/"+collisionObjectRel, firstBody)
 	mkBSLFile(t, root, second+"/"+collisionObjectRel, secondBody)
-	sig := mustGenSig(t, root)
-	if err := BuildGeneration(root, cache, sig); err != nil {
-		t.Fatal(err)
-	}
-	open := func() *Index {
-		return openSameNameGeneration(t, root, cache, sig)
-	}
+	oldSig := mustGenSig(t, root)
+	idx := openReloadableIndex(t, root, cache)
+	single := map[string]string{"ext.Legacy." + collisionBaseKey: firstBody, collisionBaseKey: secondBody}
+	double := map[string]string{"ext.Legacy@/" + first + "." + collisionBaseKey: firstBody, "ext.Legacy@/" + second + "." + collisionBaseKey: secondBody}
 	check := func(idx *Index, bodies map[string]string, wraps int, dirs ...string) {
 		t.Helper()
 		requireSameNameSearch(t, idx, bodies)
@@ -355,36 +353,24 @@ func TestSameNameXMLOnlyEditKeepsAttachedDeepOwnership(t *testing.T) {
 			t.Errorf("recognized roots = %v, want %v", got, dirs)
 		}
 	}
-	assertNoop := func(idx *Index) {
-		t.Helper()
-		if got, err := idx.Reload(); err != nil || got.Changed || got.SigBefore != sig || got.SigAfter != sig {
-			t.Errorf("XML-only reload = %+v, %v, want unchanged %s", got, err, sig)
-		}
-	}
-	single := map[string]string{"ext.Legacy." + collisionBaseKey: firstBody, collisionBaseKey: secondBody}
-	double := map[string]string{"ext.Legacy@/" + first + "." + collisionBaseKey: firstBody, "ext.Legacy@/" + second + "." + collisionBaseKey: secondBody}
-	idx := open()
-	mkExtensionDump(t, filepath.Join(root, filepath.FromSlash(second)), extManifestClassic, "Legacy")
-	assertNoop(idx)
 	check(idx, single, 1, first)
-	idx.Close()
-	warm := open()
-	check(warm, single, 1, first)
+	secondRoot := filepath.Join(root, filepath.FromSlash(second))
+	mkExtensionDump(t, secondRoot, extManifestClassic, "Legacy")
+	changedSig := mustGenSig(t, root)
+	if rep := mustReload(t, idx); !rep.Changed || rep.SigBefore != oldSig || rep.SigAfter != changedSig || changedSig == oldSig {
+		t.Fatalf("adding only the extension manifest did not change the generation: %+v", rep)
+	}
+	check(idx, double, 0, first, second)
+	warm := openSameNameGeneration(t, root, cache, changedSig)
+	check(warm, double, 0, first, second)
 	warm.Close()
-
-	forced := migOpen(t, root, cache, true)
-	check(forced, double, 0, first, second)
-	forced.Close()
-	idx = open()
-	if err := os.Remove(filepath.Join(root, filepath.FromSlash(second), extManifestClassic)); err != nil {
+	if err := os.Remove(filepath.Join(secondRoot, extManifestClassic)); err != nil {
 		t.Fatal(err)
 	}
-	assertNoop(idx)
-	check(idx, double, 0, first, second)
-	idx.Close()
-	warm = open()
-	defer warm.Close()
-	check(warm, double, 0, first)
+	if rep := mustReload(t, idx); !rep.Changed || rep.SigAfter != oldSig {
+		t.Fatalf("removing only the extension manifest did not restore its original identity: %+v", rep)
+	}
+	check(idx, single, 1, first)
 }
 
 func TestSameNameQualifiedRootCanContainAWrappedPath(t *testing.T) {
@@ -459,5 +445,126 @@ func TestSameNameMissingStampCanHoldQualifiedKeys(t *testing.T) {
 	}
 	if after := snapshotShardTree(t, cacheShardDirs(cpath)); !sameSnapshot(after, before) {
 		t.Errorf("original qualified shard files changed: %v, want %v", after, before)
+	}
+}
+
+func TestXMLOnlyRenameRekeysWarmFlatAndReady(t *testing.T) {
+	root, flat, adopt, cache := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	direct := mkExtensionDump(t, filepath.Join(root, "direct"), extManifestClassic, "Direct")
+	const body = "// commonmarker realmodule\n"
+	mkBSLFile(t, direct, collisionObjectRel, body)
+	bslPath := filepath.Join(direct, filepath.FromSlash(collisionObjectRel))
+	xmlPath := filepath.Join(direct, extManifestClassic)
+	fixed := time.Unix(1700000000, 0)
+	if err := os.Chtimes(xmlPath, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+	bslBefore, err := os.Stat(bslPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{flat, adopt} {
+		if err := BuildCache(root, path, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx := openReloadableIndex(t, root, cache)
+	oldSig := mustGenSig(t, root)
+	oldBodies := map[string]string{"ext.Direct." + collisionBaseKey: body}
+	newBodies := map[string]string{"ext.NextEx." + collisionBaseKey: body}
+	requireSameNameSearch(t, idx, oldBodies)
+
+	oldXML, err := os.Stat(xmlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkExtensionDump(t, direct, extManifestClassic, "NextEx")
+	if err := os.Chtimes(xmlPath, oldXML.ModTime(), oldXML.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	newXML, err := os.Stat(xmlPath)
+	if err != nil || newXML.Size() != oldXML.Size() || !newXML.ModTime().Equal(oldXML.ModTime()) {
+		t.Fatalf("XML rename must preserve size and mtime: %+v, %v", newXML, err)
+	}
+	bslAfter, err := os.Stat(bslPath)
+	if err != nil || stampOf(bslAfter) != stampOf(bslBefore) {
+		t.Fatalf("BSL tuple changed: %+v, %v", bslAfter, err)
+	}
+	content, err := os.ReadFile(bslPath)
+	if err != nil || string(content) != body {
+		t.Fatalf("BSL bytes changed: %q, %v", content, err)
+	}
+	newSig := mustGenSig(t, root)
+	if newSig == oldSig {
+		t.Fatal("same-size XML rename with unchanged timestamps did not change the signature")
+	}
+	if err := BuildGeneration(root, t.TempDir(), oldSig); err == nil {
+		t.Fatal("public builder accepted an obsolete caller-supplied signature")
+	}
+
+	warmFlat := migOpen(t, root, flat, false)
+	requireSameNameSearch(t, warmFlat, newBodies)
+	warmFlat.Close()
+	oldFlat, err := LoadManifest(migCachePath(t, root, flat))
+	if err != nil || oldFlat == nil || oldFlat.Files["direct/"+collisionObjectRel].DocID != "ext.Direct."+collisionBaseKey {
+		t.Fatalf("writable warm rekey overwrote the previous flat manifest: %+v, %v", oldFlat, err)
+	}
+
+	migrated, err := OpenForServe(root, adopt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-migrated.Done()
+	if err := migrated.BuildError(); err != nil {
+		t.Fatal(err)
+	}
+	requireSameNameSearch(t, migrated, newBodies)
+	migrated.Close()
+	stale, err := LoadManifest(migCachePath(t, root, adopt))
+	if err != nil || stale == nil || !stale.sameRevision(oldFlat) {
+		t.Fatalf("adoption moved the XML-stale flat manifest: %+v, %v", stale, err)
+	}
+
+	if rep := mustReload(t, idx); !rep.Changed || rep.SigBefore != oldSig || rep.SigAfter != newSig {
+		t.Fatalf("XML-only reload did not publish the new ownership: %+v", rep)
+	}
+	requireSameNameSearch(t, idx, newBodies)
+	warm, err := OpenForServe(root, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer warm.Close()
+	<-warm.Done()
+	if err := warm.BuildError(); err != nil {
+		t.Fatal(err)
+	}
+	requireSameNameSearch(t, warm, newBodies)
+	cold := buildCollisionIndex(t, root)
+	requireSameNameSearch(t, cold, newBodies)
+
+	// Metadata XML unrelated to ownership cannot invalidate the cache.
+	writeFileOrFatal(t, filepath.Join(direct, "ConfigDumpInfo.xml"), "<dump/>")
+	if got := mustGenSig(t, root); got != newSig {
+		t.Fatalf("unrelated XML changed ownership signature: %s -> %s", newSig, got)
+	}
+	sameOwnerXML, err := os.ReadFile(xmlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(xmlPath, append(sameOwnerXML, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGenSig(t, root); got != newSig {
+		t.Fatal("irrelevant manifest formatting changed the ownership signature")
+	}
+	if err := os.Remove(xmlPath); err != nil {
+		t.Fatal(err)
+	}
+	noOwner := mustGenSig(t, root)
+	if err := os.Mkdir(xmlPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGenSig(t, root); got != noOwner || got == newSig {
+		t.Fatal("a nonregular manifest was treated as an extension owner")
 	}
 }

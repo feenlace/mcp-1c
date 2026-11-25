@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +177,25 @@ func (m *Manifest) diff(dumpDir string, include func(rel, path string, entry fs.
 	}
 
 	return result, nil
+}
+
+// diffAndPaths uses the cold loader's file eligibility for both the diff and
+// the whole-inventory document ID assignment.
+func (m *Manifest) diffAndPaths(dir string) (*DiffResult, []string, error) {
+	var paths []string
+	diff, err := m.diff(dir, func(rel, path string, entry fs.DirEntry) bool {
+		if !indexableBSLPath(dir, path, entry) {
+			return false
+		}
+		paths = append(paths, rel)
+		return true
+	})
+	return diff, paths, err
+}
+
+func (m *Manifest) sameRevision(prior *Manifest) bool {
+	return m.Version == prior.Version && m.SchemaVersion == prior.SchemaVersion &&
+		m.ZapVersion == prior.ZapVersion && maps.Equal(m.Files, prior.Files)
 }
 
 // buildManifest creates a new manifest from the current filesystem state.

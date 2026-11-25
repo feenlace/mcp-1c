@@ -137,6 +137,31 @@ func TestDeepExtensionBudgetLeavesShallowSourcesUsable(t *testing.T) {
 		!slices.Contains(got.Dirs, "a-wide/branch-0/candidate-01/extension") {
 		t.Errorf("raised limit did not finish the deep scan: %+v", got)
 	}
+	explicitDefault, err := NewIndexOptions(DefaultExtensionDeepScanLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide, err := NewIndexOptions(128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	optionSig := func(opts IndexOptions) string {
+		t.Helper()
+		sig, err := opts.GenSig(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sig
+	}
+	defaultSig, wideSig := mustGenSig(t, root), optionSig(wide)
+	if explicit := optionSig(explicitDefault); explicit != defaultSig || wideSig == defaultSig {
+		t.Fatalf("ownership signatures: default=%s explicit=%s wide=%s", defaultSig, explicit, wideSig)
+	}
+	deepRoot := filepath.Join(root, "a-wide", "branch-2", "candidate-23")
+	mkExtensionDump(t, deepRoot, extManifestClassic, "WideRename")
+	if got := mustGenSig(t, root); got != defaultSig || optionSig(wide) == wideSig {
+		t.Fatal("the deep-only owner edit must affect only the wider discovery selection")
+	}
 	idx, err := NewIndex(root, t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)

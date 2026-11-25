@@ -420,11 +420,11 @@ func TestReload_RefusesABuildThatCameBackWithoutAClaim(t *testing.T) {
 	reapAddModule(t, dumpDir, 1)
 	orig := reloadBuildGeneration
 	var called bool
-	reloadBuildGeneration = func(opts IndexOptions, dir, cpath, sig string) (*readerRegistration, error) {
+	reloadBuildGeneration = func(opts IndexOptions, dir, cpath string, input generationInput) (*readerRegistration, error) {
 		called = true
 		// Really build it, then throw the claim away: the generation is genuinely
 		// READY in the arena, and genuinely unclaimed by this process.
-		reg, buildErr := orig(opts, dir, cpath, sig)
+		reg, buildErr := orig(opts, dir, cpath, input)
 		reg.Close()
 		return nil, buildErr
 	}

@@ -555,7 +555,7 @@ const bslUnwrappedCorpusDigest = "8394584424212621c7a38b7bd520201f3837e7424e25f0
 // derivation.
 const (
 	bslKeyCorpusDigest              = "9d5960b720a0fb81fd25153435f443b96ffd9d27c2abcb20145e0f3447eca017"
-	pinnedSchemaVersionForKeyDigest = 11
+	pinnedSchemaVersionForKeyDigest = 12
 )
 
 func digestOf(paths []string) (string, string) {

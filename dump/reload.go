@@ -109,8 +109,8 @@ var ErrReloadClosed = errors.New("dump: index is closed")
 // Production always builds WITH a claim: a reload must come away already holding
 // the generation it is about to serve, because a generation that is merely READY
 // in the arena is a legal target for every reaper there (see buildGeneration).
-var reloadBuildGeneration = func(opts IndexOptions, dir, cpath, gensig string) (*readerRegistration, error) {
-	return opts.buildGeneration(dir, cpath, gensig, withClaim)
+var reloadBuildGeneration = func(opts IndexOptions, dir, cpath string, input generationInput) (*readerRegistration, error) {
+	return opts.buildGeneration(dir, cpath, input, withClaim)
 }
 
 // Reload picks up on-disk changes to the dump WITHOUT restarting the process, so
@@ -178,10 +178,8 @@ func (idx *Index) Reload() (ReloadReport, error) {
 		SigBefore:     sigBefore,
 	}
 
-	// The signature walk is the same walk (sorted relpath + mtime + size of every
-	// .bsl) the manifest diff uses to decide a file changed, so "the signature is
-	// unchanged" means exactly "no .bsl was added, removed, or rewritten".
-	sigAfter, err := GenSig(idx.dir)
+	// A generation identifies the BSL revisions and recognized ownership.
+	input, err := idx.options.observeGeneration(idx.dir)
 	if err != nil {
 		rep.Elapsed = time.Since(start)
 		// The directory is NOT interpolated here. GenSig wraps an *fs.PathError,
@@ -192,6 +190,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 		// second is noise that reads as two different failures.
 		return rep, fmt.Errorf("dump: reading the dump directory: %w", err)
 	}
+	sigAfter := input.sig
 	rep.SigAfter = sigAfter
 
 	// Nothing on disk moved. Say so instead of rebuilding an identical generation
@@ -242,7 +241,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 				buildErr = fmt.Errorf("panic during the reload build of %s: %v", idx.dir, r)
 			}
 		}()
-		reg, buildErr = reloadBuildGeneration(idx.options, idx.dir, cpath, sigAfter)
+		reg, buildErr = reloadBuildGeneration(idx.options, idx.dir, cpath, input)
 	}()
 	// From here on the reload HOLDS a claim on the new generation, so every early
 	// return has to release it — otherwise the generation would stay pinned for the
@@ -312,7 +311,7 @@ func (idx *Index) Reload() (ReloadReport, error) {
 	}
 
 	oldShards, oldReg := idx.swapGeneration(sigAfter, shards, reg,
-		names, pathByName, pathToDocID, NewPathIndex(names), idx.options.detectExtensionLayout(idx.dir))
+		names, pathByName, pathToDocID, NewPathIndex(names), input.layout)
 
 	// Retire the old generation only AFTER the swap has published its replacement.
 	// alias.Swap took the alias write lock, so no search is inside these shards and

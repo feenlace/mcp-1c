@@ -110,10 +110,8 @@ func staleFlatCacheOfIssue46(t *testing.T) (root, cacheDir, cpath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sigAfter != sigBefore {
-		t.Fatalf("GenSig moved from %s to %s when a file that is not a .bsl appeared. That it "+
-			"does not move is the whole reason the schema version has to carry this fix.",
-			sigBefore, sigAfter)
+	if sigAfter == sigBefore {
+		t.Fatalf("recognized ownership changed without a new signature: %s", sigBefore)
 	}
 	return root, cacheDir, cpath
 }
@@ -171,15 +169,9 @@ func TestASchemaStaleFlatCacheIsRebuiltAndDeliversTheNestedExtensionKey(t *testi
 	}
 }
 
-// TestACurrentStampedFlatCacheReplaysThePreFixKey is the other half of the same
-// measurement, and it is what makes the arm above about the GATE rather than about
-// reopening an index.
-//
-// Same tree, same manufactured pre-fix cache, one difference: the stamp is left
-// CURRENT. The cache is then reused, its stored docID is replayed, and the running
-// binary answers with the base configuration's key for a module that belongs to an
-// extension.
-func TestACurrentStampedFlatCacheReplaysThePreFixKey(t *testing.T) {
+// A current-format manifest with stale IDs must also be bypassed while its
+// shards remain intact.
+func TestACurrentStampedFlatCacheRekeysWithoutOverwritingShards(t *testing.T) {
 	root, cacheDir, cpath := staleFlatCacheOfIssue46(t)
 
 	m, err := LoadManifest(cpath)
@@ -209,15 +201,12 @@ func TestACurrentStampedFlatCacheReplaysThePreFixKey(t *testing.T) {
 	}
 
 	names := idx.ModuleNames()
-	if !slices.Contains(names, issue46BaseKey) {
-		t.Errorf("a reused cache serves %v, want the pre-fix key %q it has stored: if the warm "+
-			"path re-derived instead of replaying, the bump would be a cold rebuild nobody needs",
-			names, issue46BaseKey)
+	if !slices.Contains(names, issue46ExtKey) || slices.Contains(names, issue46BaseKey) {
+		t.Fatalf("warm open did not rekey the XML-owned module: %v", names)
 	}
-	if slices.Contains(names, issue46ExtKey) {
-		t.Errorf("a reused cache serves the namespaced key %q, so the code change reached an "+
-			"un-rebuilt cache on its own and the arm above is measuring nothing: %v",
-			issue46ExtKey, names)
+	old, err := LoadManifest(cpath)
+	if err != nil || old == nil || !old.sameRevision(m) {
+		t.Fatalf("rekey changed the old flat manifest: %+v, %v", old, err)
 	}
 }
 
@@ -233,7 +222,7 @@ func TestASchemaStaleGenerationIsNotAdoptedAndTheRebuildCarriesTheFix(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := BuildGeneration(root, cacheDir, oldSig); err != nil {
+	if err := buildForeignGeneration(t, root, cacheDir, oldSig, dumpIndexSchemaVersion-1); err != nil {
 		t.Fatalf("building the generation of the previous schema version: %v", err)
 	}
 	// PREMISE: it really is on disk and adoptable on its own terms, or the

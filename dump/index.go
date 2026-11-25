@@ -1478,46 +1478,13 @@ func (opts IndexOptions) newIndex(dir, cacheDir string, reindex, prewarm bool) (
 				return idx, nil
 			}
 
-			if shards, err := openCachedShards(shardDirs, false, ""); err == nil {
-				// Legacy flat layout stays read-WRITE: this path runs the incremental
-				// warm-start diff (loadFromManifestAndDiff) which mutates the base
-				// shards on drift. Concurrent same-dump serve uses the read-only
-				// immutable-generation path (OpenGenerationReadOnly) instead.
-				idx.shards = shards
-				idx.alias.Add(shards...)
-				idx.acquireCacheLock(cpath)
-
-				// Fast startup: populate index from manifest, then apply incremental diff.
-				go func() {
-					defer close(idx.done)
-					if err := idx.loadFromManifestAndDiff(cpath, manifest, prewarm); err != nil {
-						idx.setBuildErr(err)
-						return
-					}
-
-					if idx.Ready() || idx.BuildError() != nil {
-						return
-					}
-					idx.pathIndex = NewPathIndex(idx.names)
-					idx.ready.Store(true)
-					slog.Info("Opened cached index",
-						"shards", len(shards), "modules", len(idx.names))
-					if showProgress.Load() {
-						fmt.Fprintf(os.Stderr, "[%s] Индекс загружен из кэша: %d модулей\n",
-							time.Now().Format("15:04:05"), len(idx.names))
-					}
-				}()
-				return idx, nil
-			} else {
-				// A corrupt FLAT cache costs the FLAT cache. It used to cost the whole
-				// per-dump arena, generations included, silently and with exit code 0;
-				// dropFlatCacheForRecovery carries both halves of that fix and the rule
-				// for a cache another process still holds. When it declines, this start
-				// builds WITHOUT the cache rather than into a peer's files.
-				if !dropFlatCacheForRecovery(cpath, fmt.Sprintf("opening the flat shards failed: %v", err)) {
-					useCache = false
+			go func() {
+				defer close(idx.done)
+				if err := idx.openFlatCache(cpath, shardDirs, manifest, prewarm); err != nil {
+					idx.setBuildErr(err)
 				}
-			}
+			}()
+			return idx, nil
 		}
 	}
 
@@ -1533,13 +1500,68 @@ func (opts IndexOptions) newIndex(dir, cacheDir string, reindex, prewarm bool) (
 	return idx, nil
 }
 
+// Prepare changed input before opening any writable shard. Opening and
+// closing a Bleve writer can itself change the on-disk store.
+func (idx *Index) openFlatCache(cpath string, shardDirs []string, manifest *Manifest, prewarm bool) error {
+	update, err := idx.prepareFlatUpdate(manifest)
+	if err != nil {
+		return err
+	}
+	if update.rekey {
+		if prewarm {
+			return idx.prewarmWithLayout(cpath, update.layout)
+		}
+		slog.Warn("Flat cache keys changed, building the current index in memory", "path", cpath)
+		idx.installBSLPaths(idx.dir, update.paths, update.ids)
+		idx.buildLoadedShards("", false)
+		return idx.BuildError()
+	}
+
+	shards, openErr := openCachedShards(shardDirs, false, "")
+	if openErr == nil {
+		idx.shards = shards
+		idx.alias.Add(shards...)
+		idx.acquireCacheLock(cpath)
+	}
+
+	// A writer or adopter may have taken the old stamp while we prepared or
+	// opened shards. Never update or recover a flat cache on that observation.
+	current, err := LoadManifest(cpath)
+	if err != nil {
+		return err
+	}
+	if current == nil || !current.sameRevision(manifest) {
+		return fmt.Errorf("flat index manifest changed while opening shards")
+	}
+	if openErr != nil {
+		// Recover the corrupt flat cache without deleting immutable generations.
+		useCache := dropFlatCacheForRecovery(cpath, fmt.Sprintf("opening the flat shards failed: %v", openErr))
+		if useCache {
+			idx.acquireCacheLock(cpath)
+		}
+		idx.buildShards(cpath, useCache)
+		return idx.BuildError()
+	}
+	if err := idx.loadFromManifestAndDiff(cpath, manifest, update); err != nil {
+		return err
+	}
+	idx.pathIndex = NewPathIndex(idx.names)
+	idx.ready.Store(true)
+	slog.Info("Opened cached index", "shards", len(shards), "modules", len(idx.names))
+	if showProgress.Load() {
+		fmt.Fprintf(os.Stderr, "[%s] Индекс загружен из кэша: %d модулей\n",
+			time.Now().Format("15:04:05"), len(idx.names))
+	}
+	return nil
+}
+
 // reindexGeneration performs a generation-aware reindex: it builds a fresh
 // immutable generation for the current dump signature and attaches it to idx
 // read-only. It NEVER wipes a generation a live reader holds — that is the core
 // safety property. Old generations are left on disk and reaped by the GC pass at
 // the end. Runs in NewIndex's background goroutine; the caller closes idx.done.
 func (idx *Index) reindexGeneration(dir, cacheDir string) error {
-	gensig, err := GenSig(dir)
+	input, err := idx.options.observeGeneration(dir)
 	if err != nil {
 		// Cannot compute a generation signature (e.g. the dump dir is unreadable).
 		// Fall back to a legacy flat rebuild that still preserves g/ — never wipe the
@@ -1560,6 +1582,7 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 	if err != nil {
 		return fmt.Errorf("reindex: no writable cache directory: %w", err)
 	}
+	gensig := input.sig
 	genDir := generationDir(cpath, gensig)
 
 	// Force-rebuild semantics: a build is content-addressed and no-ops on an
@@ -1572,7 +1595,7 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 	// only then claiming would publish this generation into the shared arena READY
 	// and held by nobody, and a co-located reaper firing in that window deletes the
 	// generation this reindex is about to serve.
-	reg, err := idx.options.forceRebuildGeneration(dir, cpath, gensig, withClaim)
+	reg, err := idx.options.forceRebuildGeneration(dir, cpath, input, withClaim)
 	if err != nil {
 		return fmt.Errorf("reindex: building generation: %w", err)
 	}
@@ -1580,6 +1603,7 @@ func (idx *Index) reindexGeneration(dir, cacheDir string) error {
 	if err := idx.attachReadOnlyShards(genDir, reg); err != nil {
 		return err
 	}
+	idx.reloadLayout.Store(&input.layout)
 	if err := idx.loadNamesReadOnly(genDir); err != nil {
 		return err
 	}
@@ -1843,16 +1867,8 @@ func (idx *Index) buildLoadedShards(cpath string, useCache bool) {
 	// pathByName is only read during the build, so concurrent access from the
 	// shard goroutines needs no lock.
 	pathByName := idx.pathByName
-	getContent := func(name string) string {
-		path := pathByName[name]
-		if path == "" {
-			return ""
-		}
-		// readModuleContent retries once and logs a rate-limited warning on
-		// failure, so a file unreadable at build time (lock / antivirus /
-		// cloud-sync) is not silently indexed with empty content.
-		content, _ := readModuleContent(path)
-		return content
+	getContent := func(name string) (string, error) {
+		return readModuleContentErr(pathByName[name])
 	}
 
 	// Tighten GC for the parallel build instead of disabling it. Previously the
@@ -1934,6 +1950,9 @@ func (idx *Index) buildLoadedShards(cpath string, useCache bool) {
 	if tickerActive {
 		close(stopProgress)
 	}
+	if firstErr == nil && basePath != "" {
+		firstErr = idx.saveManifest(basePath)
+	}
 	if firstErr != nil {
 		for _, s := range shards {
 			if s != nil {
@@ -1969,11 +1988,6 @@ func (idx *Index) buildLoadedShards(cpath string, useCache bool) {
 	// never resident after the build either.
 
 	idx.ready.Store(true)
-
-	// Save manifest for future incremental updates.
-	if cpath != "" && useCache {
-		idx.saveManifest(cpath)
-	}
 
 	slog.Info("Index ready", "modules", total, "shards", n, "elapsed", time.Since(start))
 	if showProgress.Load() {
@@ -3188,32 +3202,58 @@ func (idx *Index) filterModules(namespace, category, moduleType string) ([]strin
 	return names, nil
 }
 
-// loadFromManifestAndDiff populates the index from a cached manifest and applies
-// incremental updates using a single filesystem walk (via Diff). This is the fastest
-// startup path: manifest provides names/paths, Diff detects changes.
-func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, prewarm bool) error {
-	var paths []string
-	diff, err := manifest.diff(idx.dir, func(rel, path string, entry fs.DirEntry) bool {
-		if !indexableBSLPath(idx.dir, path, entry) {
-			return false
-		}
-		paths = append(paths, rel)
-		return true
-	})
+type flatUpdate struct {
+	diff   *DiffResult
+	paths  []string
+	ids    map[string]string
+	layout extensionLayout
+	rekey  bool
+	files  []changedModule
+}
+
+type changedModule struct {
+	rel, path, content string
+	stamp              fileStamp
+}
+
+func (idx *Index) prepareFlatUpdate(manifest *Manifest) (*flatUpdate, error) {
+	diff, paths, err := manifest.diffAndPaths(idx.dir)
 	if err != nil {
-		return fmt.Errorf("computing diff: %w", err)
+		return nil, fmt.Errorf("computing diff: %w", err)
 	}
-
-	var ids map[string]string
-	if !diff.Empty() {
-		ids = assignBSLDocIDs(paths, idx.layout())
-		for _, path := range paths {
-			if prior, ok := manifest.Files[path]; ok && NFC(prior.DocID) != ids[path] {
-				return idx.rebuildAfterLayoutChange(cacheDir, paths, ids, prewarm)
-			}
+	layout := idx.layout()
+	ids := assignBSLDocIDs(paths, layout)
+	update := &flatUpdate{diff: diff, paths: paths, ids: ids, layout: layout}
+	for _, path := range paths {
+		if prior, ok := manifest.Files[path]; ok && prior.DocID != ids[path] {
+			update.rekey = true
+			return update, nil
 		}
 	}
 
+	// Read changed sources once, before opening writable shards or removing
+	// their stamp. A later read failure must leave pending deletions unapplied.
+	for _, rel := range append(diff.Added, diff.Modified...) {
+		path := filepath.Join(idx.dir, filepath.FromSlash(rel))
+		if !pathWithinRoot(idx.dir, path) {
+			return nil, fmt.Errorf("changed BSL source %q escapes the dump root", rel)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("checking changed BSL source %q: %w", rel, err)
+		}
+		content, err := readModuleContentErr(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading changed BSL source %q: %w", rel, err)
+		}
+		update.files = append(update.files, changedModule{rel, path, content, stampOf(info)})
+	}
+	return update, nil
+}
+
+// loadFromManifestAndDiff attaches the admitted names and applies prepared edits.
+func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, update *flatUpdate) error {
+	diff := update.diff
 	// Populate names, pathByName, pathToDocID from manifest (no filesystem I/O).
 	// Go map iteration order is randomised, so idx.names must be sorted after
 	// the loop to preserve the same lexicographic enumeration invariant as
@@ -3247,6 +3287,12 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 		return nil
 	}
 
+	// A failed mutation can leave a partial write. Make the admitted stamp
+	// unavailable first so neither restart nor adoption can trust those shards.
+	if err := os.Remove(manifestPath(cacheDir)); err != nil {
+		return fmt.Errorf("invalidating flat index manifest: %w", err)
+	}
+
 	// Apply deletions.
 	for _, relPath := range diff.Deleted {
 		entry, ok := manifest.Files[relPath]
@@ -3260,8 +3306,9 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 		docID := NFC(entry.DocID)
 		si := shardForID(docID, len(idx.shards))
 		if err := idx.shards[si].Delete(docID); err != nil {
-			slog.Warn("Failed to delete from shard", "docID", docID, "error", err)
+			return fmt.Errorf("deleting document %q from flat index: %w", docID, err)
 		}
+		delete(manifest.Files, relPath)
 		idx.contentMu.Lock()
 		delete(idx.contentByName, docID)
 		idx.contentMu.Unlock()
@@ -3278,35 +3325,15 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 		idx.mu.Unlock()
 	}
 
-	// Apply additions and modifications.
-	for _, relPath := range append(diff.Added, diff.Modified...) {
-		absPath := filepath.Join(idx.dir, filepath.FromSlash(relPath))
-		// Skip a changed .bsl whose real path escapes the dump root (a symlink
-		// planted by a malicious dump). Mirrors loadBSLPaths / GetContent and stops
-		// the incremental path from re-indexing an outside host file into the
-		// searchable shard + content cache on a warm re-open.
-		if !pathWithinRoot(idx.dir, absPath) {
-			slog.Warn("Skipping .bsl whose real path escapes the dump root", "path", relPath)
-			continue
-		}
-		// Stamp before reading, never after, so the pre-warmed entry can never
-		// claim a revision newer than the bytes it holds (see GetContent).
-		stamp, stamped := statStamp(absPath)
-		data, err := os.ReadFile(absPath)
-		if err != nil {
-			slog.Warn("Cannot read file", "path", relPath, "error", err)
-			continue
-		}
-		docID := ids[relPath]
-		content := stripBOM(string(data))
-
+	// Apply the exact bytes admitted before deleting the stamp.
+	for _, file := range update.files {
+		docID := update.ids[file.rel]
 		parts := parseModuleName(docID)
-		doc := bslDocumentFor(parts, content)
+		doc := bslDocumentFor(parts, file.content)
 
 		si := shardForID(docID, len(idx.shards))
 		if err := idx.shards[si].Index(docID, doc); err != nil {
-			slog.Warn("Failed to index in shard", "docID", docID, "error", err)
-			continue
+			return fmt.Errorf("writing document %q to flat index: %w", docID, err)
 		}
 
 		idx.contentMu.RLock()
@@ -3318,19 +3345,13 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 		if !inContent && !inPath {
 			idx.names = append(idx.names, docID)
 		}
-		idx.pathByName[docID] = absPath
-		idx.pathToDocID[relPath] = docID
+		idx.pathByName[docID] = file.path
+		idx.pathToDocID[file.rel] = docID
 		idx.mu.Unlock()
 
-		// Pre-warm content cache for recently changed files.
+		manifest.Files[file.rel] = FileEntry{ModTime: file.stamp.modTime, Size: file.stamp.size, DocID: docID}
 		idx.contentMu.Lock()
-		if stamped {
-			idx.contentByName[docID] = cachedModule{content: content, stamp: stamp, fromFile: true}
-		} else {
-			// Revision unknown, so this copy could never be revalidated: drop any
-			// cached entry and let the next read go to disk.
-			delete(idx.contentByName, docID)
-		}
+		idx.contentByName[docID] = cachedModule{content: file.content, stamp: file.stamp, fromFile: true}
 		idx.contentMu.Unlock()
 	}
 
@@ -3343,48 +3364,25 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 
-	// Save updated manifest.
-	idx.saveManifest(cacheDir)
-
-	return nil
-}
-
-// A surviving path changing docID invalidates shard placement. Rebuild
-// outside the flat cache before any incremental writes.
-func (idx *Index) rebuildAfterLayoutChange(cpath string, paths []string, ids map[string]string, prewarm bool) error {
-	if idx.lockDir != "" {
-		removeCacheLock(idx.lockDir)
-		idx.lockDir = ""
-	}
-	idx.alias.Remove(idx.shards...)
-	var closeErr error
-	for _, shard := range idx.shards {
-		closeErr = errors.Join(closeErr, shard.Close())
-	}
-	idx.shards = nil
-	if closeErr != nil {
-		return fmt.Errorf("closing outdated flat shards: %w", closeErr)
-	}
-
-	if prewarm {
-		return idx.prewarmGeneration(cpath)
-	}
-	slog.Warn("Flat cache keys changed, building the current index in memory", "path", cpath)
-	idx.installBSLPaths(idx.dir, paths, ids)
-	idx.buildLoadedShards("", false)
-	return idx.BuildError()
+	return manifest.Save(cacheDir)
 }
 
 func (idx *Index) prewarmGeneration(cpath string) error {
-	gensig, err := GenSig(idx.dir)
+	return idx.prewarmWithLayout(cpath, idx.layout())
+}
+
+func (idx *Index) prewarmWithLayout(cpath string, layout extensionLayout) error {
+	gensig, err := signGeneration(idx.dir, layout, dumpIndexSchemaVersion, zapSegmentVersion)
 	if err != nil {
 		return err
 	}
-	reg, err := idx.options.buildGeneration(idx.dir, cpath, gensig, withClaim)
+	input := generationInput{sig: gensig, layout: layout}
+	reg, err := idx.options.buildGeneration(idx.dir, cpath, input, withClaim)
 	if err != nil {
 		return err
 	}
 	genDir := generationDir(cpath, gensig)
+	idx.reloadLayout.Store(&layout)
 	if err := idx.attachReadOnlyShards(genDir, reg); err != nil {
 		return err
 	}
@@ -3590,8 +3588,7 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 	if manifest == nil {
 		// No manifest yet (first run with incremental support).
 		// Save one now so next start can diff.
-		idx.saveManifest(cacheDir)
-		return nil
+		return idx.saveManifest(cacheDir)
 	}
 
 	diff, err := manifest.Diff(idx.dir)
@@ -3689,13 +3686,11 @@ func (idx *Index) applyIncrementalUpdate(cacheDir string) error {
 	slog.Info("Incremental update", "added", len(diff.Added), "modified", len(diff.Modified), "deleted", len(diff.Deleted))
 
 	// Save updated manifest.
-	idx.saveManifest(cacheDir)
-
-	return nil
+	return idx.saveManifest(cacheDir)
 }
 
 // saveManifest builds and persists a manifest from current pathToDocID state.
-func (idx *Index) saveManifest(cacheDir string) {
+func (idx *Index) saveManifest(cacheDir string) error {
 	idx.mu.RLock()
 	pathCopy := make(map[string]string, len(idx.pathToDocID))
 	for k, v := range idx.pathToDocID {
@@ -3705,12 +3700,9 @@ func (idx *Index) saveManifest(cacheDir string) {
 
 	manifest, err := buildManifest(idx.dir, pathCopy)
 	if err != nil {
-		slog.Warn("Cannot build manifest", "error", err)
-		return
+		return fmt.Errorf("building index manifest: %w", err)
 	}
-	if err := manifest.Save(cacheDir); err != nil {
-		slog.Warn("Cannot save manifest", "error", err)
-	}
+	return manifest.Save(cacheDir)
 }
 
 // Close cancels the background context, waits for any in-progress build to

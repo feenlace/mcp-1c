@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -109,7 +110,7 @@ const (
 // normal old-generation GC (GCGenerations) once no live reader holds them.
 const (
 	// genSigVersion versions the gensig derivation. See BUMP PROTOCOL above.
-	genSigVersion = 1
+	genSigVersion = 2
 
 	// dumpIndexSchemaVersion versions the logical index schema. See BUMP PROTOCOL.
 	//
@@ -235,7 +236,8 @@ const (
 	// v10: conflicting manifest roots have distinct BSL docIDs qualified by
 	// their full relative paths.
 	// v11: standalone forms and colliding BSL paths have distinct DocIDs.
-	dumpIndexSchemaVersion = 11
+	// v12: cache admission binds document IDs to effective extension ownership.
+	dumpIndexSchemaVersion = 12
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and
@@ -305,27 +307,36 @@ func generationReadyDir(genDir string) bool {
 	return err == nil && !st.IsDir()
 }
 
-// GenSig computes the content+schema signature of a dump directory: a short hex
-// hash over the gensig derivation version, the index schema version, the on-disk
-// zap segment version, and the sorted (relative-path, mtime-ms, size) tuples of
-// every .bsl file. Two dumps with identical content built by the same-versioned
-// binary yield the same signature and thus share one immutable generation; any
-// drift (add / remove / modify) OR any version bump (see the BUMP PROTOCOL on the
-// version consts) yields a new signature, so the result is a fresh generation
-// directory rather than a mutated one in use or a mis-read incompatible one.
-//
-// It walks the dump once (the same cost as the warm-start manifest diff that
-// already runs on every open today).
+// GenSig signs the dump's BSL file revisions and effective extension ownership
+// using the default discovery options.
 func GenSig(dir string) (string, error) {
-	return genSig(dir, dumpIndexSchemaVersion, zapSegmentVersion)
+	return (IndexOptions{}).GenSig(dir)
 }
 
-// genSig is the version-parameterised core of GenSig. GenSig always passes the
-// current dumpIndexSchemaVersion / zapSegmentVersion; the parameters exist so the
-// schema-drift invariant (a bumped schema/format yields a different signature, and
-// a generation built under a different schema is never adopted) is directly
-// testable without rebuilding the binary.
+// GenSig signs the dump using this index's extension discovery options.
+func (opts IndexOptions) GenSig(dir string) (string, error) {
+	input, err := opts.observeGeneration(dir)
+	return input.sig, err
+}
+
+// Keep the ownership observation with the signature through build and attach.
+type generationInput struct {
+	sig    string
+	layout extensionLayout
+}
+
+func (opts IndexOptions) observeGeneration(dir string) (generationInput, error) {
+	layout := opts.detectExtensionLayout(dir)
+	sig, err := signGeneration(dir, layout, dumpIndexSchemaVersion, zapSegmentVersion)
+	return generationInput{sig: sig, layout: layout}, err
+}
+
+// genSig allows the schema and segment versions to vary in compatibility tests.
 func genSig(dir string, schemaVer, zapVer int) (string, error) {
+	return signGeneration(dir, detectExtensionLayout(dir), schemaVer, zapVer)
+}
+
+func signGeneration(dir string, layout extensionLayout, schemaVer, zapVer int) (string, error) {
 	type fileSig struct {
 		rel  string
 		mod  int64
@@ -360,6 +371,13 @@ func genSig(dir string, schemaVer, zapVer int) (string, error) {
 	// The version header folds the derivation, schema, and on-disk format versions
 	// into the signature so a bump of any one yields a distinct gensig.
 	fmt.Fprintf(h, "gensig-v%d schema-v%d zap-v%d\n", genSigVersion, schemaVer, zapVer)
+	fmt.Fprintf(h, "self %q\n", NFC(layout.self))
+	for _, roots := range []map[string]string{layout.byDir, layout.byPrefix} {
+		fmt.Fprintf(h, "roots %d\n", len(roots))
+		for _, path := range slices.Sorted(maps.Keys(roots)) {
+			fmt.Fprintf(h, "%q %q\n", path, NFC(roots[path]))
+		}
+	}
 	for _, f := range files {
 		fmt.Fprintf(h, "%s\x00%d\x00%d\n", f.rel, f.mod, f.size)
 	}
@@ -407,6 +425,10 @@ func OpenGenerationReadOnly(dir, cacheDir, gensig string) (*Index, error) {
 // held is a claim the caller already took on genDir, or nil; see
 // attachReadOnlyShards, which owns it from here on either way.
 func openReadOnlyFrom(dumpDir, cacheDir, genDir string, held *readerRegistration) (*Index, error) {
+	return openReadOnlyWithLayout(dumpDir, cacheDir, genDir, held, detectExtensionLayout(dumpDir))
+}
+
+func openReadOnlyWithLayout(dumpDir, cacheDir, genDir string, held *readerRegistration, layout extensionLayout) (*Index, error) {
 	start := time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	idx := &Index{
@@ -421,6 +443,8 @@ func openReadOnlyFrom(dumpDir, cacheDir, genDir string, held *readerRegistration
 		cancel:        cancel,
 		done:          make(chan struct{}),
 	}
+
+	idx.reloadLayout.Store(&layout)
 
 	cpath, err := cachePath(dumpDir, cacheDir)
 	if err == nil {
@@ -603,6 +627,7 @@ func (idx *Index) FinishServeOpen(cacheDir string, gen *ServeGeneration, prepErr
 		idx.setBuildErr(err)
 		return
 	}
+	idx.reloadLayout.Store(&gen.layout)
 	if err := idx.loadNamesReadOnly(genDir); err != nil {
 		idx.setBuildErr(err)
 		return
@@ -1260,7 +1285,15 @@ func BuildGeneration(dir, cacheDir, gensig string) error {
 	if err != nil {
 		return fmt.Errorf("no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
 	}
-	_, err = (IndexOptions{}).buildGeneration(dir, cpath, gensig, noClaim)
+	opts := IndexOptions{}
+	input, err := opts.observeGeneration(dir)
+	if err != nil {
+		return err
+	}
+	if input.sig != gensig {
+		return fmt.Errorf("generation signature changed: requested %q, current %q", gensig, input.sig)
+	}
+	_, err = opts.buildGeneration(dir, cpath, input, noClaim)
 	return err
 }
 
@@ -1298,7 +1331,8 @@ const (
 // adopt race — fall back to the ordinary registerReader path and its
 // claim/READY barrier, which is fail-closed but, as registerReader documents,
 // still has an open window.
-func (opts IndexOptions) buildGeneration(dir, cpath, gensig string, claim buildClaim) (*readerRegistration, error) {
+func (opts IndexOptions) buildGeneration(dir, cpath string, input generationInput, claim buildClaim) (*readerRegistration, error) {
+	gensig := input.sig
 	genDir := generationDir(cpath, gensig)
 	if generationReadyDir(genDir) {
 		return claimBuiltGeneration(genDir, claim) // already built and adopted
@@ -1323,7 +1357,7 @@ func (opts IndexOptions) buildGeneration(dir, cpath, gensig string, claim buildC
 		}
 	}()
 
-	if err := opts.buildGenerationInto(dir, tmpDir); err != nil {
+	if err := opts.buildGenerationInto(dir, tmpDir, input.layout); err != nil {
 		return nil, fmt.Errorf("building generation %q: %w", gensig, err)
 	}
 
@@ -1446,7 +1480,15 @@ func ForceRebuildGeneration(dir, cacheDir, gensig string) error {
 	if err != nil {
 		return fmt.Errorf("force-rebuild: no writable cache directory (set MCP_1C_CACHE_DIR to a writable path): %w", err)
 	}
-	_, err = (IndexOptions{}).forceRebuildGeneration(dir, cpath, gensig, noClaim)
+	opts := IndexOptions{}
+	input, err := opts.observeGeneration(dir)
+	if err != nil {
+		return err
+	}
+	if input.sig != gensig {
+		return fmt.Errorf("generation signature changed: requested %q, current %q", gensig, input.sig)
+	}
+	_, err = opts.forceRebuildGeneration(dir, cpath, input, noClaim)
 	return err
 }
 
@@ -1461,9 +1503,10 @@ func ForceRebuildGeneration(dir, cacheDir, gensig string) error {
 // existing generation in place, the build no-ops on it, and the claim is then the
 // ordinary post-adopt one on a generation that was already published. Both cases
 // come back through buildGeneration, which picks the right one.
-func (opts IndexOptions) forceRebuildGeneration(dir, cpath, gensig string, claim buildClaim) (*readerRegistration, error) {
+func (opts IndexOptions) forceRebuildGeneration(dir, cpath string, input generationInput, claim buildClaim) (*readerRegistration, error) {
+	gensig := input.sig
 	forceDropGeneration(generationDir(cpath, gensig), gensig)
-	reg, err := opts.buildGeneration(dir, cpath, gensig, claim)
+	reg, err := opts.buildGeneration(dir, cpath, input, claim)
 	if err != nil {
 		return nil, fmt.Errorf("force-rebuild: building generation %q: %w", gensig, err)
 	}
@@ -1474,7 +1517,7 @@ func (opts IndexOptions) forceRebuildGeneration(dir, cpath, gensig string, claim
 // synchronously, then closes the freshly-built shards (releasing their exclusive
 // flock) so the directory can be renamed and later opened read-only. On build
 // failure buildShards removes targetDir; this returns the build error.
-func (opts IndexOptions) buildGenerationInto(dumpDir, targetDir string) error {
+func (opts IndexOptions) buildGenerationInto(dumpDir, targetDir string, layout extensionLayout) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	idx := &Index{
@@ -1492,6 +1535,7 @@ func (opts IndexOptions) buildGenerationInto(dumpDir, targetDir string) error {
 	// buildShards loads BSL paths from idx.dir (the dump) and writes shards +
 	// manifest into targetDir. Run it synchronously (not in the NewIndex
 	// goroutine) — we only want the on-disk side effects.
+	idx.reloadLayout.Store(&layout)
 	idx.buildShards(targetDir, true)
 	if err := idx.BuildError(); err != nil {
 		return err
@@ -1536,45 +1580,35 @@ func writeReadySentinel(genDir, gensig string) error {
 // async readiness, leader election) is the deferred advanced layer; a first-ever
 // open with no cache still degrades to the single-writer flat build.
 func OpenForServe(dir, cacheDir string) (*Index, error) {
-	gensig, err := GenSig(dir)
+	opts := IndexOptions{}
+	input, err := opts.observeGeneration(dir)
 	if err != nil {
 		slog.Warn("dump: could not compute generation signature; using legacy flat cache",
 			"dir", dir, "error", err)
 		return NewIndex(dir, cacheDir, false)
 	}
-	if GenerationReady(dir, cacheDir, gensig) {
-		// A generation that was already in the arena. Nothing to claim early — see
-		// registerReader for the residual window this path keeps.
-		return OpenGenerationReadOnly(dir, cacheDir, gensig)
+	cpath, err := opts.CacheDir(dir, cacheDir)
+	if err != nil {
+		return NewIndex(dir, cacheDir, false)
 	}
-	// No READY generation yet. If a legacy flat cache exists, migrate it once to
-	// the generation layout so this and future serves use the concurrent read-only
-	// path instead of the single-writer flat cache. The migration claims what it
-	// produces BEFORE publishing it and hands the claim straight to the open, so
-	// the generation this call created is never reapable while unheld.
-	g, reg, migrated, mErr := migrateFlatToGeneration(dir, cacheDir, withClaim)
+	genDir := generationDir(cpath, input.sig)
+	if generationReadyDir(genDir) {
+		return openReadOnlyWithLayout(dir, cacheDir, genDir, nil, input.layout)
+	}
+	_, reg, migrated, mErr := opts.migrateFlatToGeneration(dir, cpath, input, withClaim)
 	if mErr != nil {
 		slog.Warn("dump: flat→generation migration failed; using legacy flat cache",
 			"dir", dir, "error", mErr)
 	} else if migrated {
-		return openClaimedGeneration(dir, cacheDir, g, reg)
+		return openClaimedGeneration(dir, cacheDir, input, reg)
 	}
 	return NewIndex(dir, cacheDir, false)
 }
 
-// openClaimedGeneration opens a generation this process just produced AND already
-// holds reg on, read-only. It is OpenGenerationReadOnly with the claim supplied
-// rather than taken here; the READY check is kept because a producer that returned
-// no generation at all must not reach the attach.
-func openClaimedGeneration(dir, cacheDir, gensig string, reg *readerRegistration) (*Index, error) {
-	// A nil registration is not a failed claim — a failed claim is a claimless
-	// registration, which serves and reports. It means a producer returned success
-	// while saying nothing at all about the claim, and there is no honest notice to
-	// attach to that. Every producer returns either a registration or an error, so
-	// this guards a future edit rather than a state reachable today.
+func openClaimedGeneration(dir, cacheDir string, input generationInput, reg *readerRegistration) (*Index, error) {
+	gensig := input.sig
 	if reg == nil {
-		return nil, fmt.Errorf("the migrated generation %s carries no reader claim, so it cannot be served",
-			gensig)
+		return nil, fmt.Errorf("the migrated generation %s carries no reader claim, so it cannot be served", gensig)
 	}
 	cpath, err := cachePath(dir, cacheDir)
 	if err != nil {
@@ -1587,7 +1621,7 @@ func openClaimedGeneration(dir, cacheDir, gensig string, reg *readerRegistration
 		return nil, fmt.Errorf("generation %q is not ready (no %s sentinel at %s)",
 			gensig, readySentinelName, genDir)
 	}
-	return openReadOnlyFrom(dir, cacheDir, genDir, reg)
+	return openReadOnlyWithLayout(dir, cacheDir, genDir, reg, input.layout)
 }
 
 // migrateFlatToGeneration migrates an existing LEGACY flat cache (shard_* directly
@@ -1620,14 +1654,16 @@ func migrateFlatToGeneration(dir, cacheDir string, claim buildClaim) (string, *r
 	if err != nil {
 		return "", nil, false, err
 	}
-	return (IndexOptions{}).migrateFlatToGeneration(dir, cpath, claim)
-}
-
-func (opts IndexOptions) migrateFlatToGeneration(dir, cpath string, claim buildClaim) (string, *readerRegistration, bool, error) {
-	gensig, err := GenSig(dir)
+	opts := IndexOptions{}
+	input, err := opts.observeGeneration(dir)
 	if err != nil {
 		return "", nil, false, fmt.Errorf("computing generation signature for migration: %w", err)
 	}
+	return opts.migrateFlatToGeneration(dir, cpath, input, claim)
+}
+
+func (opts IndexOptions) migrateFlatToGeneration(dir, cpath string, input generationInput, claim buildClaim) (string, *readerRegistration, bool, error) {
+	gensig := input.sig
 	genDir := generationDir(cpath, gensig)
 
 	// Already a READY generation for this signature — nothing to migrate, and
@@ -1645,9 +1681,9 @@ func (opts IndexOptions) migrateFlatToGeneration(dir, cpath string, claim buildC
 		return gensig, nil, false, nil
 	}
 
-	ok, reason := flatCacheAdoptable(cpath, dir)
-	if ok {
-		reg, aErr := adoptFlatShards(cpath, gensig, shardDirs, claim)
+	manifest, reason := flatCacheAdoptable(cpath, dir, input.layout)
+	if manifest != nil {
+		reg, aErr := adoptFlatShards(cpath, gensig, shardDirs, manifest, claim)
 		if aErr != nil {
 			return gensig, nil, false, fmt.Errorf("adopting flat cache as generation %q: %w", gensig, aErr)
 		}
@@ -1661,7 +1697,7 @@ func (opts IndexOptions) migrateFlatToGeneration(dir, cpath string, claim buildC
 	// backward-compatible fallback until a later (deferred) flat-cache GC.
 	slog.Info("Legacy flat cache not safely adoptable; building a fresh generation once",
 		"gen", gensig, "reason", reason)
-	reg, err := opts.buildGeneration(dir, cpath, gensig, claim)
+	reg, err := opts.buildGeneration(dir, cpath, input, claim)
 	if err != nil {
 		return gensig, nil, false, fmt.Errorf("building generation for migration: %w", err)
 	}
@@ -1704,38 +1740,43 @@ func AdoptFlatGeneration(dir, cacheDir string) (gensig string, migrated bool, er
 // other process holds the flat cache open, a version-compatible manifest is
 // present, the manifest's schema+zap versions match the running binary, and the
 // flat cache has not drifted from the current dump content.
-func flatCacheAdoptable(cpath, dir string) (bool, string) {
+func flatCacheAdoptable(cpath, dir string, layout extensionLayout) (*Manifest, string) {
 	// A foreign process serving the flat cache (serve.lock) must not have its
 	// shard files moved out from under it; build a separate generation instead. A
 	// stale lock conservatively forces the (safe) build fallback rather than risk
 	// corrupting a live process — at worst a one-time rebuild.
 	if pid, present := readCacheLock(cpath); present && pid != os.Getpid() {
-		return false, fmt.Sprintf("flat cache is in use (serve.lock pid=%d)", pid)
+		return nil, fmt.Sprintf("flat cache is in use (serve.lock pid=%d)", pid)
 	}
 
 	m, err := LoadManifest(cpath)
 	if err != nil {
-		return false, fmt.Sprintf("flat manifest unreadable: %v", err)
+		return nil, fmt.Sprintf("flat manifest unreadable: %v", err)
 	}
 	if m == nil {
 		// No manifest (or an incompatible manifest version): cannot verify the flat
 		// shards match the current dump+schema, so adopting them under this gensig
 		// would be unfounded. Rebuild instead.
-		return false, "flat manifest missing or incompatible version"
+		return nil, "flat manifest missing or incompatible version"
 	}
 	if m.schemaVersion() != dumpIndexSchemaVersion || m.zapVersion() != zapSegmentVersion {
-		return false, fmt.Sprintf("flat cache schema/format mismatch (cache schema=%d zap=%d; current schema=%d zap=%d)",
+		return nil, fmt.Sprintf("flat cache schema/format mismatch (cache schema=%d zap=%d; current schema=%d zap=%d)",
 			m.schemaVersion(), m.zapVersion(), dumpIndexSchemaVersion, zapSegmentVersion)
 	}
-	diff, err := m.Diff(dir)
+	diff, paths, err := m.diffAndPaths(dir)
 	if err != nil {
-		return false, fmt.Sprintf("flat cache drift check failed: %v", err)
+		return nil, fmt.Sprintf("flat cache drift check failed: %v", err)
 	}
 	if !diff.Empty() {
-		return false, fmt.Sprintf("flat cache is stale (added=%d modified=%d deleted=%d)",
+		return nil, fmt.Sprintf("flat cache is stale (added=%d modified=%d deleted=%d)",
 			len(diff.Added), len(diff.Modified), len(diff.Deleted))
 	}
-	return true, ""
+	for path, id := range assignBSLDocIDs(paths, layout) {
+		if m.Files[path].DocID != id {
+			return nil, "flat cache document IDs differ from current extension ownership"
+		}
+	}
+	return m, ""
 }
 
 // flatCacheManifest reads the flat stamp once before opening any shards. An
@@ -1759,7 +1800,7 @@ func flatCacheManifest(cpath string) (*Manifest, bool) {
 // adoptFlatShards adopts the legacy flat shards (shardDirs, all directly under
 // cpath) as the immutable generation for gensig by MOVING them — not rebuilding
 // them — into g/<gensig>/. It mirrors BuildGeneration's atomic-adopt invariant:
-// the shards (and the flat manifest, if present) are renamed into a unique temp
+// the admitted flat manifest and the shards are renamed into a unique temp
 // dir, the READY sentinel is written LAST, and the temp dir is renamed into place,
 // so the generation only ever becomes visible already containing READY. The whole
 // move is metadata-only (same filesystem), so adoption re-indexes nothing — the
@@ -1776,7 +1817,7 @@ func flatCacheManifest(cpath string) (*Manifest, bool) {
 // READY-and-unclaimed. On the concurrent-adopter branch there is no such phase —
 // the generation being deferred to is someone else's, already published — so the
 // claim taken there is the ordinary post-adopt one.
-func adoptFlatShards(cpath, gensig string, shardDirs []string, claim buildClaim) (*readerRegistration, error) {
+func adoptFlatShards(cpath, gensig string, shardDirs []string, admitted *Manifest, claim buildClaim) (*readerRegistration, error) {
 	gensDir := generationsDir(cpath)
 	if err := os.MkdirAll(gensDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating generations dir: %w", err)
@@ -1806,24 +1847,28 @@ func adoptFlatShards(cpath, gensig string, shardDirs []string, claim buildClaim)
 		}
 	}()
 
-	// Move each flat shard dir into the temp generation dir (rename = O(1), no
-	// re-index — the whole point of adoption over a rebuild).
+	// Move and verify the admitted stamp before taking any shard. A writer
+	// must remove that same stamp before it can change the shards.
+	src, dst := manifestPath(cpath), manifestPath(tmpDir)
+	if err := os.Rename(src, dst); err != nil {
+		return nil, fmt.Errorf("moving admitted flat manifest: %w", err)
+	}
+	moved = append(moved, move{from: src, to: dst})
+	manifest, err := LoadManifest(tmpDir)
+	if err != nil {
+		return nil, err
+	}
+	if manifest == nil || !manifest.sameRevision(admitted) {
+		return nil, fmt.Errorf("flat manifest changed after admission")
+	}
+
+	// Moving shard directories preserves the already-built index.
 	for _, sd := range shardDirs {
 		dst := filepath.Join(tmpDir, filepath.Base(sd))
 		if err := os.Rename(sd, dst); err != nil {
 			return nil, fmt.Errorf("moving flat shard %s: %w", filepath.Base(sd), err)
 		}
 		moved = append(moved, move{from: sd, to: dst})
-	}
-
-	// Move the flat manifest too so the adopted generation serves names from it
-	// (loadNamesReadOnly reads <genDir>/manifest.json).
-	if src := manifestPath(cpath); fileExists(src) {
-		dst := manifestPath(tmpDir)
-		if err := os.Rename(src, dst); err != nil {
-			return nil, fmt.Errorf("moving flat manifest: %w", err)
-		}
-		moved = append(moved, move{from: src, to: dst})
 	}
 
 	// Write READY LAST, then adopt atomically (temp → g/<gensig>).

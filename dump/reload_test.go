@@ -297,7 +297,7 @@ func TestReload_BuildFailureKeepsOldIndexServing(t *testing.T) {
 	injected := errors.New("внедрённый сбой сборки поколения")
 	orig := reloadBuildGeneration
 	var called atomic.Bool
-	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath, gensig string) (*readerRegistration, error) {
+	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath string, input generationInput) (*readerRegistration, error) {
 		called.Store(true)
 		return nil, injected
 	}
@@ -376,7 +376,7 @@ func TestReload_BuildPanicKeepsOldIndexServing(t *testing.T) {
 	const panicText = "внедрённая паника сборки поколения"
 	orig := reloadBuildGeneration
 	var called atomic.Bool
-	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath, gensig string) (*readerRegistration, error) {
+	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath string, input generationInput) (*readerRegistration, error) {
 		called.Store(true)
 		panic(panicText)
 	}
@@ -484,10 +484,10 @@ func TestReload_SecondCallerIsToldNotQueued(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	orig := reloadBuildGeneration
-	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath, gensig string) (*readerRegistration, error) {
+	reloadBuildGeneration = func(opts IndexOptions, dumpDir, cpath string, input generationInput) (*readerRegistration, error) {
 		close(entered)
 		<-release
-		return orig(opts, dumpDir, cpath, gensig)
+		return orig(opts, dumpDir, cpath, input)
 	}
 	defer func() { reloadBuildGeneration = orig }()
 
