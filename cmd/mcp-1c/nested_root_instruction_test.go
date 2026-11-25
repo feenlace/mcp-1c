@@ -12,13 +12,6 @@ import (
 	"github.com/feenlace/mcp-1c/dump"
 )
 
-// A DIAGNOSIS AND AN INSTRUCTION ARE TWO CLAIMS.
-//
-// Where a
-// message claims something about loss, the same test builds the index and reads
-// CollapsedKeys, so the sentence and its measurement cannot drift onto different
-// trees.
-
 // instrPlainRoot writes a dump root that is one by KIND-DIRECTORY COUNT and carries
 // no manifest of its own. That shape matters twice: it is what dumproot.go counts as
 // a root without a manifest, and manifestAbsent is the only verdict the layout
@@ -71,20 +64,17 @@ type instrCase struct {
 	outside int
 
 	// The sentences, asserted in BOTH directions on every fixture.
-	wantOverwrite bool // «затирают друг друга»
-	wantRemedy    bool // «Укажите в --dump»
-	wantSafe      bool // «не потеряется»
+	wantPathIDs bool // «относительные пути файлов»
+	wantRemedy  bool // «Укажите в --dump»
+	wantSafe    bool // «не потеряется»
 	// The unrecognised sentence has two spellings, one per arity, and they are
 	// asserted apart: a single field would let a multi-root tree satisfy it with
 	// the single-root wording and vice versa.
 	wantOneUnrecognised bool // «Он не опознан как выгрузка расширения»
 	wantAllUnrecognised bool // «Ни один из них не опознан как выгрузка расширения»
 
-	// measureLoss asks for the collapse report of the same tree, and is set
-	// wherever the message makes a claim about loss.
-	measureLoss bool
-	wantFiles   int
-	wantKeys    int
+	// Check the actual count and IDs when the message describes qualification.
+	wantModules int
 	// wantModuleKey is a key the index must publish for the same tree, read off
 	// the same build as the collapse report above.
 	wantModuleKey string
@@ -99,8 +89,7 @@ type instrCase struct {
 func instrCases() []instrCase {
 	const ext = "Доработка"
 	return []instrCase{{
-		// A-5. The double loss is real and the operator is told about it, and the
-		// remedy is withheld because it would discard the extension in the wrapper.
+		// The path recommendation would discard the extension in the wrapper.
 		name: "две простые выгрузки и расширение в стороне",
 		build: func(t *testing.T, parent string) {
 			instrPlainRoot(t, parent, "A")
@@ -108,10 +97,10 @@ func instrCases() []instrCase {
 			instrExtension(t, parent, "Обёртка/"+ext, ext)
 		},
 		roots: []string{"A", "B"}, exts: 1, outside: 1,
-		wantOverwrite: true, wantRemedy: false, wantSafe: false,
+		wantPathIDs: true, wantRemedy: false, wantSafe: false,
 		wantOneUnrecognised: false, wantAllUnrecognised: true,
-		measureLoss: true, wantFiles: 2, wantKeys: 2,
-		repoint: "A", repointKeeps: false,
+		wantModules: 5,
+		repoint:     "A", repointKeeps: false,
 	}, {
 		// The control for it, and it MOVES: the only difference from the case above
 		// is a directory that has nothing to do with either root.
@@ -121,9 +110,9 @@ func instrCases() []instrCase {
 			instrPlainRoot(t, parent, "B")
 		},
 		roots: []string{"A", "B"}, exts: 0, outside: 0,
-		wantOverwrite: true, wantRemedy: true, wantSafe: false,
+		wantPathIDs: true, wantRemedy: true, wantSafe: false,
 		wantOneUnrecognised: false, wantAllUnrecognised: true,
-		measureLoss: true, wantFiles: 2, wantKeys: 2,
+		wantModules: 4,
 	}, {
 		// A-6. Nothing is lost, so nothing is diagnosed, and the remedy is free:
 		// indexing the root directly gives the same keys.
@@ -133,7 +122,7 @@ func instrCases() []instrCase {
 			instrExtension(t, parent, "R/"+ext, ext)
 		},
 		roots: []string{"R"}, exts: 1, outside: 0,
-		wantOverwrite: false, wantRemedy: true, wantSafe: false,
+		wantPathIDs: false, wantRemedy: true, wantSafe: false,
 		wantOneUnrecognised: true, wantAllUnrecognised: false,
 		repoint: "R", repointKeeps: true,
 	}, {
@@ -146,7 +135,7 @@ func instrCases() []instrCase {
 			instrExtension(t, parent, "Обёртка/"+ext, ext)
 		},
 		roots: []string{"R"}, exts: 1, outside: 1,
-		wantOverwrite: false, wantRemedy: false, wantSafe: false,
+		wantPathIDs: false, wantRemedy: false, wantSafe: false,
 		wantOneUnrecognised: true, wantAllUnrecognised: false,
 		repoint: "R", repointKeeps: false,
 	}, {
@@ -157,12 +146,11 @@ func instrCases() []instrCase {
 			instrPlainRoot(t, parent, "R")
 		},
 		roots: []string{"R"}, exts: 0, outside: 0,
-		wantOverwrite: false, wantRemedy: true, wantSafe: false,
+		wantPathIDs: false, wantRemedy: true, wantSafe: false,
 		wantOneUnrecognised: true, wantAllUnrecognised: false,
 	}, {
-		// Two plain roots and a recognised extension INSIDE one of them. The roots
-		// collide with each other and the extension keeps its own namespace, and
-		// both of those are read off the same tree by the assertions below.
+		// Two plain roots need qualified IDs. The extension inside one of
+		// them keeps its own namespace.
 		name: "две простые выгрузки и расширение внутри одной из них",
 		build: func(t *testing.T, parent string) {
 			instrPlainRoot(t, parent, "A")
@@ -170,9 +158,9 @@ func instrCases() []instrCase {
 			instrExtension(t, parent, "A/"+ext, ext)
 		},
 		roots: []string{"A", "B"}, exts: 1, outside: 0,
-		wantOverwrite: true, wantRemedy: true, wantSafe: false,
+		wantPathIDs: true, wantRemedy: true, wantSafe: false,
 		wantOneUnrecognised: false, wantAllUnrecognised: true,
-		measureLoss: true, wantFiles: 2, wantKeys: 2,
+		wantModules:   5,
 		wantModuleKey: "ext." + ext + ".ОбщийМодуль.Доп.Модуль",
 	}}
 }
@@ -218,7 +206,8 @@ func TestTheDiagnosisAndTheRemedyAreDecidedSeparately(t *testing.T) {
 				sub  string
 				want bool
 			}{
-				{"затирают друг друга", c.wantOverwrite},
+				{"затира", false},
+				{"относительные пути файлов", c.wantPathIDs},
 				{"Укажите в --dump", c.wantRemedy},
 				{"не потеряется", c.wantSafe},
 				{"Он не опознан как выгрузка расширения", c.wantOneUnrecognised},
@@ -229,13 +218,12 @@ func TestTheDiagnosisAndTheRemedyAreDecidedSeparately(t *testing.T) {
 				}
 			}
 
-			// AND THE MEASUREMENT, ON THE SAME TREE.
-			if c.measureLoss {
+			if c.wantModules != 0 {
 				names, st := instrKeys(t, parent)
-				if st.Files != c.wantFiles || st.Keys != c.wantKeys {
-					t.Errorf("the message describes the loss and the same process measures "+
-						"CollapsedKeys() = {Files:%d Keys:%d Sample:%v}, want {Files:%d Keys:%d}."+
-						"\nMessage: %s", st.Files, st.Keys, st.Sample, c.wantFiles, c.wantKeys, msg)
+				if len(names) != c.wantModules || len(slices.Compact(slices.Clone(names))) != c.wantModules ||
+					st.Files != 0 || st.Keys != 0 {
+					t.Errorf("want %d distinct modules and no lost files, got names=%q collapse=%+v",
+						c.wantModules, names, st)
 				}
 				if c.wantModuleKey != "" && !slices.Contains(names, c.wantModuleKey) {
 					t.Errorf("the index does not publish %q, so the recognised extension "+
@@ -284,12 +272,8 @@ func instrSentences(msg string) []string {
 	return out
 }
 
-// instrShippedSentences is every sentence nestedDumpRootMessage emitted in v1.18.0,
-// one entry per sentence rather than one per arm. The repair re-partitioned the
-// arms and moved no words, so this set must survive it unchanged in BOTH directions:
-// a new sentence is new customer-facing Russian that nobody has judged, and a
-// missing one is an operator who stopped being told something.
-func instrShippedSentences() []string {
+// instrExpectedSentences pins every sentence reachable from the startup message.
+func instrExpectedSentences() []string {
 	return []string{
 		"путь в --dump это символьная ссылка.",
 		"Индексатор внутрь ссылки не заходит, поэтому в индекс не попадёт ни один модуль, даже если по ссылке лежит правильная выгрузка.",
@@ -306,9 +290,10 @@ func instrShippedSentences() []string {
 		"Укажите в --dump сам этот корень.",
 		"Все они опознаны как выгрузки расширений, и сервер проиндексирует каждую под её собственным именем, так что содержимое не потеряется.",
 		"Указывать один из них в --dump нужно только если вам нужен именно он.",
-		"Часть из них опознана как выгрузки расширений и получит собственные имена, остальные попадут в общее пространство ключей и могут затереть друг друга.",
+		"Часть из них опознана как выгрузки расширений и будет проиндексирована под их именами.",
 		"Укажите в --dump тот корень, который вам нужен.",
-		"Ни один из них не опознан как выгрузка расширения, поэтому их модули попадают в одно пространство ключей и затирают друг друга.",
+		"Ни один из них не опознан как выгрузка расширения.",
+		"При совпадении идентификаторов модулей сервер добавляет к ним относительные пути файлов.",
 		"Сервер не переходит внутрь сам, потому что выбрать за вас не может, а молчаливый переход скрыл бы ошибку пути ровно так же, как она скрывалась до сих пор.",
 		"Просмотрены не все подкаталоги, поэтому список может быть неполным.",
 	}
@@ -358,28 +343,20 @@ func instrEveryMessage() []string {
 	return msgs
 }
 
-// TestTheStartupMessageSaysNothingItDidNotSayInV1180 is the permutation property.
-//
-// The repair splits welded pairs and re-emits the halves under their own predicates.
-// That is a re-partitioning and not a rewrite, and this is the difference stated as
-// something a run can check: the SET of sentences reachable from the function must
-// equal the shipped set exactly. Held both ways it removes the judgement call from
-// the change: nothing new was written, so the rules about customer-facing Russian
-// have nothing new to be applied to, and nothing was dropped on the way out.
-func TestTheStartupMessageSaysNothingItDidNotSayInV1180(t *testing.T) {
-	shipped := map[string]bool{}
-	for _, s := range instrShippedSentences() {
-		if shipped[s] {
-			t.Fatalf("the shipped census lists a sentence twice, so one of the two "+
+func TestStartupMessageSentenceCensus(t *testing.T) {
+	expected := map[string]bool{}
+	for _, s := range instrExpectedSentences() {
+		if _, duplicate := expected[s]; duplicate {
+			t.Fatalf("the expected census lists a sentence twice, so one of the two "+
 				"directions below is vacuous: %q", s)
 		}
-		shipped[s] = false
+		expected[s] = false
 	}
 
 	msgs := instrEveryMessage()
-	if len(msgs) < len(shipped) {
+	if len(msgs) < len(expected) {
 		t.Fatalf("the sweep produced %d messages for %d sentences, which cannot cover them",
-			len(msgs), len(shipped))
+			len(msgs), len(expected))
 	}
 
 	seen := map[string]bool{}
@@ -389,17 +366,15 @@ func TestTheStartupMessageSaysNothingItDidNotSayInV1180(t *testing.T) {
 			t.Fatalf("a non-empty message split into no sentences at all: %q", msg)
 		}
 		for _, s := range sentences {
-			if _, ok := shipped[s]; !ok {
-				t.Errorf("the function emits a sentence that v1.18.0 never emitted, so this "+
-					"change wrote new customer-facing Russian:\n%q\nin: %s", s, msg)
+			if _, ok := expected[s]; !ok {
+				t.Errorf("unexpected startup sentence:\n%q\nin: %s", s, msg)
 			}
 			seen[s] = true
 		}
 	}
-	for _, s := range instrShippedSentences() {
+	for _, s := range instrExpectedSentences() {
 		if !seen[s] {
-			t.Errorf("a sentence v1.18.0 emitted is now unreachable, so the operator "+
-				"stopped being told it:\n%q", s)
+			t.Errorf("expected startup sentence is unreachable: %q", s)
 		}
 	}
 

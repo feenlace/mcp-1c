@@ -3,6 +3,7 @@ package dump
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -51,26 +52,12 @@ const (
 	issue46FlatExtKey  = "ext.АдаптацияУчета.Документ.Продажа.МодульОбъекта"
 	issue46FlatExtBody = "// соседнее расширение\n"
 
-	// A wrapper with no manifest anywhere in it. Its module has nothing to
-	// distinguish it from the base configuration's own, so it lands on the base
-	// key: a real collision, and the whole point of the companion control.
-	issue46CollidingDir = "Mach4/nomanifest"
+	issue46CollidingDir  = "Mach4/nomanifest"
+	issue46CollidingBody = "// модуль из обёртки\n"
 )
 
-// mkIssue46ParityTree writes the tree the four starts are compared over: the
-// nested extension of issue 46, the base configuration whose key it used to land
-// on, and a sibling extension one level up.
-//
-// withCollision adds a fourth module under a wrapper that declares nothing, which
-// therefore derives the base configuration's key and leaves one of the two files
-// unreachable. ITS BYTES ARE DELIBERATELY IDENTICAL to the base file's. Which of
-// two colliding files ends up in pathByName is decided by Go map iteration order
-// on every start but the cold one: loadFromManifestAndDiff and readGenerationNames
-// both range over manifest.Files, while the cold build fills the map from WalkDir
-// in lexical order. A content assertion over a collided key would therefore be
-// measuring map randomisation and would flake. Identical bytes make the served
-// content well defined while leaving the collision itself, which is what the
-// control counts, entirely real.
+// mkIssue46ParityTree writes the base module and two recognised extensions.
+// withCollision adds a wrapped module with the same unqualified key.
 func mkIssue46ParityTree(t *testing.T, withCollision bool) string {
 	t.Helper()
 	root := t.TempDir()
@@ -108,7 +95,7 @@ func mkIssue46ParityTree(t *testing.T, withCollision bool) string {
 	if withCollision {
 		mkBSLFile(t, root,
 			issue46CollidingDir+"/Documents/ПеремещениеЗапасов/Ext/ObjectModule.bsl",
-			issue46BaseBody)
+			issue46CollidingBody)
 	}
 	return root
 }
@@ -397,8 +384,7 @@ func TestIssue46_WarmAndReadOnlyStartsAgreeWithTheColdOne(t *testing.T) {
 	// NOTHING IS WRAPPED ON THIS TREE. Both segments of the nested extension's
 	// prefix are accounted for by the namespace it now has, exactly as the
 	// sibling's one segment is. A zero cannot carry the instrument's aliveness on
-	// its own, which is what TestIssue46_TheParityControlStillCountsACollisionAndAWrap
-	// is for; what is asserted here is that the four starts AGREE on the number.
+	// its own, which is what the companion parity test checks.
 	if want := (WrappedPathState{Files: 0, Total: 3}); cold.wrapped != want {
 		t.Fatalf("cold WrappedPaths = %+v, want %+v", cold.wrapped, want)
 	}
@@ -421,36 +407,27 @@ func TestIssue46_WarmAndReadOnlyStartsAgreeWithTheColdOne(t *testing.T) {
 	}
 }
 
-// TestIssue46_TheParityControlStillCountsACollisionAndAWrap is the positive
-// control for the test above, and it is a SEPARATE test because it has to be able
-// to fail on its own.
-//
-// Parity is satisfied by an instrument that has died exactly as well as by one that
-// works: "the four agree" is true when all four report nothing for the wrong
-// reason. So the same four starts are made over the same tree PLUS a wrapper that
-// declares no extension, where a module really does land on the base
-// configuration's key. All four must count the collision, count the wrapped file,
-// still recognise both extensions, and still carry the base key TWICE in a multiset
-// that a set-valued reading would silently repair.
-func TestIssue46_TheParityControlStillCountsACollisionAndAWrap(t *testing.T) {
+// TestIssue46_TheParityControlKeepsQualifiedModulesAndCountsAWrap
+// checks the four start paths when two files derive the same unqualified key.
+func TestIssue46_TheParityControlKeepsQualifiedModulesAndCountsAWrap(t *testing.T) {
 	root := mkIssue46ParityTree(t, true)
 	legs := issue46FourStarts(t, root, t.TempDir())
 	cold := legs[0]
 
-	// The base key appears TWICE: one entry for the base configuration's own file
-	// and one for the module under the undeclared wrapper.
-	wantNames := []string{issue46BaseKey, issue46BaseKey, issue46FlatExtKey, issue46ExtKey}
-	slices.Sort(wantNames)
-	if !slices.Equal(cold.names, wantNames) {
-		t.Fatalf("control cold key multiset = %v, want %v", cold.names, wantNames)
+	const baseStem = "Документ.ПеремещениеЗапасов@/"
+	const encodedRel = "Documents/ПеремещениеЗапасов/Ext/ObjectModule%2Ebsl.МодульОбъекта"
+	wantContent := map[string]string{
+		baseStem + encodedRel:                             issue46BaseBody,
+		baseStem + issue46CollidingDir + "/" + encodedRel: issue46CollidingBody,
+		issue46FlatExtKey:                                 issue46FlatExtBody,
+		issue46ExtKey:                                     issue46ExtBody,
 	}
-	wantCollapsed := CollapsedKeyState{Files: 1, Keys: 1, Sample: []string{issue46BaseKey}}
-	if cold.collapsed.Files != wantCollapsed.Files ||
-		cold.collapsed.Keys != wantCollapsed.Keys ||
-		!slices.Equal(cold.collapsed.Sample, wantCollapsed.Sample) {
-		t.Fatalf("control cold CollapsedKeys = %+v, want %+v: without a real collision the "+
-			"parity in the test above is parity over a counter that never counts",
-			cold.collapsed, wantCollapsed)
+	wantNames := slices.Sorted(maps.Keys(wantContent))
+	if !slices.Equal(cold.names, wantNames) || !maps.Equal(cold.content, wantContent) {
+		t.Fatalf("cold start names=%q content=%q, want %q and %q", cold.names, cold.content, wantNames, wantContent)
+	}
+	if cold.collapsed.Files != 0 || cold.collapsed.Keys != 0 || len(cold.collapsed.Sample) != 0 {
+		t.Fatalf("control cold CollapsedKeys = %+v, want zero", cold.collapsed)
 	}
 	if want := (WrappedPathState{Files: 1, Total: 4}); cold.wrapped != want {
 		t.Fatalf("control cold WrappedPaths = %+v, want %+v", cold.wrapped, want)
@@ -466,10 +443,7 @@ func TestIssue46_TheParityControlStillCountsACollisionAndAWrap(t *testing.T) {
 	// THE PROPERTY, over values that are all non-trivial.
 	for _, leg := range legs[1:] {
 		for _, d := range issue46Disagreements(cold, leg) {
-			t.Errorf("control: the %s start disagrees with the cold one. %s\n\n"+
-				"The four starts must agree on a LOSS as exactly as they agree on a clean "+
-				"dump; a report that is silent on both proves nothing about either.",
-				leg.leg, d)
+			t.Errorf("control: the %s start disagrees with the cold one. %s", leg.leg, d)
 		}
 	}
 }

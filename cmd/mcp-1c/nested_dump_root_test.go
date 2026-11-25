@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/feenlace/mcp-1c/dump"
 )
@@ -232,13 +231,13 @@ func TestNestedDumpRootMessageSaysOnlyWhatWasMeasured(t *testing.T) {
 		t.Errorf("the message does not say the recognised extensions keep their content:\n%s", allExt)
 	}
 
-	// None of them is an extension: they really do share a keyspace, and the
-	// sentence says so. Without this the assertion above would also pass on a
-	// message that never mentions overwriting at all.
+	// None of the roots is an extension. The message explains how duplicate
+	// IDs are assigned and still offers the existing root selection remedy.
 	noneExt := nestedDumpRootMessage(twoRoots, dump.ExtensionLayoutSummary{})
-	if !strings.Contains(noneExt, "затирают друг друга") {
-		t.Errorf("two plain dump roots under one path really do collide, and the message "+
-			"does not say so:\n%s", noneExt)
+	if !strings.Contains(noneExt, "Ни один из них не опознан как выгрузка расширения") ||
+		!strings.Contains(noneExt, "относительные пути файлов") ||
+		!strings.Contains(noneExt, "Укажите в --dump") || strings.Contains(noneExt, "затира") {
+		t.Errorf("unexpected message for two ordinary roots:\n%s", noneExt)
 	}
 	if allExt == noneExt {
 		t.Error("the message is the same whether the roots are extensions or not, so it is " +
@@ -629,41 +628,8 @@ func buildRoots(t *testing.T, names ...string) string {
 	return parent
 }
 
-// measureCollapse indexes dir for real and returns the files lost to an overwrite
-// and the module count, so a sentence about an overwrite can be checked against the
-// overwrite the same tree actually produces.
-func measureCollapse(t *testing.T, dir string) (lost, modules int) {
-	t.Helper()
-	idx, err := dump.NewIndex(dir, t.TempDir(), false)
-	if err != nil {
-		t.Fatalf("NewIndex(%s): %v", dir, err)
-	}
-	t.Cleanup(func() { _ = idx.Close() })
-	deadline := time.Now().Add(60 * time.Second)
-	for !idx.Ready() {
-		if time.Now().After(deadline) {
-			t.Fatal("the index never became ready, so nothing below was measured")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return idx.CollapsedKeys().Files, idx.ModuleCount()
-}
-
-// TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure is the stderr
-// half of the rule the tool-output notice already follows.
-//
-// THE DEFECT. With ONE root below the path and that root not an extension, the
-// switch fell to its default branch and asserted that «их модули попадают в одно
-// пространство ключей и затирают друг друга». There is nothing for a single root's
-// modules to overwrite: the anchor scan moves the anchor onto the kind directory
-// inside it and the keys come out exactly as they would from the root itself. The
-// tool-output notice on the same run is careful and says nothing, because it
-// carries a MEASURED collapse count and that count is zero.
-//
-// So the sentence is checked against the measurement of the SAME tree, in both
-// directions: one root measures zero and must not claim an overwrite, two roots
-// measure a real loss and must still say so. Checking only the first direction
-// would also pass on a message that never mentions overwriting at all.
+// TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure compares
+// startup wording with the IDs and loss count produced by the same dump.
 func TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure(t *testing.T) {
 	t.Run("one root, nothing to overwrite", func(t *testing.T) {
 		parent := buildRoots(t, "main")
@@ -682,13 +648,9 @@ func TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure(t *testing.
 				layout.Extensions)
 		}
 
-		lost, modules := measureCollapse(t, parent)
-		if lost != 0 {
-			t.Fatalf("one root lost %d files to an overwrite, so the sentence would be true "+
-				"and this test is measuring the wrong tree", lost)
-		}
-		if modules != 3 {
-			t.Fatalf("indexed %d modules, want 3: the tree is not what this test describes", modules)
+		names, st := instrKeys(t, parent)
+		if len(names) != 3 || st.Files != 0 || st.Keys != 0 {
+			t.Fatalf("one root should serve all three modules: names=%q collapse=%+v", names, st)
 		}
 
 		msg := nestedDumpRootMessage(insp, layout)
@@ -697,7 +659,7 @@ func TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure(t *testing.
 		}
 		if strings.Contains(msg, "затира") {
 			t.Errorf("the message asserts an overwrite that the same tree measures as %d "+
-				"files lost over %d modules:\n%s", lost, modules, msg)
+				"files lost over %d modules:\n%s", st.Files, len(names), msg)
 		}
 		// It still has to report the real fault, or the fix would be deletion.
 		if !strings.Contains(msg, "не на корень выгрузки") {
@@ -705,7 +667,7 @@ func TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure(t *testing.
 		}
 	})
 
-	t.Run("two roots really do overwrite", func(t *testing.T) {
+	t.Run("two roots retain both sets of modules", func(t *testing.T) {
 		parent := buildRoots(t, "main", "second")
 		insp := dump.InspectDumpRoot(parent)
 		layout := dump.InspectExtensionLayout(parent)
@@ -716,17 +678,22 @@ func TestNestedDumpRootMessageDoesNotClaimAnOverwriteItDidNotMeasure(t *testing.
 			t.Fatalf("layout recognised %d extensions", layout.Extensions)
 		}
 
-		lost, modules := measureCollapse(t, parent)
-		if lost == 0 {
-			t.Fatalf("two roots carrying the same object names lost nothing, so the "+
-				"«затирают друг друга» sentence would be the false one here (modules=%d)",
-				modules)
+		names, st := instrKeys(t, parent)
+		if len(names) != 6 || st.Files != 0 || st.Keys != 0 {
+			t.Fatalf("both roots should serve all six modules: names=%q collapse=%+v", names, st)
+		}
+		if len(slices.Compact(slices.Clone(names))) != 6 {
+			t.Fatalf("module IDs are not distinct: %q", names)
+		}
+		for _, name := range names {
+			if !strings.Contains(name, "@/") {
+				t.Errorf("module %q has no relative path qualifier", name)
+			}
 		}
 
 		msg := nestedDumpRootMessage(insp, layout)
-		if !strings.Contains(msg, "затирают друг друга") {
-			t.Errorf("the message stays silent about an overwrite the same tree measures "+
-				"as %d files lost:\n%s", lost, msg)
+		if !strings.Contains(msg, "относительные пути файлов") || strings.Contains(msg, "затира") {
+			t.Errorf("message misstates how duplicate module IDs are handled:\n%s", msg)
 		}
 	})
 }

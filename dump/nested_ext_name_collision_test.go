@@ -1,6 +1,7 @@
 package dump
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -248,21 +249,33 @@ func TestSameNameFlatWithForeignOrMissingStamp(t *testing.T) {
 		"ext.Legacy@/" + first + "." + collisionBaseKey:  firstBody,
 		"ext.Legacy@/" + second + "." + collisionBaseKey: secondBody,
 	}
+	const baseStem = "Документ.ПеремещениеЗапасов@/"
+	const encodedRel = "Documents/ПеремещениеЗапасов/Ext/ObjectModule%2Ebsl.МодульОбъекта"
+	oldIDs := map[string]string{
+		collisionObjectRel:                baseStem + encodedRel,
+		first + "/" + collisionObjectRel:  baseStem + first + "/" + encodedRel,
+		second + "/" + collisionObjectRel: baseStem + second + "/" + encodedRel,
+	}
 	for _, stamp := range []string{"v9", "missing"} {
 		t.Run(stamp, func(t *testing.T) {
 			root, cache := t.TempDir(), t.TempDir()
 			mkBSLFile(t, root, collisionObjectRel, baseBody)
 			mkBSLFile(t, root, first+"/"+collisionObjectRel, firstBody)
 			mkBSLFile(t, root, second+"/"+collisionObjectRel, secondBody)
-			// Without manifests these real shards carry the v9 fallback ID.
+			// Build real shards with the base namespace IDs, then give the
+			// cache a foreign schema stamp or remove the manifest.
 			if err := BuildCache(root, cache, false); err != nil {
 				t.Fatal(err)
 			}
 			cpath := migCachePath(t, root, cache)
 			stored, err := LoadManifest(cpath)
-			if err != nil || stored == nil || !slices.Equal(docIDsFromManifest(stored),
-				[]string{collisionBaseKey, collisionBaseKey, collisionBaseKey}) {
-				t.Fatalf("pre-fix flat manifest = %+v, %v", stored, err)
+			if err != nil || stored == nil || len(stored.Files) != len(oldIDs) {
+				t.Fatalf("initial flat manifest = %+v, %v", stored, err)
+			}
+			for path, wantID := range oldIDs {
+				if got := stored.Files[path].DocID; got != wantID {
+					t.Fatalf("initial document ID for %q = %q, want %q", path, got, wantID)
+				}
 			}
 			if stamp == "missing" {
 				if err := os.Remove(manifestPath(cpath)); err != nil {
@@ -295,7 +308,7 @@ func TestSameNameFlatWithForeignOrMissingStamp(t *testing.T) {
 					t.Errorf("manifest written over unstamped shards: %+v, %v", after, err)
 				}
 			} else if err != nil || after == nil || after.schemaVersion() != 9 ||
-				!slices.Equal(docIDsFromManifest(after), docIDsFromManifest(stored)) {
+				!maps.Equal(after.Files, stored.Files) {
 				t.Errorf("original v9 manifest changed: %+v, %v", after, err)
 			}
 			if got := snapshotShardTree(t, cacheShardDirs(cpath)); !sameSnapshot(got, before) {
@@ -308,8 +321,11 @@ func TestSameNameFlatWithForeignOrMissingStamp(t *testing.T) {
 			for _, shard := range shards {
 				defer shard.Close()
 			}
-			if doc, err := shards[0].Document(collisionBaseKey); err != nil || doc == nil {
-				t.Errorf("old shard cannot read its original docID %q: %v", collisionBaseKey, err)
+			for _, id := range oldIDs {
+				shard := shards[shardForID(id, len(shards))]
+				if doc, err := shard.Document(id); err != nil || doc == nil {
+					t.Errorf("old shard cannot read its original docID %q: %v", id, err)
+				}
 			}
 		})
 	}
