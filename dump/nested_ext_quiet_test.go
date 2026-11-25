@@ -289,13 +289,10 @@ func TestAMissedNestedExtensionIsStillReported(t *testing.T) {
 			"are what report this loss, and they report it as numbers", layout)
 	}
 
-	// CHANNEL ONE: the file that is no longer servable.
-	if st := idx.CollapsedKeys(); st.Files != 1 || st.Keys != 1 {
-		t.Errorf("CollapsedKeys() = %+v, want {Files:1 Keys:1}: the missed extension's "+
-			"module and the configuration's own module derive one key, and one of them "+
-			"can no longer be served", st)
+	if st := idx.CollapsedKeys(); st.Files != 0 || st.Keys != 0 || len(names) != 2 || names[0] == names[1] {
+		t.Errorf("qualified base keys should preserve both files: names=%v, collapsed=%+v", names, st)
 	}
-	// CHANNEL TWO: the file whose name was derived from below the dump root.
+	// A module below an unrecognized extension root still counts as wrapped.
 	if st := idx.WrappedPaths(); st.Files != 1 || st.Total != 2 {
 		t.Errorf("WrappedPaths() = %+v, want {Files:1 Total:2}: the module under the "+
 			"missed extension carries two directory levels above the dump shaped tail", st)

@@ -273,7 +273,7 @@ func (l extensionLayout) moduleKey(relPath string) string {
 	if qualified := l.qualified[prefix]; qualified != "" {
 		name = qualified
 	}
-	return NFC("ext." + name + "." + bslPathToModuleName(inside))
+	return NFC("ext." + name + "." + deriveBSLModuleName(inside, false))
 }
 
 // matchExtensionPrefix returns the enclosing extension and the path inside it.
@@ -381,9 +381,13 @@ func (l extensionLayout) finalizeNamespaces(paths iter.Seq[string]) extensionLay
 const extensionRootSeparator = "@/"
 
 func qualifiedExtensionName(name, path string) string {
+	return NFC(name) + extensionRootSeparator + encodeKeyPath(path)
+}
+
+// encodeKeyPath keeps literal slashes between segments and escapes raw bytes
+// that would change under normalization or interfere with module key separators.
+func encodeKeyPath(path string) string {
 	var qualified strings.Builder
-	qualified.WriteString(NFC(name))
-	qualified.WriteString(extensionRootSeparator)
 	for i, segment := range strings.Split(path, "/") {
 		if i != 0 {
 			qualified.WriteByte('/')
@@ -424,8 +428,9 @@ func (l extensionLayout) persistedExtensionLayout(paths map[string]string) exten
 		if !isDeepExtensionPrefix(prefix) {
 			continue
 		}
-		suffix := "." + bslPathToModuleName(inside)
-		if id != "ext."+NFC(name)+suffix && id != "ext."+qualifiedExtensionName(name, prefix)+suffix {
+		suffix := "." + deriveBSLModuleName(inside, false)
+		if !isAssignedBSLKey(id, "ext."+NFC(name)+suffix, path) &&
+			!isAssignedBSLKey(id, "ext."+qualifiedExtensionName(name, prefix)+suffix, path) {
 			if unused == nil {
 				unused = make(map[string]bool)
 			}

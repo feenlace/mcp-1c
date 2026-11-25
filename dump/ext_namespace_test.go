@@ -77,7 +77,7 @@ func TestAnExtensionKeyFillsTheSameSlotsAsABaseKey(t *testing.T) {
 func TestTheNamespaceIsRecognisedByTheCategoryAfterIt(t *testing.T) {
 	// A real base-configuration key produced by a directory named «ext». Derived
 	// rather than written down, so it cannot drift away from the deriver.
-	const wrapperPath = "ext/Ном/Forms/Ф/Ext/Form/Module.bsl"
+	const wrapperPath = "ext/Ном/Forms/Ф/Ext/Module.bsl"
 	key := bslPathToModuleName(wrapperPath)
 	if key != "ext.Ном.Форма.Ф.МодульФормы" {
 		t.Fatalf("premise moved: bslPathToModuleName(%q) = %q", wrapperPath, key)
@@ -200,15 +200,7 @@ func TestAnExtensionModuleIsFoundByItsRealCategoryEndToEnd(t *testing.T) {
 	}
 }
 
-// TestTwoFilesAnchoringOntoOneKeyAreCountedAndOneIsUnreachable pins the residual
-// the anchor scan cannot remove, as an OUTCOME rather than as a promise.
-//
-// anchorIndex is a pure function of ONE path, so it cannot know that the key it
-// derives is already taken; a collision check inside it is not merely absent, it
-// is not expressible there. What the index can do is count the loss, and it does:
-// the loser is absent from every map the index reads through, ModuleCount still
-// counts it, and CollapsedKeys is what makes the difference visible.
-func TestTwoFilesAnchoringOntoOneKeyAreCountedAndOneIsUnreachable(t *testing.T) {
+func TestTwoFilesAnchoringOntoOneKeyKeepBothBodies(t *testing.T) {
 	root := t.TempDir()
 	write := func(rel, body string) {
 		t.Helper()
@@ -234,25 +226,12 @@ func TestTwoFilesAnchoringOntoOneKeyAreCountedAndOneIsUnreachable(t *testing.T) 
 	defer idx.Close()
 	<-idx.Done()
 
-	st := idx.CollapsedKeys()
-	if st.Files != 1 || st.Keys != 1 {
-		t.Errorf("CollapsedKeys = %+v, want exactly one lost file under one key: the "+
-			"collision is invisible unless it is counted", st)
-	}
-	if !slices.Contains(st.Sample, key) {
-		t.Errorf("Sample = %v, want it to name %q", st.Sample, key)
-	}
-	if idx.ModuleCount() != 2 {
-		t.Errorf("ModuleCount = %d, want 2: the count reports files walked, which is exactly "+
-			"why it must not be read alone", idx.ModuleCount())
-	}
-	// Exactly one of the two contents is reachable, and the other one is gone.
-	content, ok := idx.GetContent(key)
-	if !ok {
-		t.Fatalf("GetContent(%q) found nothing", key)
-	}
-	if strings.Contains(content, "настоящий") == strings.Contains(content, "самозванец") {
-		t.Errorf("GetContent(%q) = %q, want exactly one of the two files", key, content)
+	requireCollisionBodies(t, idx, map[string]string{
+		"Конфигурация.МодульСеанса@/Ext/SessionModule%2Ebsl.Модуль":              "// настоящий модуль сеанса\n",
+		"Конфигурация.МодульСеанса@/Catalogs/Ном/Ext/SessionModule%2Ebsl.Модуль": "// самозванец\n",
+	})
+	if _, found := idx.GetContent(key); found {
+		t.Errorf("unqualified collision %q still resolves", key)
 	}
 }
 

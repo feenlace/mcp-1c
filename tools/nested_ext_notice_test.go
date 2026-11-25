@@ -92,7 +92,7 @@ func TestIssue46_WrappedNoticeIsSilentOnceTheExtensionIsNamed(t *testing.T) {
 	mkBSL(t, root, issue46NoticeExtPrefix+"/Documents/ПеремещениеЗапасов/Ext/ObjectModule.bsl",
 		issue46NoticeBody("Расширенный"))
 
-	idx := collapseIndex(t, root, false)
+	idx := collapseIndex(t, root)
 
 	// PREMISE, AND IT IS NOT A FORMALITY. «No warning» is satisfied by an index that
 	// found nothing at all, and by one that found both files and merged them onto
@@ -170,7 +170,7 @@ func TestIssue46_TheWrapNoticeStillFiresWhereNoExtensionIsDeclared(t *testing.T)
 	mkBSL(t, parent, "выгрузка/Catalogs/Ном/Ext/ObjectModule.bsl", issue46NoticeBody("Первый"))
 	mkBSL(t, parent, "выгрузка/CommonModules/Общий/Ext/Module.bsl", issue46NoticeBody("Второй"))
 
-	idx := collapseIndex(t, parent, false)
+	idx := collapseIndex(t, parent)
 
 	// PREMISE: no extension was recognised, which is what makes every segment above
 	// the kind directory unaccounted for.

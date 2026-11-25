@@ -137,13 +137,8 @@ func TestKeyMultiplicityIsPublishedOnEveryInstallPath(t *testing.T) {
 	armsRun := 0
 	var recordedFuncs []string
 
-	// Arms 1-3 share one dir/cache: cold build, then an unchanged warm
-	// reopen, then a warm reopen whose diff ADDS a third colliding file. The
-	// second call to loadFromManifestAndDiff records TWICE inside itself
-	// (before the diff and after), and the "adds a collision" arm is the one
-	// that closes the warm-diff hole design section 3.3 names: idx.names
-	// dedup-guards the addition, so only pathToDocID (what the after-diff
-	// call uses) can see the new collision.
+	// Arms 1-3 share one dir/cache: cold build, warm reopen with no
+	// changes, then warm reopen with a new member of the duplicate bucket.
 	dir := t.TempDir()
 	cacheDir := t.TempDir()
 	collided, unique := multiplicityFixtureFiles(t, dir)
@@ -162,7 +157,7 @@ func TestKeyMultiplicityIsPublishedOnEveryInstallPath(t *testing.T) {
 			t.Fatalf("cachePath: %v", err)
 		}
 		waitManifest(t, cpath, 60*time.Second)
-		assertTriple(t, idx, collided, unique, 2)
+		assertTriple(t, idx, collided, unique, 0)
 	})
 
 	armsRun++
@@ -174,7 +169,7 @@ func TestKeyMultiplicityIsPublishedOnEveryInstallPath(t *testing.T) {
 		}
 		t.Cleanup(func() { idx.Close() })
 		waitReady(t, idx, 60*time.Second)
-		assertTriple(t, idx, collided, unique, 2)
+		assertTriple(t, idx, collided, unique, 0)
 	})
 
 	// A third file deriving the SAME collided key: the warm reopen's diff
@@ -192,7 +187,7 @@ func TestKeyMultiplicityIsPublishedOnEveryInstallPath(t *testing.T) {
 		}
 		t.Cleanup(func() { idx.Close() })
 		waitReady(t, idx, 60*time.Second)
-		assertTriple(t, idx, collided, unique, 3)
+		assertTriple(t, idx, collided, unique, 0)
 	})
 
 	armsRun++
@@ -211,7 +206,7 @@ func TestKeyMultiplicityIsPublishedOnEveryInstallPath(t *testing.T) {
 		}
 		t.Cleanup(func() { idx.Close() })
 		waitReady(t, idx, 60*time.Second)
-		assertTriple(t, idx, roCollided, roUnique, 2)
+		assertTriple(t, idx, roCollided, roUnique, 0)
 	})
 
 	armsRun++
@@ -234,7 +229,7 @@ func TestKeyMultiplicityIsPublishedOnEveryInstallPath(t *testing.T) {
 		if !rep.Changed {
 			t.Fatalf("Reload did not report a change after adding two colliding files")
 		}
-		assertTriple(t, idx, roCollided, roUnique, 2)
+		assertTriple(t, idx, roCollided, roUnique, 0)
 	})
 
 	armsRun++
@@ -334,12 +329,8 @@ func filepathHasTestSuffix(name string) bool {
 	return len(name) > 8 && name[len(name)-8:] == "_test.go"
 }
 
-// TestKeyMultiplicityAndCollapsedKeysDescribeOneLoad reloads from a colliding
-// tree onto a clean one and requires the aggregate report and the per-key
-// accessor to move TOGETHER, never a mix of an old count and a new report (or
-// vice versa). The structural half asserts that exactly one function in the
-// package can ever publish idx.collapsed, so a second writer cannot be added
-// beside noteCollapsedKeys without this test catching it.
+// TestKeyMultiplicityAndCollapsedKeysDescribeOneLoad checks the transition
+// from qualified IDs to the original, unambiguous ID after a deletion.
 func TestKeyMultiplicityAndCollapsedKeysDescribeOneLoad(t *testing.T) {
 	dir := t.TempDir()
 	cacheDir := t.TempDir()
@@ -348,11 +339,11 @@ func TestKeyMultiplicityAndCollapsedKeysDescribeOneLoad(t *testing.T) {
 	collided := bslPathToModuleName("w/Прочее/A/Ext/ObjectModule.bsl")
 
 	idx := openReloadableIndex(t, dir, cacheDir)
-	if st := idx.CollapsedKeys(); st.Files != 1 {
-		t.Fatalf("fixture setup: CollapsedKeys().Files = %d before reload, want 1", st.Files)
+	if st := idx.CollapsedKeys(); st.Files != 0 {
+		t.Fatalf("fixture setup: CollapsedKeys().Files = %d before reload, want 0", st.Files)
 	}
-	if n := idx.KeyMultiplicity(collided); n != 2 {
-		t.Fatalf("fixture setup: KeyMultiplicity(collided) = %d before reload, want 2", n)
+	if n := idx.KeyMultiplicity(collided); n != 0 {
+		t.Fatalf("fixture setup: KeyMultiplicity(collided) = %d before reload, want 0", n)
 	}
 
 	// Clean the tree onto exactly ONE file deriving the same key: the

@@ -279,7 +279,7 @@ func TestWrappedNotice_ADumpTwoLevelsUpIsReported(t *testing.T) {
 	mkBSL(t, parent, "wrap/МоёРасш/CommonModules/Общий/Ext/Module.bsl", body("Второй"))
 	mkBSL(t, parent, "wrap/МоёРасш/Configuration.xml", "")
 
-	idx := collapseIndex(t, parent, false)
+	idx := collapseIndex(t, parent)
 
 	// PREMISE, asserted rather than assumed: nothing collides, so the collapse
 	// notice cannot be what reports this.
@@ -324,7 +324,7 @@ func TestWrappedNotice_ACorrectlyPointedDumpIsSilent(t *testing.T) {
 	mkBSL(t, root, "CommonModules/Общий/Ext/Module.bsl", body("Второй"))
 	mkBSL(t, root, "Configuration.xml", "")
 
-	idx := collapseIndex(t, root, false)
+	idx := collapseIndex(t, root)
 	if wp := idx.WrappedPaths(); wp.Files != 0 {
 		t.Fatalf("WrappedPaths = %+v at a correctly pointed root, want none", wp)
 	}
@@ -357,7 +357,7 @@ func TestDoubtNotice_AnUndecidableManifestReachesTheAnswer(t *testing.T) {
 			"<ObjectBelonging>Adopted</ObjectBelonging><Name>Доработки — копия</Name>"+
 			"</Properties></Configuration></MetaDataObject>")
 
-	idx := collapseIndex(t, root, false)
+	idx := collapseIndex(t, root)
 	layout := idx.ExtensionLayout()
 	if layout.NameRejected != 1 {
 		t.Fatalf("ExtensionLayout = %+v, want one rejected name", layout)
@@ -403,7 +403,7 @@ func TestWrappedNotice_SaysOnlyWhatItCounted(t *testing.T) {
 	mkBSL(t, root, "main/CommonModules/Общий/Ext/Module.bsl", body("Основной"))
 	mkBSL(t, root, "main/Catalogs/Ном/Ext/ObjectModule.bsl", body("Второй"))
 
-	idx := collapseIndex(t, root, false)
+	idx := collapseIndex(t, root)
 
 	// PREMISE ONE: the notice really does fire on this tree, or there is no sentence
 	// to be wrong about.

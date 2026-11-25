@@ -79,8 +79,8 @@ func indexedQualifiedRemainder(path, docID string) (string, bool) {
 		}
 		prefix = path[:len(path)-len(inside)-1]
 	}
-	key = NFC("ext." + qualifiedExtensionName(name, prefix) + "." + bslPathToModuleName(inside))
-	return inside, key == docID
+	key = NFC("ext." + qualifiedExtensionName(name, prefix) + "." + deriveBSLModuleName(inside, false))
+	return inside, isAssignedBSLKey(docID, key, path)
 }
 
 // noteWrappedPaths publishes the report for the paths currently installed.

@@ -1,32 +1,9 @@
 package tools
 
-// The collapsed-key notice, where the user actually reads it.
-//
-// THE PROPERTY: the server never SILENTLY serves an index that lost module
-// content to a name collision. dump/collapsed_keys_test.go pins that the dump
-// package counts the loss exactly; these tests pin the only half that reaches a
-// human, the MCP tool response.
-//
-// It is the same argument that put the protection notice here, applied to a
-// second standing condition, and it is deliberately routed through the SAME
-// wrapper rather than a parallel one: two mechanisms that prepend notices would
-// eventually disagree about ordering, about the error path, and about which
-// return paths they cover.
-//
-// WHAT IS NOT PINNED HERE, stated rather than left to be discovered:
-//
-//   - The tools that do NOT read the index carry no notice by construction, for
-//     the same reason the protection notice does not reach them: the wrapper is
-//     applied only in NewSearchCodeHandler and NewReloadDumpHandler.
-//   - The RECOVERY (a re-pointed dump, a reload, and the notice stops) is pinned
-//     on the state in dump, not again here. This layer turns a state into a
-//     sentence and does not know which way the state last moved.
-
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -43,14 +20,8 @@ const collapseMarker = "индекс выгрузки потерял часть 
 // answers" is one query away.
 const collapseTerm = "ПроцедураСхлопнутогоИндекса"
 
-// collapsingNoticeDump writes a dump in which two files derive ONE module name
-// and two more do not, and returns its directory.
-//
-// The colliding pair is the customer's defect shape restricted to what SURVIVES
-// the anchor scan in dump/index.go:bslPathToModuleName: a wrapper over a top-level
-// directory that is not a known metadata kind, so no anchor exists and both files
-// key on the wrapper. Using a shape the fix already handles would produce a dump
-// with nothing to warn about.
+// collapsingNoticeDump creates two paths with the same unqualified ID
+// candidate and two otherwise unrelated modules.
 func collapsingNoticeDump(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -64,10 +35,8 @@ func collapsingNoticeDump(t *testing.T) string {
 	return dir
 }
 
-// collapseIndex serves dumpDir out of a fresh cache and asserts, as a
-// precondition, that the index really is in the state the test needs. A test of
-// "the notice appears" that ran against a clean index would pass by never firing.
-func collapseIndex(t *testing.T, dumpDir string, wantCollapse bool) *dump.Index {
+// collapseIndex serves dumpDir through a fresh immutable generation.
+func collapseIndex(t *testing.T, dumpDir string) *dump.Index {
 	t.Helper()
 	cacheDir := t.TempDir()
 
@@ -85,14 +54,11 @@ func collapseIndex(t *testing.T, dumpDir string, wantCollapse bool) *dump.Index 
 	t.Cleanup(func() { _ = idx.Close() })
 	<-idx.Done()
 
-	got := idx.CollapsedKeyCount()
-	if wantCollapse && got == 0 {
-		t.Fatalf("the fixture produced an index with no collapsed keys, so nothing below "+
-			"tests the notice (ModuleCount = %d)", idx.ModuleCount())
+	if err := idx.BuildError(); err != nil {
+		t.Fatal(err)
 	}
-	if !wantCollapse && got != 0 {
-		t.Fatalf("the clean fixture collapsed %d file(s): %v",
-			got, idx.CollapsedKeys().Sample)
+	if got := idx.CollapsedKeyCount(); got != 0 {
+		t.Fatalf("index collapsed %d file(s): %v", got, idx.CollapsedKeys().Sample)
 	}
 	return idx
 }
@@ -113,61 +79,11 @@ func callSearchCollapse(t *testing.T, index *dump.Index) string {
 	return resultText(t, res)
 }
 
-// TestCollapseNotice_ACollapsedIndexSaysSoInTheAnswer is the regression: an index
-// that lost module content to a name collision must say so in the answer, and it
-// must still be a real answer.
-func TestCollapseNotice_ACollapsedIndexSaysSoInTheAnswer(t *testing.T) {
-	idx := collapseIndex(t, collapsingNoticeDump(t), true)
+func TestCollapseNotice_QualifiedModulesAreServedWithoutLoss(t *testing.T) {
+	idx := collapseIndex(t, collapsingNoticeDump(t))
 	text := callSearchCollapse(t, idx)
-
-	if !strings.Contains(text, collapseMarker) {
-		t.Fatalf("the answer carries no notice that the index lost content:\n%s", text)
-	}
-	// AT THE FRONT, for the reason the protection notice is: this is a statement
-	// about the whole answer, not a footnote about one number.
-	if !strings.HasPrefix(text, "> ") {
-		t.Errorf("the notice is not the first thing in the answer; it starts with %q",
-			strings.SplitN(text, "\n", 2)[0])
-	}
-	// AND IT IS STILL AN ANSWER.
-	if !strings.Contains(text, "## Результаты поиска") {
-		t.Errorf("the notice displaced the search result:\n%s", text)
-	}
-	if searchRenderedMatches(text) == 0 {
-		t.Errorf("the collapsed index answered with no matches at all:\n%s", text)
-	}
-	// AND IT CARRIES THE NUMBER, read out of the notice rather than looked for
-	// anywhere in the answer. `strings.Contains(text, "1")` cannot fail here: the
-	// body already holds a match count, per-match line labels and a %.3f relevance
-	// score, so whether that assertion passes under a regression depends on the
-	// third decimal of a float.
-	st := idx.CollapsedKeys()
-	wantCount := fmt.Sprintf("уже было занято другим файлом: %d.", st.Files)
-	if !strings.Contains(text, wantCount) {
-		t.Errorf("the notice does not carry the exact count of lost files (%q):\n%s", wantCount, text)
-	}
-	// AND IT NAMES WHAT COLLIDED, so the reader can go and look.
-	//
-	// THE NAME IS LOOKED FOR IN THE NOTICE, NOT IN THE ANSWER. The sample key is a
-	// live doc ID that matched the query, so search_code renders it as a heading:
-	// `strings.Contains(text, sample[0])` is satisfied by the body whether or not
-	// the notice names anything, and deleting the sample from the notice left that
-	// assertion green.
-	if len(st.Sample) == 0 {
-		t.Fatalf("the index reported a collapse with no sample, so the assertion below is vacuous")
-	}
-	notice, _, ok := strings.Cut(text, "## Результаты поиска")
-	if !ok {
-		t.Fatalf("the answer has no result header, so the notice cannot be isolated:\n%s", text)
-	}
-	if !strings.Contains(notice, st.Sample[0]) {
-		t.Errorf("the notice does not name the collided module %q:\n%s", st.Sample[0], notice)
-	}
-	// AND IT SAYS WHAT TO DO. A warning with no remedy is noise by the second time.
-	for _, want := range []string{"--dump", "reload_dump"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("the notice does not name %q as part of the remedy:\n%s", want, text)
-		}
+	if strings.Contains(text, collapseMarker) || searchRenderedMatches(text) != 4 {
+		t.Errorf("search should serve all four files without a loss notice:\n%s", text)
 	}
 }
 
@@ -185,7 +101,7 @@ func TestCollapseNotice_ACleanIndexIsSilent(t *testing.T) {
 	mkBSL(t, clean, "CommonModules/Целый/Ext/Module.bsl", body("Целый"))
 	mkBSL(t, clean, "CommonModules/Другой/Ext/Module.bsl", body("Другой"))
 
-	text := callSearchCollapse(t, collapseIndex(t, clean, false))
+	text := callSearchCollapse(t, collapseIndex(t, clean))
 
 	if strings.Contains(text, collapseMarker) {
 		t.Errorf("a healthy index warned about a collapse it does not have:\n%s", text)
@@ -199,56 +115,31 @@ func TestCollapseNotice_ACleanIndexIsSilent(t *testing.T) {
 	}
 }
 
-// TestCollapseNotice_ReloadDumpCarriesItToo pins the second index-backed tool.
-// It matters more than search_code and not less: re-pointing --dump and calling
-// reload_dump is the remedy the notice offers, so the tool a user reaches for
-// must be the one that keeps telling them whether it worked.
-func TestCollapseNotice_ReloadDumpCarriesItToo(t *testing.T) {
-	idx := collapseIndex(t, collapsingNoticeDump(t), true)
+func TestCollapseNotice_ReloadKeepsQualifiedModules(t *testing.T) {
+	idx := collapseIndex(t, collapsingNoticeDump(t))
 	res, err := NewReloadDumpHandler(idx)(context.Background(), &mcp.CallToolRequest{
 		Params: &mcp.CallToolParamsRaw{Name: "reload_dump", Arguments: json.RawMessage(`{}`)},
 	})
 	if err != nil {
-		if !strings.Contains(err.Error(), collapseMarker) {
-			t.Fatalf("the failed reload carries no notice:\n%v", err)
-		}
-		return
+		t.Fatal(err)
 	}
-	text := resultText(t, res)
-	if !strings.Contains(text, collapseMarker) {
-		t.Errorf("the reload report carries no notice that the index lost content:\n%s", text)
+	if text := resultText(t, res); strings.Contains(text, collapseMarker) {
+		t.Errorf("reload reported lost files:\n%s", text)
 	}
-	if !strings.HasPrefix(text, "> ") {
-		t.Errorf("the notice is not the first thing in the reload report:\n%s", text)
+	if text := callSearchCollapse(t, idx); searchRenderedMatches(text) != 4 {
+		t.Errorf("search after reload should serve all four files:\n%s", text)
 	}
 }
 
-// TestCollapseNotice_AFailingCallIsDecoratedToo pins the error path. A failing
-// call on a collapsed index is exactly when the reason matters, and it is
-// user-visible output only because WithToolErrors makes it so.
-func TestCollapseNotice_AFailingCallIsDecoratedToo(t *testing.T) {
-	idx := collapseIndex(t, collapsingNoticeDump(t), true)
+func TestCollapseNotice_QualifiedIndexPreservesHandlerError(t *testing.T) {
+	idx := collapseIndex(t, collapsingNoticeDump(t))
 	sentinel := errors.New("поиск не выполнен")
 	h := withIndexProtectionNotice(idx, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return nil, sentinel
 	})
-
 	_, err := h(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "x"}})
-	if err == nil {
-		t.Fatal("the wrapper swallowed the handler's error")
-	}
-	if !strings.Contains(err.Error(), collapseMarker) {
-		t.Errorf("the error text carries no collapse notice:\n%v", err)
-	}
-	if !strings.HasPrefix(err.Error(), "> ") {
-		t.Errorf("the notice is not the first thing in the error text; it starts with %q",
-			strings.SplitN(err.Error(), "\n", 2)[0])
-	}
-	if !strings.Contains(err.Error(), sentinel.Error()) {
-		t.Errorf("the original error text was lost: %v", err)
-	}
-	if !errors.Is(err, sentinel) {
-		t.Errorf("the wrapper broke the error chain: errors.Is could not find the original in %v", err)
+	if !errors.Is(err, sentinel) || strings.Contains(err.Error(), collapseMarker) {
+		t.Errorf("got %v, want original error without a loss notice", err)
 	}
 }
 

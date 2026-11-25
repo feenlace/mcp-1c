@@ -125,7 +125,7 @@ func (m *Manifest) Diff(dumpDir string) (*DiffResult, error) {
 	return m.diff(dumpDir, nil)
 }
 
-func (m *Manifest) diff(dumpDir string, visit func(rel, path string, entry fs.DirEntry)) (*DiffResult, error) {
+func (m *Manifest) diff(dumpDir string, include func(rel, path string, entry fs.DirEntry) bool) (*DiffResult, error) {
 	result := &DiffResult{}
 	seen := make(map[string]bool, len(m.Files))
 
@@ -142,10 +142,10 @@ func (m *Manifest) diff(dumpDir string, visit func(rel, path string, entry fs.Di
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		seen[rel] = true
-		if visit != nil {
-			visit(rel, path, d)
+		if include != nil && !include(rel, path, d) {
+			return nil
 		}
+		seen[rel] = true
 
 		info, err := d.Info()
 		if err != nil {

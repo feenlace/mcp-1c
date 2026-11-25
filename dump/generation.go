@@ -234,7 +234,8 @@ const (
 	// files can now have different keys, so READY and flat v8 caches must rebuild.
 	// v10: conflicting manifest roots have distinct BSL docIDs qualified by
 	// their full relative paths.
-	dumpIndexSchemaVersion = 10
+	// v11: standalone forms and colliding BSL paths have distinct DocIDs.
+	dumpIndexSchemaVersion = 11
 
 	// zapSegmentVersion is the scorch zap segment format version used by every
 	// build path (buildShardOffline / buildIndexBuilder forceSegmentVersion) and
@@ -664,22 +665,8 @@ func (idx *Index) attachReadOnlyShards(genDir string, held *readerRegistration) 
 	idx.adoptClaim(reg)
 
 	shardDirs := cacheShardDirs(genDir)
-	// A GENERATION THAT VANISHED IS NOT AN EMPTY GENERATION, and nothing below can
-	// tell them apart on its own. cacheShardDirs swallows its ReadDir error and
-	// returns nil, openCachedShards does not treat an empty input as a failure, and
-	// LoadManifest reports a MISSING manifest as (nil, nil) — so loadNamesReadOnly
-	// falls back to walking the dump and the open finishes READY, with 5 names, 0
-	// shards, and every search answering "cannot perform operation on empty alias".
-	// MEASURED, exactly that, by removing the generation between the READY check and
-	// this call.
-	//
-	// It became reachable when a claim that cannot be written stopped refusing: the
-	// refusal used to catch the reaped generation on its way past, for the wrong
-	// reason. Reload has carried the same guard since the same defect was found
-	// there. READY is what separates the two cases: a reaper renames the whole
-	// directory out of the arena, taking the sentinel with it, while a genuinely
-	// empty dump builds a generation that keeps its sentinel and has nothing to
-	// shard.
+	// A reaper renames the entire directory, including READY. A genuine
+	// empty-dump generation has no shards and still carries its sentinel.
 	if len(shardDirs) == 0 && !generationReadyDir(genDir) {
 		// Close FIRST and outside mu (dropClaim takes it): Close waits for the
 		// heartbeat goroutine, and the heartbeat takes mu to report a lost claim.
@@ -1185,24 +1172,13 @@ func buildDirStale(tmpDir string, cutoff time.Time) bool {
 	return stale
 }
 
-// loadNamesReadOnly populates names/pathByName/pathToDocID from the generation's
-// manifest WITHOUT running the warm-start diff and WITHOUT any cache write. If
-// the generation has no manifest (e.g. an empty-dump generation), it falls back
-// to a read-only filesystem walk of the dump (loadBSLPaths), which also writes
-// nothing to the cache. Drift between dump and generation is impossible by gensig
-// construction, so no diff is needed.
+// loadNamesReadOnly installs the stored document IDs without consulting the
+// live dump for names or running the warm-start diff.
 func (idx *Index) loadNamesReadOnly(genDir string) error {
 	names, pathByName, pathToDocID, err := readGenerationNames(idx.dir, genDir)
 	if err != nil {
 		return err
 	}
-	if pathByName == nil {
-		// A nil map (never an empty one) is readGenerationNames' signal that the
-		// generation carries NO manifest. Fall back to a read-only walk of the dump,
-		// which populates the same three fields in place and writes nothing.
-		return idx.loadBSLPaths(idx.dir)
-	}
-
 	idx.mu.Lock()
 	// pathToDocID is not pre-initialized on every Index-creation path (NewIndex's
 	// reindex path reuses its own idx, which leaves it nil); init it lazily, as
@@ -1218,9 +1194,6 @@ func (idx *Index) loadNamesReadOnly(genDir string) error {
 		idx.pathToDocID[relPath] = docID
 	}
 	slices.Sort(idx.names)
-	// A generation's manifest carries one DocID per relative path, so duplicate
-	// DocIDs are the same collapse a cold build over those files would produce.
-	// Recorded here so a read-only serve reports it exactly as a build does.
 	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 	return nil
@@ -1232,17 +1205,17 @@ func (idx *Index) loadNamesReadOnly(genDir string) error {
 // while Reload builds the replacement state off to the side and only then swaps it
 // in, so a failure here can never leave a live index half-updated.
 //
-// A generation with no manifest (an empty-dump build) returns three nil
-// collections and a nil error; the caller then falls back to a filesystem walk.
-// Returning nil rather than empty maps is what distinguishes "no manifest" from
-// "a manifest listing no files" — the latter yields non-nil empty maps.
+// Empty-dump generations have neither a manifest nor shards.
 func readGenerationNames(dumpDir, genDir string) (names []string, pathByName, pathToDocID map[string]string, err error) {
 	manifest, err := LoadManifest(genDir)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("loading generation manifest: %w", err)
 	}
 	if manifest == nil {
-		return nil, nil, nil, nil
+		if len(cacheShardDirs(genDir)) != 0 {
+			return nil, nil, nil, fmt.Errorf("generation manifest missing or incompatible")
+		}
+		return nil, map[string]string{}, map[string]string{}, nil
 	}
 
 	names = make([]string, 0, len(manifest.Files))
@@ -1257,6 +1230,9 @@ func readGenerationNames(dumpDir, genDir string) (names []string, pathByName, pa
 		// read-only load correct by construction instead of relying on that argument,
 		// and is an allocation-free no-op on already-NFC keys.
 		docID := NFC(entry.DocID)
+		if _, duplicate := pathByName[docID]; duplicate {
+			return nil, nil, nil, fmt.Errorf("generation manifest contains duplicate document ID %q", docID)
+		}
 		names = append(names, docID)
 		pathByName[docID] = absPath
 		pathToDocID[relPath] = docID
@@ -1841,8 +1817,7 @@ func adoptFlatShards(cpath, gensig string, shardDirs []string, claim buildClaim)
 	}
 
 	// Move the flat manifest too so the adopted generation serves names from it
-	// (loadNamesReadOnly reads <genDir>/manifest.json). Absence is tolerated:
-	// loadNamesReadOnly falls back to a read-only dump walk.
+	// (loadNamesReadOnly reads <genDir>/manifest.json).
 	if src := manifestPath(cpath); fileExists(src) {
 		dst := manifestPath(tmpDir)
 		if err := os.Rename(src, dst); err != nil {

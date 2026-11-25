@@ -120,8 +120,7 @@ func assertNoExtNamespace(t *testing.T, names []string) {
 
 // TestWrapperWithoutAManifestStillMergesAndIsCounted is the ruling itself. The
 // wrapper carries no manifest at any depth, its content merges into the base
-// keyspace exactly as it did before the descent existed, and the collapse counter
-// measures what that costs.
+// namespace, with distinct IDs for files with the same key candidate.
 func TestWrapperWithoutAManifestStillMergesAndIsCounted(t *testing.T) {
 	const collidingKey = "Документ.Ном.МодульОбъекта"
 	if NFC(collidingKey) != collidingKey {
@@ -142,12 +141,8 @@ func TestWrapperWithoutAManifestStillMergesAndIsCounted(t *testing.T) {
 
 	idx, names := buildNoManifestIndex(t, root)
 
-	// The keys did not move. Two files, one key, kept with multiplicity by
-	// ModuleNames, which is what lets the counter below be checked at all.
-	want := []string{collidingKey, collidingKey}
-	if !slices.Equal(names, want) {
-		t.Errorf("module keys = %v, want %v: a wrapper with no manifest must merge into "+
-			"the base namespace, not acquire one of its own", names, want)
+	if len(names) != 2 || names[0] == names[1] || slices.Contains(names, collidingKey) {
+		t.Errorf("modules without an extension manifest need distinct base namespace IDs: %v", names)
 	}
 	assertNoExtNamespace(t, names)
 
@@ -163,22 +158,8 @@ func TestWrapperWithoutAManifestStillMergesAndIsCounted(t *testing.T) {
 			"not a doubt, it is an answer. Full summary: %+v", summary)
 	}
 
-	// AND IT IS COUNTED. This is the half that makes the ruling defensible: the
-	// merge is lossy, and the loss is reported as a number rather than left to be
-	// discovered. Two files on one key is Files 1 and Keys 1 by the arithmetic
-	// collapsedKeysOf states, total assignments minus distinct names.
-	st := idx.CollapsedKeys()
-	if st.Files <= 0 {
-		t.Errorf("CollapsedKeys().Files = %d, want more than 0: the wrapper's module and "+
-			"the configuration's module derive one key and one of them is no longer "+
-			"servable. Full state: %+v", st.Files, st)
-	}
-	if st.Files != 1 || st.Keys != 1 {
-		t.Errorf("CollapsedKeys() = %+v, want Files 1 and Keys 1 for two files on one key", st)
-	}
-	if !slices.Equal(st.Sample, []string{collidingKey}) {
-		t.Errorf("CollapsedKeys().Sample = %v, want [%q]: the notice must name the key that "+
-			"collapsed", st.Sample, collidingKey)
+	if st := idx.CollapsedKeys(); st.Files != 0 || st.Keys != 0 {
+		t.Errorf("qualified base keys should preserve both files: %+v", st)
 	}
 }
 

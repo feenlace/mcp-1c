@@ -149,7 +149,14 @@ func TestCollapsedKeyIsScannedOncePerKeyNotOncePerFile(t *testing.T) {
 		"Процедура Один()\nКонецПроцедуры\n")
 	writeSearchFixture(t, dir, "Доработки — копия/Catalogs/Товары/Ext/ObjectModule.bsl",
 		"Процедура Два()\nКонецПроцедуры\n")
-	idx := openBuiltIndex(t, dir)
+	// The direct loader supplies a legacy duplicate to exercise the scan's
+	// deduplication independently of the production key assignment.
+	idx := bareIndex(t, dir)
+	if err := idx.loadBSLFiles(dir); err != nil {
+		t.Fatal(err)
+	}
+	idx.pathIndex = NewPathIndex(idx.names)
+	idx.ready.Store(true)
 
 	// CONTROL: the fixture really does collapse. Without this the assertions below
 	// would also pass on a tree where the two files never shared a key.

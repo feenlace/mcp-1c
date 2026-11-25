@@ -2,52 +2,9 @@ package dump
 
 import "slices"
 
-// Collapsed keys: making a silent loss of module content countable.
-//
-// WHAT COLLAPSES. Every loader turns a dump-relative path into a module name via
-// bslPathToModuleName and uses that name as the key of plain maps
-// (contentByName[name], pathByName[name], pathToDocID's value). Two files
-// deriving one name is therefore not a warning and not an error: the second write
-// wins and the first file's content becomes unreachable through every read path
-// the index has. Meanwhile idx.names keeps BOTH entries, so ModuleCount() reports
-// the number of files walked and nothing reports the number that can still be
-// read. The count lies, quietly, in the direction that flatters the server.
-//
-// The observed cause is a dump root pointed one level too high; the anchor scan
-// in bslPathToModuleName removes that cause for every kind this package knows.
-// This file is the OTHER half, and it is not redundant with the fix: it measures
-// the outcome rather than predicting it, so a collapse arriving through a cause
-// nobody has thought of is still counted.
-//
-// WHY IT IS EXACT AND NOT A RATIO. The first proposal was to flag a dump when
-// distinct*2 < total. Arithmetic refutes it: a half-shifted tree yields 6793
-// distinct keys over 13575 files, and 6793*2 = 13586 is not less than 13575, so
-// the rule stays silent by a margin of 11 while 6782 files have already lost
-// their content. Every threshold over the same two totals has a hole of that
-// shape. What is counted here is the overwrites themselves.
-//
-// WHY IT IS RECOMPUTED AND NEVER PERSISTED. Nothing on disk needs to change, and
-// that is a deliberate conclusion rather than an omission. Every load path
-// already materialises the whole multiset of module names in memory before it
-// finishes: the filesystem loaders derive one name per .bsl they actually load
-// (loadBSLFiles skips a file it cannot stat or read, and such a file is absent
-// from idx.names and from the maps alike, so the two stay consistent), and the
-// manifest-backed loaders read one DocID per manifest entry. The duplicates are
-// therefore present at the moment the load ends, and deriving the number costs
-// one pass. Persisting it would put a new field in the generation manifest, which
-// is the on-disk format the BUMP PROTOCOL in generation.go governs: that would
-// force dumpIndexSchemaVersion up and invalidate every warm generation on every
-// installation, to carry a number that can be recomputed for free. That reasoning
-// is about THIS report and is unaffected by anything below it: a recomputed number
-// needs no format, so it needs no bump.
-//
-// dumpIndexSchemaVersion HAS since gone from 3 to 4, and it was not this file that
-// moved it. Two later changes did: dumpDirNames gained the kinds a configuration
-// declares, and the wrongly rooted user whose collapsed DocIDs are PERSISTED in a
-// generation manifest would otherwise never receive the anchor fix at all. The
-// argument for that bump lives at dumpIndexSchemaVersion in generation.go and the
-// proof of it in cache_invalidation_test.go; what is said here remains what it
-// said, which is that the collapse REPORT costs no bump of its own.
+// The collapse report counts repeated document IDs in the installed name
+// table. Production dump loaders qualify duplicate key candidates before
+// installing them. The report describes assigned IDs and is derived in memory.
 
 // collapsedKeySampleLimit caps how many colliding module names are carried for
 // display. The COUNTS are never capped: a report that rounded off the number of

@@ -211,18 +211,17 @@ func TestLoadPathsReportCollapsedKeys(t *testing.T) {
 			if n := idx.ModuleCount(); n != 4 {
 				t.Fatalf("ModuleCount = %d, want 4: the fixture wrote four .bsl files", n)
 			}
-			if n := idx.CollapsedKeyCount(); n != 1 {
-				t.Errorf("CollapsedKeyCount = %d, want 1", n)
+			wantCollapsed := 0
+			if name == "loadBSLFiles" {
+				wantCollapsed = 1
 			}
 			st := idx.CollapsedKeys()
-			if st.Keys != 1 {
-				t.Errorf("Keys = %d, want 1", st.Keys)
+			if st.Files != wantCollapsed || st.Keys != wantCollapsed {
+				t.Errorf("collapsed = %+v, want %d file and key collisions", st, wantCollapsed)
 			}
-			if !slices.Contains(st.Sample, key) {
-				t.Errorf("Sample = %v, want it to name the collapsed key %q", st.Sample, key)
+			if slices.Contains(st.Sample, key) != (wantCollapsed != 0) {
+				t.Errorf("Sample = %v, want presence of %q to match collapse count", st.Sample, key)
 			}
-			// The number that lies, stated next to the one that does not: four
-			// files were counted, one of them can no longer be read back.
 			if len(idx.pathByName) != idx.ModuleCount()-idx.CollapsedKeyCount() {
 				t.Errorf("pathByName holds %d entries but ModuleCount-CollapsedKeyCount = %d; "+
 					"the collapse count does not describe the map it is about",

@@ -279,15 +279,6 @@ func (idx *Index) Reload() (ReloadReport, error) {
 		rep.Elapsed = time.Since(start)
 		return rep, fmt.Errorf("dump: reading the new generation's manifest: %w", err)
 	}
-	if pathByName == nil {
-		// No manifest: the generation is an empty-dump build. The live open path
-		// falls back to a filesystem walk here, but that walk writes into the
-		// Index in place, which is exactly what a reload must not do before the
-		// swap. Treat it as an empty generation instead and let the emptiness
-		// guard below decide.
-		names, pathByName, pathToDocID = []string{}, map[string]string{}, map[string]string{}
-	}
-
 	// Emptiness guard. A dump directory that momentarily reads as empty — an
 	// unmounted share, a dump interrupted halfway, a wrong --dump path that now
 	// resolves somewhere bare — walks cleanly and builds a valid, EMPTY

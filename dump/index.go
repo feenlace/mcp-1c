@@ -734,6 +734,10 @@ func anchorIndex(parts []string) int {
 // (ext.<extension>.<Normalize(module)>), so code_read/module_code can find
 // extension modules in a Hierarchical dump.
 func bslPathToModuleName(relPath string) string {
+	return deriveBSLModuleName(relPath, true)
+}
+
+func deriveBSLModuleName(relPath string, standaloneForms bool) string {
 	// Normalise separators.
 	relPath = filepath.ToSlash(relPath)
 	parts := strings.Split(relPath, "/")
@@ -742,18 +746,11 @@ func bslPathToModuleName(relPath string) string {
 	// too high derives the same keys as a correctly pointed one instead of
 	// collapsing the keyspace. A no-op (anchorIndex == 0) at a correct root, on
 	// all 13575 paths of the measured corpus; see the anchor-scan block above.
-	parts = parts[anchorIndex(parts):]
+	anchor := anchorIndex(parts)
+	parts = parts[anchor:]
 
-	// The returned name is the KEY for every downstream map (idx.names,
-	// contentByName, pathByName, pathToDocID, the Bleve doc id and the
-	// PathIndex). macOS unpacks dumps with the decomposable Cyrillic letters
-	// (short-I / IO) in Unicode NFD, whereas queries and XML-content-derived
-	// names are NFC, so an NFD path-derived key would never match an NFC lookup.
-	// Each return is therefore wrapped in NFC(...) to normalise the key at this
-	// single chokepoint. The raw on-disk path used for file I/O is kept separately
-	// by callers (pathByName values), so files still open. NFC is an allocation-
-	// free no-op on already-NFC input (prod/Windows/HTTP).
-
+	// Use NFC for the key so lookups match decomposed names on macOS.
+	// The raw path stays separate for file I/O and collision qualification.
 	if len(parts) < 2 {
 		return NFC(relPath)
 	}
@@ -795,6 +792,11 @@ func bslPathToModuleName(relPath string) string {
 		return NFC("ext." + extName + "." + baseConfigModuleName(parts[2:]))
 	}
 
+	if n := len(parts); standaloneForms && anchor == 0 && !(dumpRootMarker(parts[0]) && anchorShapeOK(parts)) && n >= 6 &&
+		parts[n-5] == "Forms" && parts[n-4] != "" && parts[n-6] != "" &&
+		parts[n-3] == "Ext" && parts[n-2] == "Form" && parts[n-1] == "Module.bsl" {
+		return "Форма." + encodeKeyPath(NFC(strings.Join(parts[:n-3], "/"))) + ".МодульФормы"
+	}
 	return NFC(baseConfigModuleName(parts))
 }
 
@@ -1489,12 +1491,8 @@ func (opts IndexOptions) newIndex(dir, cacheDir string, reindex, prewarm bool) (
 				go func() {
 					defer close(idx.done)
 					if err := idx.loadFromManifestAndDiff(cpath, manifest, prewarm); err != nil {
-						// Fallback: walk filesystem if manifest-based load fails.
-						slog.Warn("Manifest load failed, falling back to walk", "error", err)
-						if err := idx.loadBSLPaths(dir); err != nil {
-							idx.setBuildErr(err)
-							return
-						}
+						idx.setBuildErr(err)
+						return
 					}
 
 					if idx.Ready() || idx.BuildError() != nil {
@@ -2273,7 +2271,7 @@ func (idx *Index) loadBSLPaths(dir string) error {
 	if err != nil {
 		return err
 	}
-	idx.installBSLPaths(dir, paths, idx.layout().finalizeNamespaces(slices.Values(paths)))
+	idx.installBSLPaths(dir, paths, assignBSLDocIDs(paths, idx.layout()))
 	return nil
 }
 
@@ -2281,7 +2279,55 @@ func indexableBSLPath(dir, path string, entry fs.DirEntry) bool {
 	return entry.Type()&fs.ModeSymlink == 0 || pathWithinRoot(dir, path)
 }
 
-func (idx *Index) installBSLPaths(dir string, paths []string, layout extensionLayout) {
+// assignBSLDocIDs keeps unambiguous keys and assigns every member of a
+// collision a key carrying its complete raw relative path.
+func assignBSLDocIDs(paths []string, layout extensionLayout) map[string]string {
+	layout = layout.finalizeNamespaces(slices.Values(paths))
+	ids := make(map[string]string, len(paths))
+	counts := make(map[string]int, len(paths))
+	for _, path := range paths {
+		key := layout.moduleKey(path)
+		ids[path] = key
+		counts[key]++
+	}
+	for _, path := range paths {
+		key := ids[path]
+		if counts[key] == 1 {
+			continue
+		}
+		prefix, suffix := collisionKeyParts(key, path)
+		// The path encoding cannot contain '@', so distinct paths have
+		// distinct qualifiers. Reserve all original keys, even old ambiguous ones.
+		for counts[prefix+suffix] != 0 {
+			prefix += "@"
+		}
+		ids[path] = prefix + suffix
+	}
+	return ids
+}
+
+func collisionKeyParts(key, path string) (prefix, suffix string) {
+	prefix = key
+	if dot := strings.LastIndexByte(key, '.'); dot >= 0 {
+		prefix, suffix = key[:dot], key[dot:]
+	}
+	return prefix + extensionRootSeparator + encodeKeyPath(path), suffix
+}
+
+// isAssignedBSLKey also recognizes a base key qualified because it collided.
+func isAssignedBSLKey(id, key, path string) bool {
+	if id == key {
+		return true
+	}
+	prefix, suffix := collisionKeyParts(key, path)
+	rest, matched := strings.CutPrefix(id, prefix)
+	if !matched {
+		return false
+	}
+	return strings.TrimLeft(rest, "@") == suffix
+}
+
+func (idx *Index) installBSLPaths(dir string, paths []string, ids map[string]string) {
 	names := make([]string, 0, len(paths))
 	pathByName := make(map[string]string, len(paths))
 	pathToDocID := make(map[string]string, len(paths))
@@ -2290,7 +2336,7 @@ func (idx *Index) installBSLPaths(dir string, paths []string, layout extensionLa
 		if err != nil {
 			continue
 		}
-		name := layout.moduleKey(rel)
+		name := ids[rel]
 		names = append(names, name)
 		pathByName[name] = absPath
 		pathToDocID[rel] = name
@@ -2438,7 +2484,7 @@ const extKeyPrefix = extKeyNamespace + "."
 //
 // THE PRICE, STATED RATHER THAN HIDDEN. A dump root can hold a directory literally
 // named «ext» — the customer whose tree started all of this had one — and
-// "ext/Ном/Forms/Ф/Ext/Form/Module.bsl" derives "ext.Ном.Форма.Ф.МодульФормы" with
+// "ext/Ном/Forms/Ф/Ext/Module.bsl" derives "ext.Ном.Форма.Ф.МодульФормы" with
 // no extension anywhere in it. That key is now in the namespace. It is the same
 // answer the consumer's predicate has always given for it, on the marker, in the
 // inventory and in the listing, so this makes those surfaces agree rather than
@@ -3146,40 +3192,24 @@ func (idx *Index) filterModules(namespace, category, moduleType string) ([]strin
 // incremental updates using a single filesystem walk (via Diff). This is the fastest
 // startup path: manifest provides names/paths, Diff detects changes.
 func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, prewarm bool) error {
-	layout := idx.layout()
-
-	// Reuse the diff walk for paths whose IDs can change together. Also
-	// look for stored qualifiers when the last recognised root is gone.
-	checkLayout := !layout.empty()
-	if !checkLayout {
-		for _, file := range manifest.Files {
-			rest, ext := strings.CutPrefix(file.DocID, "ext.")
-			namespace, _, _ := strings.Cut(rest, ".")
-			if ext && strings.Contains(namespace, extensionRootSeparator) {
-				checkLayout = true
-				break
-			}
-		}
-	}
 	var paths []string
-	var visit func(string, string, fs.DirEntry)
-	if checkLayout {
-		visit = func(rel, path string, entry fs.DirEntry) {
-			if indexableBSLPath(idx.dir, path, entry) {
-				paths = append(paths, rel)
-			}
+	diff, err := manifest.diff(idx.dir, func(rel, path string, entry fs.DirEntry) bool {
+		if !indexableBSLPath(idx.dir, path, entry) {
+			return false
 		}
-	}
-	diff, err := manifest.diff(idx.dir, visit)
+		paths = append(paths, rel)
+		return true
+	})
 	if err != nil {
 		return fmt.Errorf("computing diff: %w", err)
 	}
-	if checkLayout && !diff.Empty() {
-		layout = layout.finalizeNamespaces(slices.Values(paths))
+
+	var ids map[string]string
+	if !diff.Empty() {
+		ids = assignBSLDocIDs(paths, idx.layout())
 		for _, path := range paths {
-			if prior, ok := manifest.Files[path]; ok && NFC(prior.DocID) != layout.moduleKey(path) {
-				idx.rebuildAfterLayoutChange(cacheDir, paths, layout, prewarm)
-				return nil
+			if prior, ok := manifest.Files[path]; ok && NFC(prior.DocID) != ids[path] {
+				return idx.rebuildAfterLayoutChange(cacheDir, paths, ids, prewarm)
 			}
 		}
 	}
@@ -3201,17 +3231,15 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 		// any cache this binary rebuilt). The relPath KEY is the raw on-disk path and
 		// stays unchanged so file I/O and the Diff below still match.
 		docID := NFC(entry.DocID)
+		if _, duplicate := idx.pathByName[docID]; duplicate {
+			idx.mu.Unlock()
+			return fmt.Errorf("flat index manifest contains duplicate document ID %q", docID)
+		}
 		idx.names = append(idx.names, docID)
 		idx.pathByName[docID] = absPath
 		idx.pathToDocID[relPath] = docID
 	}
 	slices.Sort(idx.names)
-	// The manifest is keyed by relative path and carries one DocID per entry, so
-	// two entries sharing a DocID are exactly the collapse the cold build would
-	// have produced from the same files. Recorded here so the report is already
-	// right for the commonest warm start, the one over an unchanged dump, before
-	// the filesystem walk below runs. It is recorded AGAIN after the diff, because
-	// the diff can change the answer in both directions; see there.
 	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 
@@ -3269,7 +3297,7 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 			slog.Warn("Cannot read file", "path", relPath, "error", err)
 			continue
 		}
-		docID := layout.moduleKey(relPath)
+		docID := ids[relPath]
 		content := stripBOM(string(data))
 
 		parts := parseModuleName(docID)
@@ -3310,36 +3338,9 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 		slog.Info("Incremental update", "added", len(diff.Added), "modified", len(diff.Modified), "deleted", len(diff.Deleted))
 	}
 
-	// RE-RECORD, AND FROM pathToDocID RATHER THAN FROM names.
-	//
-	// The report published before the diff was justified by two claims, and both
-	// were measured false, in opposite directions.
-	//
-	// «The diff can only ADD to the picture» is false: the deletion loop above
-	// removes names. Measured, on a two-root fixture whose files collide on one
-	// key, deleting one of the two colliding files leaves a warm start reporting
-	// files=1 keys=1 and printing the name of a module that is now perfectly
-	// readable.
-	//
-	// «Its additions are dedup-guarded» is true of idx.names and false as a reason
-	// the COUNT stays right. The guard refuses to append a docID already present in
-	// pathByName or contentByName, which is precisely the case a duplicate key
-	// arrives in, so a duplicate introduced by the diff never reaches idx.names and
-	// a report counted from idx.names cannot see it. Measured on the same fixture,
-	// adding a THIRD file that collides with a manifest entry gives files=0 keys=0
-	// while one file's content is unreachable through every map the index reads.
-	// That is the silent loss this counter exists to make countable.
-	//
-	// pathToDocID is the right multiset: one entry per dump FILE, kept in step by
-	// both loops above, so a duplicate value is exactly one file whose content the
-	// maps no longer hold. idx.names cannot be that multiset here, because the
-	// addition path deliberately keeps it deduplicated.
 	idx.mu.Lock()
-	docIDs := make([]string, 0, len(idx.pathToDocID))
-	for _, id := range idx.pathToDocID {
-		docIDs = append(docIDs, id)
-	}
-	idx.noteCollapsedKeys(docIDs)
+	slices.Sort(idx.names)
+	idx.noteCollapsedKeys(idx.names)
 	idx.mu.Unlock()
 
 	// Save updated manifest.
@@ -3350,7 +3351,7 @@ func (idx *Index) loadFromManifestAndDiff(cacheDir string, manifest *Manifest, p
 
 // A surviving path changing docID invalidates shard placement. Rebuild
 // outside the flat cache before any incremental writes.
-func (idx *Index) rebuildAfterLayoutChange(cpath string, paths []string, layout extensionLayout, prewarm bool) {
+func (idx *Index) rebuildAfterLayoutChange(cpath string, paths []string, ids map[string]string, prewarm bool) error {
 	if idx.lockDir != "" {
 		removeCacheLock(idx.lockDir)
 		idx.lockDir = ""
@@ -3362,19 +3363,16 @@ func (idx *Index) rebuildAfterLayoutChange(cpath string, paths []string, layout 
 	}
 	idx.shards = nil
 	if closeErr != nil {
-		idx.setBuildErr(fmt.Errorf("closing outdated flat shards: %w", closeErr))
-		return
+		return fmt.Errorf("closing outdated flat shards: %w", closeErr)
 	}
 
 	if prewarm {
-		if err := idx.prewarmGeneration(cpath); err != nil {
-			idx.setBuildErr(err)
-		}
-		return
+		return idx.prewarmGeneration(cpath)
 	}
 	slog.Warn("Flat cache keys changed, building the current index in memory", "path", cpath)
-	idx.installBSLPaths(idx.dir, paths, layout)
+	idx.installBSLPaths(idx.dir, paths, ids)
 	idx.buildLoadedShards("", false)
+	return idx.BuildError()
 }
 
 func (idx *Index) prewarmGeneration(cpath string) error {
